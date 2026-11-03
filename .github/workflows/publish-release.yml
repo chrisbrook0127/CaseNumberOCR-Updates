@@ -1,0 +1,35 @@
+name: Publish M.F. Case Number OCR release
+
+on:
+  push:
+    branches:
+      - "publish/**"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release package
+        uses: actions/checkout@v4
+
+      - name: Create GitHub release and attach update ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          TAG="${RELEASE_BRANCH#publish/}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release branch: $RELEASE_BRANCH"
+            exit 1
+          fi
+          test -s release-assets/CaseNumberOCR_Update.zip
+          gh release create "$TAG" \
+            release-assets/CaseNumberOCR_Update.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "M.F. Case Number OCR $TAG" \
+            --notes "M.F. Case Number OCR update package. The in-app updater downloads this asset and restarts the application after installation." \
+            --target main \
+            --latest
