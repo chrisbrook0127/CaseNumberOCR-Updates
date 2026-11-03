@@ -18,30 +18,34 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Rebuild and verify update ZIP
+        env:
+          EXPECTED_SHA_FILE: release-assets/EXPECTED_SHA256.txt
         run: |
-          mkdir -p release-assets
-          cat release-assets/payload/part*.txt | tr -d '\\r\\n' | base64 --decode > release-assets/CaseNumberOCR_Update.zip
+          cat release-assets/payload/part*.txt | base64 --decode > release-assets/CaseNumberOCR_Update.zip
           unzip -tq release-assets/CaseNumberOCR_Update.zip
           test -s release-assets/CaseNumberOCR_Update.zip
-          sha256sum release-assets/CaseNumberOCR_Update.zip
+          EXPECTED_SHA="$(cat "$EXPECTED_SHA_FILE")"
+          ACTUAL_SHA="$(sha256sum release-assets/CaseNumberOCR_Update.zip | cut -d ' ' -f1)"
+          echo "Expected SHA256: $EXPECTED_SHA"
+          echo "Actual SHA256:   $ACTUAL_SHA"
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
 
       - name: Publish or replace GitHub release asset
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: \${{ github.token }}
         run: |
-          TAG="$(tr -d '\\r\\n' < release-assets/RELEASE_TAG.txt)"
-          if [[ ! "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
+          TAG="$(cat release-assets/RELEASE_TAG.txt)"
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Invalid release tag: $TAG"
             exit 1
           fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip \\
-              --repo "$GITHUB_REPOSITORY" \\
-              --title "M.F. Case Number OCR $TAG" \\
-              --notes "M.F. Case Number OCR update package. Use the app's UPDATE button to install; the application closes and restarts after installation." \\
-              --target main \\
-              --latest
+            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "M.F. Case Number OCR update package. Use the app's UPDATE button to install; the application closes and restarts after installation." --target main --latest
           fi
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
+          RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "CaseNumberOCR_Update.zip") | .digest')"
+          EXPECTED_SHA="$(cat release-assets/EXPECTED_SHA256.txt)"
+          test "$RELEASE_DIGEST" = "sha256:$EXPECTED_SHA"
+          echo "Published $TAG with verified CaseNumberOCR_Update.zip"
