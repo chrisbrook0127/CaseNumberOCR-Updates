@@ -32,10 +32,10 @@ jobs:
 
       - name: Publish or replace GitHub release asset
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           TAG="$(cat release-assets/RELEASE_TAG.txt)"
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+.[0-9]+.[0-9]+$'; then
             echo "Invalid release tag: $TAG"
             exit 1
           fi
