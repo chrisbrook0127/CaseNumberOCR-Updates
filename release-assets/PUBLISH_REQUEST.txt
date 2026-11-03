@@ -1,1 +1,1 @@
-Publish or replace the v3.3.4 release asset after rebuilding and verifying the update ZIP.
+Retry publication of verified V3.3.4 package after correcting workflow authentication.
