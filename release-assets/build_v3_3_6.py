@@ -21,7 +21,7 @@ def replace_method_block(source, start_name, end_name, replacement):
     end = source.find(f"    def {end_name}(", start + 1)
     if start < 0 or end < 0:
         raise RuntimeError(f"Could not find method block {start_name}..{end_name}")
-    return source[:start] + replacement.rstrip() + "\\n\\n" + source[end:]
+    return source[:start] + replacement.rstrip() + "\n\n" + source[end:]
 
 
 def replace_once(source, old, new, label):
@@ -666,8 +666,14 @@ src = replace_once(
 src = replace_once(
     src,
     '            db = learning_dir / "learning_examples_v3.json"\n            with self.data_lock:\n',
-    '            self._wait_for_learning_control()\n            db = learning_dir / "learning_examples_v3.json"\n            with self.data_lock:\n',
-    "stop check before model activation metadata"
+    '            db = learning_dir / "learning_examples_v3.json"\n            with self.data_lock:\n',
+    "model update metadata block"
+)
+src = replace_once(
+    src,
+    '            if improved:\n                report(94, "Validation improved. Saving and activating the updated model...")\n',
+    '            self._wait_for_learning_control()\n            if improved:\n                report(94, "Validation improved. Saving and activating the updated model...")\n',
+    "stop before activating model"
 )
 src = replace_once(
     src,
@@ -874,6 +880,12 @@ src = replace_once(
 )
 src = src.replace('self.pause_btn.config(state="disabled", text="PAUSE SCAN")',
                   'self.pause_btn.config(state="disabled", text="PAUSE")')
+src = re.sub(
+    r'self\\.restart_btn\\.config\\(state="normal"\\)',
+    'self.restart_btn.config(state="normal", text="RESTART")',
+    src
+)
+
 src = src.replace('self.finish_batch_btn.config(state="normal")',
                   'self._refresh_learning_button_state()')
 
