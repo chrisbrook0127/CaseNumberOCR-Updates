@@ -1,1 +1,1 @@
-Inspect V3.3.5 source package for next feature update.
+Run source inspection using the inspection-only workflow.
