@@ -19,30 +19,36 @@ jobs:
 
       - name: Rebuild and verify update ZIP
         env:
-          EXPECTED_SHA_FILE: release-assets/EXPECTED_SHA256.txt
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          EXPECTED_SHA_FILE: release-assets/EXPECTED_SHA256.txt
         run: |
-          if [ -f release-assets/BUILD_V3_3_5.txt ]; then
+          if [ -f release-assets/BUILD_V3_3_6.txt ]; then
             mkdir -p release-assets/base
-            gh release download v3.3.4 --repo "$GITHUB_REPOSITORY" --pattern "CaseNumberOCR_Update.zip" --dir release-assets/base
-            python3 release-assets/build_v3_3_5.py release-assets/base/CaseNumberOCR_Update.zip release-assets/CaseNumberOCR_Update.zip
+            gh release download v3.3.5 --repo "$GITHUB_REPOSITORY" --pattern "CaseNumberOCR_Update.zip" --dir release-assets/base
+            python3 release-assets/build_v3_3_6.py release-assets/base/CaseNumberOCR_Update.zip release-assets/CaseNumberOCR_Update.zip
           else
             cat release-assets/payload/part*.txt | base64 --decode > release-assets/CaseNumberOCR_Update.zip
           fi
           unzip -tq release-assets/CaseNumberOCR_Update.zip
-          test -s release-assets/CaseNumberOCR_Update.zip
-          EXPECTED_SHA="$(cat "$EXPECTED_SHA_FILE")"
           ACTUAL_SHA="$(sha256sum release-assets/CaseNumberOCR_Update.zip | cut -d ' ' -f1)"
+          EXPECTED_SHA="$(cat "$EXPECTED_SHA_FILE")"
           echo "Expected SHA256: $EXPECTED_SHA"
           echo "Actual SHA256:   $ACTUAL_SHA"
-          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
+          if [ "$EXPECTED_SHA" != "PENDING" ]; then
+            test "$ACTUAL_SHA" = "$EXPECTED_SHA"
+          fi
 
       - name: Publish or replace GitHub release asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="$(cat release-assets/RELEASE_TAG.txt)"
+          EXPECTED_SHA="$(cat release-assets/EXPECTED_SHA256.txt)"
+          if [ "$EXPECTED_SHA" = "PENDING" ]; then
+            echo "Build passed. Waiting for the independently recorded SHA256 before publishing."
+            exit 0
+          fi
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+.[0-9]+.[0-9]+$'; then
             echo "Invalid release tag: $TAG"
             exit 1
@@ -50,10 +56,9 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "V3.3.5 repairs the Desktop shortcut through the app's UPDATE button. The app closes, installs the fix, repairs the shortcut, and restarts. No case PDFs or local learning data are included." --target main --latest
+            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "V3.3.6 simplifies the coworker workflow, fixes sequence matching, and updates learning incrementally. Use the app UPDATE button to install. Existing PDFs and saved learning examples are preserved." --target main --latest
           fi
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "CaseNumberOCR_Update.zip") | .digest')"
-          EXPECTED_SHA="$(cat release-assets/EXPECTED_SHA256.txt)"
+          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == \"CaseNumberOCR_Update.zip\") | .digest')"
           test "$RELEASE_DIGEST" = "sha256:$EXPECTED_SHA"
           echo "Published $TAG with verified CaseNumberOCR_Update.zip"
