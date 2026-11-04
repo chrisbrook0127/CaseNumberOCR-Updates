@@ -1,1 +1,1 @@
-Verify hashlib dependency and rebuild V3.3.6.
+Build V3.3.6 after safe hashlib import insertion.
