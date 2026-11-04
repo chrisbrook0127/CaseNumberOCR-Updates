@@ -1,1 +1,1 @@
-Build and validate V3.3.6 after generator syntax correction.
+Retry V3.3.6 build after progress-control patch correction.
