@@ -495,9 +495,9 @@ new_training = r'''    def _pending_learning_examples(self):
                 "There are not enough usable new examples yet. Your corrections are saved.")
             return
 '''
-src = replace_method(src, "_maybe_train_trocr", new_training)
-# Replace _finish_import_batch separately because replace_method above consumed only _maybe method.
+maybe_method = new_training[:new_training.find("    def _finish_import_batch")].rstrip()
 finish_method = new_training[new_training.find("    def _finish_import_batch"):].rstrip()
+src = replace_method(src, "_maybe_train_trocr", maybe_method)
 src = replace_method(src, "_finish_import_batch", finish_method)
 
 # Save a stable ID on each new verified crop.
