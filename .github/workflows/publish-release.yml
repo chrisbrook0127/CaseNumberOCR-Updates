@@ -59,6 +59,6 @@ jobs:
             gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "V3.3.6 simplifies the coworker workflow, fixes sequence matching, and updates learning incrementally. Use the app UPDATE button to install. Existing PDFs and saved learning examples are preserved." --target main --latest
           fi
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == \"CaseNumberOCR_Update.zip\") | .digest')"
+          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "CaseNumberOCR_Update.zip") | .digest')"
           test "$RELEASE_DIGEST" = "sha256:$EXPECTED_SHA"
           echo "Published $TAG with verified CaseNumberOCR_Update.zip"
