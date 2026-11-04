@@ -1,64 +1,24 @@
-name: Publish M.F. Case Number OCR release
-
+name: Inspect V3.3.6 normalized training type
 on:
   push:
     branches:
       - "publish/**"
     paths:
       - "release-assets/PUBLISH_REQUEST.txt"
-
 permissions:
   contents: write
-
 jobs:
-  publish-release:
+  inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out release package
-        uses: actions/checkout@v4
-
-      - name: Rebuild and verify update ZIP
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          EXPECTED_SHA_FILE: release-assets/EXPECTED_SHA256.txt
-        run: |
-          if [ -f release-assets/BUILD_V3_3_6.txt ]; then
-            mkdir -p release-assets/base
-            gh release download v3.3.5 --repo "$GITHUB_REPOSITORY" --pattern "CaseNumberOCR_Update.zip" --dir release-assets/base
-            python3 release-assets/build_v3_3_6.py release-assets/base/CaseNumberOCR_Update.zip release-assets/CaseNumberOCR_Update.zip
-          else
-            cat release-assets/payload/part*.txt | base64 --decode > release-assets/CaseNumberOCR_Update.zip
-          fi
-          unzip -tq release-assets/CaseNumberOCR_Update.zip
-          ACTUAL_SHA="$(sha256sum release-assets/CaseNumberOCR_Update.zip | cut -d ' ' -f1)"
-          EXPECTED_SHA="$(cat "$EXPECTED_SHA_FILE")"
-          echo "Expected SHA256: $EXPECTED_SHA"
-          echo "Actual SHA256:   $ACTUAL_SHA"
-          if [ "$EXPECTED_SHA" != "PENDING" ]; then
-            test "$ACTUAL_SHA" = "$EXPECTED_SHA"
-          fi
-
-      - name: Publish or replace GitHub release asset
+      - uses: actions/checkout@v4
+      - name: Extract method and calls
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="$(cat release-assets/RELEASE_TAG.txt)"
-          EXPECTED_SHA="$(cat release-assets/EXPECTED_SHA256.txt)"
-          if [ "$EXPECTED_SHA" = "PENDING" ]; then
-            echo "Build passed. Waiting for the independently recorded SHA256 before publishing."
-            exit 0
-          fi
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+.[0-9]+.[0-9]+$'; then
-            echo "Invalid release tag: $TAG"
-            exit 1
-          fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "V3.3.6 simplifies the coworker workflow, fixes sequence matching, and updates learning incrementally. Use the app UPDATE button to install. Existing PDFs and saved learning examples are preserved." --target main --latest
-          fi
-          RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "CaseNumberOCR_Update.zip") | .digest')"
-          test "$RELEASE_DIGEST" = "sha256:$EXPECTED_SHA"
-          echo "Published $TAG with verified CaseNumberOCR_Update.zip"
+          python3 release-assets/inspect_337.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/inspect337/normalized_type_report.txt
+          git commit -m "Inspect V3.3.6 normalized training type"
+          git push
