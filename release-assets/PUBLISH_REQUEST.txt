@@ -1,1 +1,1 @@
-Run source inspection using the inspection-only workflow.
+Extract source excerpts for implementation planning.
