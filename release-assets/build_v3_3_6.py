@@ -921,12 +921,6 @@ src = replace_once(
 )
 
 # Make the auto-confirm flag non-optional and lock the threshold to 95 across scans.
-src = replace_once(
-    src,
-    '            if self.auto_label_var.get():\n                self._get_auto_threshold()\n',
-    '            self.auto_label_var.set(True)\n            self.auto_threshold_var.set("95")\n',
-    "fixed automatic confirmation threshold"
-)
 # Keep the hidden flag enabled even after any legacy persisted settings are loaded.
 src = replace_once(
     src,
