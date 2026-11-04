@@ -1022,7 +1022,11 @@ if "Minimum OCR score %" in src or "OCR score is a detector score" in src:
 
 with zipfile.ZipFile(OUT, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for name, data in files.items():
-        z.writestr(name, data)
+        info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.create_system = 3
+        info.external_attr = 0o100644 << 16
+        z.writestr(info, data)
 with zipfile.ZipFile(OUT, "r") as z:
     bad = z.testzip()
     if bad:
