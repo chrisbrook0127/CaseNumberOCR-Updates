@@ -1,1 +1,1 @@
-Final V3.3.6 build after correcting AST UI check.
+Publish V3.3.6 after rebuilding and verifying the recorded package SHA256.
