@@ -20,8 +20,16 @@ jobs:
       - name: Rebuild and verify update ZIP
         env:
           EXPECTED_SHA_FILE: release-assets/EXPECTED_SHA256.txt
+          GH_TOKEN: \${{ github.token }}
+          GITHUB_REPOSITORY: \${{ github.repository }}
         run: |
-          cat release-assets/payload/part*.txt | base64 --decode > release-assets/CaseNumberOCR_Update.zip
+          if [ -f release-assets/BUILD_V3_3_5.txt ]; then
+            mkdir -p release-assets/base
+            gh release download v3.3.4 --repo "$GITHUB_REPOSITORY" --pattern "CaseNumberOCR_Update.zip" --dir release-assets/base
+            python3 release-assets/build_v3_3_5.py release-assets/base/CaseNumberOCR_Update.zip release-assets/CaseNumberOCR_Update.zip
+          else
+            cat release-assets/payload/part*.txt | base64 --decode > release-assets/CaseNumberOCR_Update.zip
+          fi
           unzip -tq release-assets/CaseNumberOCR_Update.zip
           test -s release-assets/CaseNumberOCR_Update.zip
           EXPECTED_SHA="$(cat "$EXPECTED_SHA_FILE")"
@@ -32,7 +40,7 @@ jobs:
 
       - name: Publish or replace GitHub release asset
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: \${{ github.token }}
         run: |
           TAG="$(cat release-assets/RELEASE_TAG.txt)"
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+.[0-9]+.[0-9]+$'; then
@@ -42,10 +50,10 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "M.F. Case Number OCR update package. Use the app's UPDATE button to install; the application closes and restarts after installation." --target main --latest
+            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "V3.3.5 repairs the Desktop shortcut through the app's UPDATE button. The app closes, installs the fix, repairs the shortcut, and restarts. No case PDFs or local learning data are included." --target main --latest
           fi
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
-          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "CaseNumberOCR_Update.zip") | .digest')"
+          RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == \"CaseNumberOCR_Update.zip\") | .digest')"
           EXPECTED_SHA="$(cat release-assets/EXPECTED_SHA256.txt)"
           test "$RELEASE_DIGEST" = "sha256:$EXPECTED_SHA"
           echo "Published $TAG with verified CaseNumberOCR_Update.zip"
