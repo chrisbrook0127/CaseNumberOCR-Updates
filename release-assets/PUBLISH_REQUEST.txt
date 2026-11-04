@@ -1,1 +1,1 @@
-Retry publish V3.3.5 after fixing GitHub Actions token interpolation.
+Build and validate V3.3.6 package. Publish only after checksum is independently recorded.
