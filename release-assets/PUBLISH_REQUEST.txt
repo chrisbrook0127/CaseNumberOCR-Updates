@@ -1,1 +1,1 @@
-Retry publication of verified V3.3.4 package after correcting workflow authentication.
+Publish verified M.F. Case Number OCR V3.3.5 launcher repair through the in-app updater.
