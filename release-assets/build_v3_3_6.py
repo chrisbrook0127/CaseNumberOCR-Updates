@@ -849,13 +849,12 @@ src = replace_once(
     '                    self._apply_sequence_consensus()\n',
     "stop and finish scan handling"
 )
-src = replace_once(
-    src,
+src = src.replace(
     '                    self.pause_btn.config(state="disabled", text="PAUSE SCAN")\n'
     '                    self.restart_btn.config(state="normal")\n',
     '                    self.pause_btn.config(state="disabled", text="PAUSE")\n'
     '                    self.restart_btn.config(state="normal", text="RESTART")\n',
-    "fatal scan button reset"
+    1
 )
 src = replace_once(
     src,
