@@ -38,10 +38,10 @@ if "case_number_ocr.py" not in files or "updater_apply.py" not in files:
 
 src = files["case_number_ocr.py"].decode("utf-8")
 if not re.search(r"(?m)^(?:import hashlib\b|from hashlib import )", src):
-    json_import = re.search(r"(?m)^import json\b[^\n]*$", src)
-    if not json_import:
+    app_class_match = re.search(r"(?m)^class App\b", src)
+    if not app_class_match:
         raise RuntimeError("Could not add the hashing import safely.")
-    src = src[:json_import.end()] + "\nimport hashlib" + src[json_import.end():]
+    src = src[:app_class_match.start()] + "import hashlib\n\n" + src[app_class_match.start():]
 if 'self.app_version = "3.3.5"' not in src:
     raise RuntimeError("Expected V3.3.5 source was not found.")
 
@@ -1007,10 +1007,8 @@ for forbidden in ("OCR score is a detector score", "Minimum OCR score %", "Inspe
     if forbidden in ui_literals:
         raise RuntimeError(f"Old technical text remains in Select Files UI: {forbidden}")
 if 'self.app_version = "3.3.6"' not in src:
-    raise RuntimeError("Application version was not updated to 3.3.6.")
-
-if not re.search(r"(?m)^(?:import hashlib\b|from hashlib import )", src):
-    raise RuntimeError("The app is missing its hashlib import.")
+    raise RuntimeError("Application version was not updated if not re.search(r"(?m)^(?:import hashlib\b|from hashlib import )", src):
+    raise RuntimeError("The app is missing its hashlib import.")lib import.")
 compile(src, "case_number_ocr.py", "exec")
 # Static verification of key requirements.
 for required in [
