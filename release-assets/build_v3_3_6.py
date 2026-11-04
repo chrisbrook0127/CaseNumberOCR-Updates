@@ -280,6 +280,21 @@ load_method = r'''    def _learning_example_id(self, example):
             }
         self._refresh_learning_stats()
 '''
+src = replace_once(
+    src,
+    "    def _load_learning_data(self):\\n",
+    "    def _learning_example_id(self, example):\\n"
+    "        existing = str(example.get(\\"example_id\\") or \\"\\").strip()\\n"
+    "        if existing:\\n"
+    "            return existing\\n"
+    "        image = str(example.get(\\"image\\") or \\"\\").strip()\\n"
+    "        source = str(example.get(\\"source_pdf\\") or \\"\\").strip()\\n"
+    "        confirmed = str(example.get(\\"confirmed_case_number\\") or \\"\\").strip()\\n"
+    "        raw = f\\"{image}|{source}|{confirmed}\\"\\n"
+    "        return hashlib.sha256(raw.encode(\\"utf-8\\")).hexdigest() if image and confirmed else \\"\\"\\n\\n"
+    "    def _load_learning_data(self):\\n",
+    "learning example identity helper"
+)
 src = replace_method(src, "_load_learning_data", load_method)
 
 # Fixed 95% setting: no coworker controls, no editable percentage.
