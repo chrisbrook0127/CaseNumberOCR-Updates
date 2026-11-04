@@ -1,1 +1,1 @@
-Rebuild V3.3.6 after training popup and cancellation safeguards.
+Final V3.3.6 build with complete progress popup replacement and pre-activation stop check.
