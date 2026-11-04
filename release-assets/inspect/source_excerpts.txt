@@ -1,0 +1,1738 @@
+===== ORIGINAL SOURCE LINES 33-250 =====
+33:     def __init__(self, root):
+34:         self.root = root
+35:         root.title("M.F. Case Number OCR — V3.3.5")
+36:         root.geometry("1180x780")
+37:         root.minsize(1000, 650)
+38:         self.folder = None
+39:         self.reader = None
+40:         self.trocr_processor = None
+41:         self.trocr_model = None
+42:         self.trocr_training = False
+43:         self.queue = queue.Queue()
+44:         self.busy = False
+45:         self.paused = False
+46:         self.pause_event = threading.Event()
+47:         self.pause_event.set()
+48:         self.records = {}
+49:         self.completed_photo_refs = {}
+50:         self.completed_edit_widgets = {}
+51:         self.scan_items = []
+52:         self.learning_dir = None
+53:         self.learning_data = {"examples": [], "corrections": {},
+54:                               "trocr_v2_trained_count": 0,
+55:                               "trocr_v2_attempted_count": 0,
+56:                               "trocr_v2_validation": {}}
+57:         self.data_lock = threading.RLock()
+58:         self.trocr_training = False
+59:         self.torch_device = "cpu"
+60:         self.trocr_error = ""
+61:         self.training_popup = None
+62:         self.training_progressbar = None
+63:         self.training_percent_label = None
+64:         self.training_stage_label = None
+65:         self.training_close_button = None
+66:         self.auto_label_var = tk.BooleanVar(value=False)
+67:         self.auto_threshold_var = tk.StringVar(value="99")
+68:         self.log_path = None
+69:         self.scan_year_prefix = ""
+70:         self.update_busy = False
+71:         self.update_release = None
+72:         self.app_version = "3.3.5"
+73:         self.app_dir = Path(__file__).resolve().parent
+74:         self.update_config_path = self.app_dir / "update_config.json"
+75:         self._ui()
+76:         # Start maximized so the complete queue and review controls have as much
+77:         # usable screen space as possible. On Windows, "zoomed" is the normal
+78:         # maximized-window state (taskbar and title bar remain accessible).
+79:         self.root.after_idle(self._maximize_window)
+80:         self.auto_label_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
+81:         self.auto_threshold_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
+82:         self.year_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
+83:         self._refresh_auto_eligibility_status()
+84:         root.after(150, self._poll)
+85: 
+86:     def _ui(self):
+87:         main = ttk.Frame(self.root, padding=12)
+88:         main.pack(fill="both", expand=True)
+89:         header = ttk.Frame(main)
+90:         header.pack(fill="x", pady=(0, 2))
+91:         brand = ttk.Label(header, text="M.F.", font=("Segoe UI", 18, "bold"),
+92:                           foreground="#ffffff", background="#1456a8", padding=(10, 3))
+93:         brand.pack(side="left", padx=(0, 10))
+94:         title_stack = ttk.Frame(header)
+95:         title_stack.pack(side="left", fill="x", expand=True)
+96:         ttk.Label(title_stack, text="Case Number OCR & Renamer — V3.3.5",
+97:                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
+98:         ttk.Label(title_stack,
+99:                   text="Local PDF reading • Verification • Renaming • Export").pack(anchor="w")
+100:         # Large navigation buttons replace notebook tabs. The two views are
+101:         # stacked in one container and raised by the buttons at the top.
+102:         self.select_files_nav_btn = tk.Button(
+103:             header, text="SELECT FILES", command=lambda: self._show_main_view("select"),
+104:             bg="#0d4388", fg="white", activebackground="#0d4388", activeforeground="white",
+105:             relief="sunken", bd=2, padx=16, pady=9, font=("Segoe UI", 10, "bold"), cursor="hand2")
+106:         self.select_files_nav_btn.pack(side="right", padx=(6, 0))
+107:         self.completed_nav_btn = tk.Button(
+108:             header, text="COMPLETED", command=lambda: self._show_main_view("completed"),
+109:             bg="#1456a8", fg="white", activebackground="#0d4388", activeforeground="white",
+110:             relief="raised", bd=2, padx=16, pady=9, font=("Segoe UI", 10, "bold"), cursor="hand2")
+111:         self.completed_nav_btn.pack(side="right", padx=(6, 0))
+112:         self.update_btn = ttk.Button(header, text="UPDATE", command=self.check_for_updates)
+113:         self.update_btn.pack(side="right", padx=(10, 0), ipadx=14, ipady=7)
+114:         ttk.Separator(main, orient="horizontal").pack(fill="x", pady=(8, 7))
+115: 
+116:         self.view_container = ttk.Frame(main)
+117:         self.view_container.pack(fill="both", expand=True)
+118:         self.review_tab = ttk.Frame(self.view_container, padding=8)
+119:         self.completed_tab = ttk.Frame(self.view_container, padding=8)
+120:         for view in (self.review_tab, self.completed_tab):
+121:             view.place(relx=0, rely=0, relwidth=1, relheight=1)
+122: 
+123:         # SELECT FILES view: folder selection appears where the old tab strip was.
+124:         bar = ttk.Frame(self.review_tab); bar.pack(fill="x", pady=(0, 8))
+125:         self.choose_folder_btn = ttk.Button(bar, text="CHOOSE FOLDER", command=self.choose_folder)
+126:         self.choose_folder_btn.pack(side="left", padx=(0, 10))
+127:         self.folder_label = ttk.Label(bar, text="No folder selected"); self.folder_label.pack(side="left")
+128:         year_box = ttk.Frame(self.review_tab)
+129:         year_box.pack(fill="x", pady=(0, 8))
+130:         ttk.Label(year_box, text="Case year (default 08):").pack(side="left")
+131:         self.year_var = tk.StringVar(value="08")
+132:         ttk.Entry(year_box, textvariable=self.year_var, width=8).pack(side="left", padx=6)
+133:         ttk.Label(year_box, text="Search is restricted to the year shown. Blank defaults to 08.").pack(side="left")
+134: 
+135:         opts = ttk.LabelFrame(self.review_tab, text="Safety", padding=8); opts.pack(fill="x", pady=(0, 8))
+136:         ttk.Label(opts, text="Original PDFs are preserved. Automatic detections are never exported until you review and approve them.").pack(anchor="w")
+137:         ttk.Label(opts, text="OCR score is a detector score, NOT a probability of a correct case number.").pack(anchor="w")
+138:         auto_row = ttk.Frame(opts); auto_row.pack(fill="x", pady=(5, 0))
+139:         ttk.Checkbutton(auto_row, text="Auto-confirm high-score matches into Completed queue",
+140:                         variable=self.auto_label_var).pack(side="left")
+141:         ttk.Label(auto_row, text="Minimum OCR score % (90–100):").pack(side="left", padx=(12, 4))
+142:         ttk.Entry(auto_row, textvariable=self.auto_threshold_var, width=5).pack(side="left")
+143:         self.learning_stats_label = ttk.Label(opts, text="Verified exact-match rate: no confirmed examples yet")
+144:         self.learning_stats_label.pack(anchor="w", pady=(4, 0))
+145:         self.model_status_label = ttk.Label(opts, text="Models: not initialized")
+146:         self.model_status_label.pack(anchor="w")
+147:         learning_tools_row = ttk.Frame(opts)
+148:         learning_tools_row.pack(fill="x", pady=(2, 0))
+149:         self.learning_type_stats_label = ttk.Label(
+150:             learning_tools_row, text="Learning examples: handwritten 0 • printed 0 • unsure 0")
+151:         self.learning_type_stats_label.pack(side="left", anchor="w")
+152:         ttk.Button(learning_tools_row, text="Inspect Learning Data",
+153:                    command=self._show_learning_inspector).pack(side="right")
+154:         ttk.Label(
+155:             opts,
+156:             text="Writing type only routes confirmed crops into handwritten / printed learning libraries. It does NOT change OCR detector scores, candidate ranking, or auto-confirm percentages. Both labeled libraries are used by the shared case-number model; 'unsure' examples remain preserved and are also available to the shared model.",
+157:             wraplength=860).pack(anchor="w", pady=(2, 0))
+158:         ttk.Label(
+159:             opts,
+160:             text="Auto-confirm validation: distinct, manually verified reports are used to calculate a one-sided 95% confidence upper bound on the error rate. Eligibility requires that upper bound to be 5% or less. New matches must still meet your score setting, match the selected year, and have EasyOCR/TrOCR agreement. Auto-confirm moves a match to Completed; manual approval is still required before export.",
+161:             wraplength=860).pack(anchor="w", pady=(2, 0))
+162:         self.auto_eligibility_label = ttk.Label(opts, text="Auto-confirm eligibility: waiting for settings and learning history.", wraplength=860)
+163:         self.auto_eligibility_label.pack(anchor="w", pady=(3, 0))
+164:         # Queue actions sit immediately above the file list they operate on.
+165:         queue_header = ttk.Frame(self.review_tab)
+166:         queue_header.pack(fill="x", pady=(3, 4))
+167:         self.scan_btn = ttk.Button(queue_header, text="SCAN", command=self.scan, state="disabled")
+168:         self.scan_btn.pack(side="left", padx=(0, 5), ipadx=8, ipady=3)
+169:         self.pause_btn = ttk.Button(queue_header, text="PAUSE SCAN", command=self.toggle_pause, state="disabled")
+170:         self.pause_btn.pack(side="left", padx=5, ipadx=5, ipady=3)
+171:         self.restart_btn = ttk.Button(queue_header, text="RESTART", command=self.restart_scan, state="disabled")
+172:         self.restart_btn.pack(side="left", padx=5, ipadx=5, ipady=3)
+173:         self.review_btn = ttk.Button(queue_header, text="REVIEW SELECTED", command=self.review_selected, state="disabled")
+174:         self.review_btn.pack(side="left", padx=5, ipadx=5, ipady=3)
+175:         self.review_all_btn = ttk.Button(queue_header, text="REVIEW ALL", command=self.review_next, state="disabled")
+176:         self.review_all_btn.pack(side="left", padx=5, ipadx=5, ipady=3)
+177:         self.finish_batch_btn = ttk.Button(
+178:             queue_header, text="Finish Batch / Update Learning Model",
+179:             command=self._finish_import_batch, state="disabled")
+180:         self.finish_batch_btn.pack(side="left", padx=(12, 5), ipadx=4, ipady=2)
+181:         ttk.Frame(queue_header).pack(side="left", fill="x", expand=True)
+182:         self.scan_file_count_label = ttk.Label(
+183:             queue_header, text="Files selected to scan: 0",
+184:             font=("Segoe UI", 10, "bold"))
+185:         self.scan_file_count_label.pack(side="right", padx=(10, 0))
+186:         self.refresh_root_btn = ttk.Button(
+187:             queue_header, text="Refresh", command=self.refresh_root_folder)
+188:         self.refresh_root_btn.pack(side="right", padx=(0, 10))
+189: 
+190:         pane = ttk.Frame(self.review_tab); pane.pack(fill="both", expand=True)
+191:         cols = ("file", "candidate", "score", "status")
+192:         self.tree = ttk.Treeview(pane, columns=cols, show="headings", selectmode="extended")
+193:         for col, title, width in [
+194:             ("file", "PDF filename", 330), ("candidate", "OCR candidate", 150),
+195:             ("score", "OCR score", 90), ("status", "Status", 300)]:
+196:             self.tree.heading(col, text=title); self.tree.column(col, width=width)
+197:         sy = ttk.Scrollbar(pane, orient="vertical", command=self.tree.yview)
+198:         self.tree.configure(yscrollcommand=sy.set)
+199:         self.tree.pack(side="left", fill="both", expand=True); sy.pack(side="right", fill="y")
+200:         self.tree.bind("<Double-1>", self.on_double_click)
+201: 
+202:         self.progress = ttk.Progressbar(self.review_tab, mode="determinate"); self.progress.pack(fill="x", pady=(8, 4))
+203:         self.status = ttk.Label(self.review_tab, text="Choose a folder containing PDFs."); self.status.pack(anchor="w")
+204:         # Completed view: one-inch verification rows with a case-number thumbnail.
+205:         completed_header = ttk.Frame(self.completed_tab)
+206:         completed_header.pack(fill="x", pady=(0, 5))
+207:         ttk.Label(completed_header, text="Completed Files / Ready for Export",
+208:                   font=("Segoe UI", 12, "bold")).pack(side="left")
+209:         self.export_btn = ttk.Button(
+210:             completed_header, text="Export Approved Files", command=self.export, state="disabled")
+211:         self.export_btn.pack(side="right", padx=(8, 0))
+212:         ttk.Label(
+213:             self.completed_tab,
+214:             text="Double-click the case image to inspect the original PDF with green selected and red alternative OCR boxes. Double-click the Change case # cell to edit; double-click another cell to UNVERIFY.",
+215:             wraplength=1100).pack(anchor="w", pady=(0, 5))
+216:         cpane = ttk.Frame(self.completed_tab); cpane.pack(fill="both", expand=True)
+217:         ccols = ("case", "edit_case", "actions", "file", "status")
+218:         style = ttk.Style(self.root)
+219:         try:
+220:             one_inch = max(72, int(self.root.winfo_fpixels("1i")))
+221:         except Exception:
+222:             one_inch = 80
+223:         style.configure("Completed.Treeview", rowheight=one_inch)
+224:         self.completed_tree = ttk.Treeview(
+225:             cpane, columns=ccols, show=("tree", "headings"),
+226:             selectmode="extended", style="Completed.Treeview")
+227:         self.completed_tree.heading("#0", text="Case-number image")
+228:         self.completed_tree.column("#0", width=210, minwidth=170, stretch=False, anchor="center")
+229:         for col, title, width in [
+230:             ("case", "Filename case #", 145),
+231:             ("edit_case", "Change case # (double-click)", 175),
+232:             ("actions", "Save / Cancel", 125),
+233:             ("file", "Original PDF filename", 390),
+234:             ("status", "Queue status", 245)]:
+235:             self.completed_tree.heading(col, text=title)
+236:             self.completed_tree.column(col, width=width, minwidth=90)
+237:         self.completed_tree.bind("<Double-1>", self.on_completed_double_click)
+238:         self.completed_tree.bind("<MouseWheel>", self._completed_mousewheel)
+239:         self.completed_tree.bind("<Button-4>", lambda e: self.completed_tree.yview_scroll(-3, "units"))
+240:         self.completed_tree.bind("<Button-5>", lambda e: self.completed_tree.yview_scroll(3, "units"))
+241:         csy = ttk.Scrollbar(cpane, orient="vertical", command=self.completed_tree.yview)
+242:         self.completed_tree.configure(yscrollcommand=csy.set)
+243:         self.completed_tree.pack(side="left", fill="both", expand=True); csy.pack(side="right", fill="y")
+244:         cbar = ttk.Frame(self.completed_tab); cbar.pack(fill="x", pady=(10, 0))
+245:         self.completed_count = ttk.Label(cbar, text="0 files ready for export"); self.completed_count.pack(side="left")
+246:         self.review_completed_btn = ttk.Button(
+247:             cbar, text="Review / Approve Selected", command=self.review_completed_selected, state="disabled")
+248:         self.review_completed_btn.pack(side="right")
+249:         self._show_main_view("select")
+250: 
+===== ORIGINAL SOURCE LINES 661-1165 =====
+661:     def _load_learning_data(self):
+662:         db_v3 = self.learning_dir / "learning_examples_v3.json"
+663:         db_v2 = self.learning_dir / "learning_examples_v2.json"
+664:         legacy_db = self.learning_dir / "learning_examples.json"
+665:         try:
+666:             source_db = db_v3 if db_v3.exists() else (db_v2 if db_v2.exists() else legacy_db)
+667:             if source_db.exists():
+668:                 loaded = json.loads(source_db.read_text(encoding="utf-8"))
+669:                 self.learning_data = {
+670:                     "examples": loaded.get("examples", []),
+671:                     "corrections": loaded.get("corrections", {}),
+672:                     "trocr_v2_trained_count": int(loaded.get("trocr_v2_trained_count", 0)),
+673:                     "trocr_v2_attempted_count": int(loaded.get("trocr_v2_attempted_count", 0)),
+674:                     "trocr_v2_validation": loaded.get("trocr_v2_validation", {}),
+675:                     "field_regions": loaded.get("field_regions", []),
+676:                     "training_type_validation": loaded.get("training_type_validation", {}),
+677:                     "last_training_summary": loaded.get("last_training_summary", {})
+678:                 }
+679:                 # Keep V2's original database untouched. V3 writes forward to its
+680:                 # own master file and type-specific JSON libraries.
+681:                 if not db_v3.exists():
+682:                     temp = db_v3.with_suffix(".json.tmp")
+683:                     temp.write_text(json.dumps(self.learning_data, indent=2), encoding="utf-8")
+684:                     os.replace(temp, db_v3)
+685:             else:
+686:                 self.learning_data = {
+687:                     "examples": [], "corrections": {},
+688:                     "trocr_v2_trained_count": 0,
+689:                     "trocr_v2_attempted_count": 0,
+690:                     "trocr_v2_validation": {}, "field_regions": [],
+691:                     "training_type_validation": {}, "last_training_summary": {}
+692:                 }
+693:             self._sync_learning_type_databases()
+694:         except Exception:
+695:             logging.exception("V3 learning database could not be read; using an empty learning set")
+696:             self.learning_data = {
+697:                 "examples": [], "corrections": {},
+698:                 "trocr_v2_trained_count": 0,
+699:                 "trocr_v2_attempted_count": 0,
+700:                 "trocr_v2_validation": {}, "field_regions": [],
+701:                 "training_type_validation": {}, "last_training_summary": {}
+702:             }
+703:         self._refresh_learning_stats()
+704: 
+705:     @staticmethod
+706:     def _normalized_training_type(value):
+707:         value = str(value or "unsure").strip().lower()
+708:         return value if value in {"handwritten", "printed"} else "unsure"
+709: 
+710:     def _sync_learning_type_databases(self):
+711:         """Write independently inspectable category libraries from the V3 master set."""
+712:         if not self.learning_dir:
+713:             return
+714:         examples = self.learning_data.get("examples", [])
+715:         for category in ("handwritten", "printed", "unsure"):
+716:             category_examples = [
+717:                 dict(ex) for ex in examples
+718:                 if self._normalized_training_type(ex.get("training_type")) == category]
+719:             payload = {
+720:                 "category": category,
+721:                 "count": len(category_examples),
+722:                 "updated_at": datetime.now().isoformat(timespec="seconds"),
+723:                 "examples": category_examples
+724:             }
+725:             target = self.learning_dir / f"learning_{category}_examples.json"
+726:             temp = target.with_suffix(".json.tmp")
+727:             temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+728:             os.replace(temp, target)
+729: 
+730:     def _show_learning_inspector(self):
+731:         """Show what was saved, categorized, and actually tested during training."""
+732:         if not self.learning_dir:
+733:             messagebox.showinfo("Learning data", "Choose the source PDF folder first.")
+734:             return
+735:         win = tk.Toplevel(self.root)
+736:         win.title("M.F. Learning Data Inspector")
+737:         win.geometry("1050x650")
+738:         win.transient(self.root)
+739:         outer = ttk.Frame(win, padding=12)
+740:         outer.pack(fill="both", expand=True)
+741:         counts = {kind: sum(1 for ex in self.learning_data.get("examples", [])
+742:                            if self._normalized_training_type(ex.get("training_type")) == kind
+743:                            and ex.get("image"))
+744:                   for kind in ("handwritten", "printed", "unsure")}
+745:         ttk.Label(outer, text="Saved learning examples", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+746:         ttk.Label(outer, text=(f"Handwritten: {counts['handwritten']}   •   Printed: {counts['printed']}   •   "
+747:                                f"Unclassified: {counts['unsure']}"),
+748:                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(3, 8))
+749:         validation = self.learning_data.get("trocr_v2_validation", {})
+750:         if validation:
+751:             status_text = (f"Last model test: baseline {validation.get('baseline_accuracy_pct', 0):.1f}% → "
+752:                            f"{validation.get('accuracy_pct', 0):.1f}% on held-out examples; "
+753:                            f"{validation.get('training_examples', 0)} training examples; "
+754:                            f"{validation.get('epochs_completed', 0)} passes; "
+755:                            f"model {'activated' if validation.get('saved_as_active') else 'not replaced'}.")
+756:         else:
+757:             status_text = "No completed model validation run is recorded yet. Saving crops is not the same as updating model weights."
+758:         ttk.Label(outer, text=status_text, wraplength=1000).pack(anchor="w", pady=(0, 8))
+759:         ttk.Label(outer, text="Each row below is a saved confirmed crop. The category is chosen in Review; the OCR score is independent of this label.",
+760:                   wraplength=1000).pack(anchor="w", pady=(0, 8))
+761:         pane = ttk.Frame(outer); pane.pack(fill="both", expand=True)
+762:         cols = ("type", "ocr", "confirmed", "source", "image")
+763:         tree = ttk.Treeview(pane, columns=cols, show="headings", height=16)
+764:         for col, title, width in (("type", "Learning library", 120), ("ocr", "Original OCR", 130),
+765:                                   ("confirmed", "Confirmed answer", 140), ("source", "Source PDF", 310),
+766:                                   ("image", "Saved crop", 250)):
+767:             tree.heading(col, text=title); tree.column(col, width=width, anchor="w")
+768:         sy = ttk.Scrollbar(pane, orient="vertical", command=tree.yview)
+769:         tree.configure(yscrollcommand=sy.set)
+770:         tree.pack(side="left", fill="both", expand=True); sy.pack(side="right", fill="y")
+771:         for index, ex in enumerate(reversed(self.learning_data.get("examples", []))):
+772:             if not ex.get("image"):
+773:                 continue
+774:             category = self._normalized_training_type(ex.get("training_type"))
+775:             tree.insert("", "end", iid=str(index), values=(category, ex.get("ocr_candidate", ""),
+776:                         ex.get("confirmed_case_number", ""), ex.get("source_pdf", ""), ex.get("image", "")))
+777:         bottom = ttk.Frame(outer); bottom.pack(fill="x", pady=(8, 0))
+778:         def open_learning_folder():
+779:             try:
+780:                 if os.name == "nt":
+781:                     os.startfile(str(self.learning_dir))
+782:                 elif sys.platform == "darwin":
+783:                     subprocess.Popen(["open", str(self.learning_dir)])
+784:                 else:
+785:                     subprocess.Popen(["xdg-open", str(self.learning_dir)])
+786:             except Exception as exc:
+787:                 messagebox.showerror("Open learning folder", str(exc), parent=win)
+788:         ttk.Button(bottom, text="Open Learning Folder", command=open_learning_folder).pack(side="left")
+789:         ttk.Button(bottom, text="Close", command=win.destroy).pack(side="right")
+790: 
+791:     def _learning_accuracy(self):
+792:         by_source = {}
+793:         for index, example in enumerate(self.learning_data.get("examples", [])):
+794:             if not example.get("ocr_candidate") or not example.get("confirmed_case_number"):
+795:                 continue
+796:             source = example.get("source_pdf") or example.get("image") or f"legacy-{index}"
+797:             by_source[source] = example
+798:         examples = list(by_source.values())
+799:         if not examples:
+800:             return 0, 0
+801:         exact = sum(
+802:             1 for e in examples
+803:             if e.get("ocr_candidate") == e.get("confirmed_case_number"))
+804:         return exact, len(examples)
+805: 
+806:     def _refresh_learning_stats(self):
+807:         if not hasattr(self, "learning_stats_label"):
+808:             return
+809:         exact, total = self._learning_accuracy()
+810:         if total:
+811:             pct = 100.0 * exact / total
+812:             self.learning_stats_label.config(
+813:                 text=f"Verified exact-match rate: {pct:.1f}% ({exact}/{total})")
+814:         else:
+815:             self.learning_stats_label.config(
+816:                 text="Verified exact-match rate: no confirmed OCR predictions yet")
+817:         self._refresh_auto_eligibility_status()
+818:         if hasattr(self, "learning_type_stats_label"):
+819:             by_type = {kind: sum(1 for ex in self.learning_data.get("examples", [])
+820:                                  if self._normalized_training_type(ex.get("training_type")) == kind
+821:                                  and ex.get("image"))
+822:                        for kind in ("handwritten", "printed", "unsure")}
+823:             self.learning_type_stats_label.config(
+824:                 text=(f"Learning examples: handwritten {by_type['handwritten']} • "
+825:                       f"printed {by_type['printed']} • unsure {by_type['unsure']}"))
+826:         if hasattr(self, "model_status_label"):
+827:             validation = self.learning_data.get("trocr_v2_validation", {})
+828:             detail = ""
+829:             if validation:
+830:                 detail = (
+831:                     f" | held-out TrOCR exact match: "
+832:                     f"{validation.get('accuracy_pct', 0):.1f}% "
+833:                     f"({validation.get('correct', 0)}/{validation.get('total', 0)})")
+834:             trained = self.learning_data.get("trocr_v2_trained_count", 0)
+835:             self.model_status_label.config(
+836:                 text=f"TrOCR: {'fine-tuned' if trained else 'base model'}"
+837:                      f" • {trained} training samples{detail}")
+838: 
+839:     def _get_auto_threshold(self):
+840:         try:
+841:             value = float(self.auto_threshold_var.get().strip())
+842:             if not 90 <= value <= 100:
+843:                 raise ValueError
+844:             return value
+845:         except Exception:
+846:             raise ValueError("Auto-label threshold must be between 90 and 100.")
+847: 
+848:     def _save_learning_example(self, record, confirmed_number):
+849:         # Prefer the rectangle drawn by the reviewer; otherwise use the OCR rectangle.
+850:         training_type = self._normalized_training_type(record.get("training_type", "unsure"))
+851:         examples_dir = self.learning_dir / "examples_v3" / training_type
+852:         examples_dir.mkdir(parents=True, exist_ok=True)
+853:         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+854:         image_rel = None
+855:         snippet = record.get("snippet")
+856:         # Keep two rectangles conceptually separate: the full green field box
+857:         # teaches the app where INCIDENT NO. / CASE NUMBER and the number live, while the
+858:         # neural OCR crop should contain the number itself whenever possible.
+859:         field_rect = record.get("manual_crop_rect") or (snippet[3] if snippet else None)
+860:         training_rect = None
+861:         candidates = snippet[4] if snippet and len(snippet) > 4 and isinstance(snippet[4], list) else []
+862:         selected_candidate = next((c for c in candidates
+863:                                    if str(c.get("number") or "").strip() == str(confirmed_number)
+864:                                    and c.get("rect")), None)
+865:         if selected_candidate:
+866:             training_rect = selected_candidate.get("rect")
+867:         elif field_rect:
+868:             # If the reviewer drew around the label plus the number, locate the
+869:             # label inside the selected field and trim it from the character crop.
+870:             # Keep field_rect intact below for spatial learning.
+871:             training_rect = tuple(field_rect)
+872:             if self.reader is not None and snippet and snippet[1] is not None:
+873:                 try:
+874:                     page_array = snippet[1]
+875:                     ph, pw = page_array.shape[:2]
+876:                     sw = min(pw, int(round(5 * 72 * 2.2)))
+877:                     sh = min(ph, int(round(5 * 72 * 2.2)))
+878:                     sx = pw - sw
+879:                     corner = page_array[:sh, sx:]
+880:                     for lx0, ly0, lx1, ly1, _field_kind in self._find_case_field_label_regions(corner):
+881:                         abs_label = (lx0 + sx, ly0, lx1 + sx, ly1)
+882:                         fx0, fy0, fx1, fy1 = [float(v) for v in field_rect]
+883:                         intersects = (abs_label[0] < fx1 and abs_label[2] > fx0 and
+884:                                       abs_label[1] < fy1 and abs_label[3] > fy0)
+885:                         if intersects:
+886:                             number_x0 = max(fx0, abs_label[2] + 2)
+887:                             number_y0 = max(fy0, abs_label[1] - 10)
+888:                             number_y1 = min(fy1, abs_label[3] + 15)
+889:                             if fx1 - number_x0 >= 35 and number_y1 - number_y0 >= 10:
+890:                                 training_rect = (number_x0, number_y0, fx1, number_y1)
+891:                                 break
+892:                 except Exception as exc:
+893:                     self._log("Could not trim case-field label from training crop: %s", exc)
+894:         else:
+895:             training_rect = snippet[3] if snippet else None
+896:         crop_origin = "candidate-number-box" if selected_candidate else ("manual-field" if record.get("manual_crop_rect") else "ocr")
+897:         if snippet and snippet[1] is not None and training_rect:
+898:             from PIL import Image
+899:             image = Image.fromarray(snippet[1]).convert("RGB")
+900:             x0, y0, x1, y1 = [int(v) for v in training_rect]
+901:             # A modest border preserves the first/last digit strokes without
+902:             # adding the unrelated case-field caption to the training target.
+903:             pad_x = max(8, int((x1 - x0) * 0.04))
+904:             pad_y = max(5, int((y1 - y0) * 0.12))
+905:             x0 -= pad_x; x1 += pad_x; y0 -= pad_y; y1 += pad_y
+906:             x0 = max(0, min(image.width, x0))
+907:             x1 = max(0, min(image.width, x1))
+908:             y0 = max(0, min(image.height, y0))
+909:             y1 = max(0, min(image.height, y1))
+910:             if x1 <= x0 or y1 <= y0:
+911:                 raise ValueError("The selected crop box is empty. Draw a box around the case number.")
+912:             crop = image.crop((x0, y0, x1, y1))
+913:             if crop.width < 35 or crop.height < 10:
+914:                 raise ValueError("The selected crop is too small. Draw a larger box around the case-field label (INCIDENT NO. or CASE NUMBER) and the complete case number.")
+915:             # Avoid nearly full-page crops: they teach the line recognizer the wrong task.
+916:             if crop.width >= image.width * 0.85 and crop.height >= image.height * 0.35:
+917:                 raise ValueError("The crop covers too much of the page. Draw a tighter box around the case number.")
+918:             crop_path = examples_dir / f"{stamp}.png"
+919:             crop.save(crop_path)
+920:             image_rel = f"examples_v3/{training_type}/{stamp}.png"
+921: 
+922:         candidate = str(record.get("candidate") or "").strip()
+923:         # Remember where the reviewer selected/drew the field inside the same
+924:         # top-right 5 x 5 inch search window. These normalized zones guide future
+925:         # OCR passes; the full top-right search remains as a safety net.
+926:         if snippet and snippet[1] is not None and field_rect:
+927:             page_h, page_w = snippet[1].shape[:2]
+928:             search_w = min(page_w, int(round(5 * 72 * 2.2)))
+929:             search_h = min(page_h, int(round(5 * 72 * 2.2)))
+930:             search_x = page_w - search_w
+931:             x0, y0, x1, y1 = [float(v) for v in field_rect]
+932:             x0 = max(float(search_x), min(float(page_w), x0))
+933:             x1 = max(float(search_x), min(float(page_w), x1))
+934:             y0 = max(0.0, min(float(search_h), y0))
+935:             y1 = max(0.0, min(float(search_h), y1))
+936:             if x1 > x0 and y1 > y0 and search_w > 0 and search_h > 0:
+937:                 region = {
+938:                     "rect_norm": [
+939:                         round((x0 - search_x) / search_w, 5),
+940:                         round(y0 / search_h, 5),
+941:                         round((x1 - search_x) / search_w, 5),
+942:                         round(y1 / search_h, 5)],
+943:                     "confirmed_case_number": confirmed_number,
+944:                     "source_pdf": record.get("path").name if record.get("path") else "",
+945:                     "saved_at": datetime.now().isoformat(timespec="seconds")
+946:                 }
+947:                 with self.data_lock:
+948:                     regions = self.learning_data.setdefault("field_regions", [])
+949:                     regions.append(region)
+950:                     # Bound the spatial memory file while preserving recent variety.
+951:                     self.learning_data["field_regions"] = regions[-200:]
+952: 
+953:         example = {
+954:             "image": image_rel,
+955:             "crop_origin": crop_origin if image_rel else "none",
+956:             "training_type": training_type,
+957:             "ocr_candidate": candidate,
+958:             "confirmed_case_number": confirmed_number,
+959:             "source_pdf": record.get("path").name if record.get("path") else "",
+960:             "ocr_score": float(record.get("score", 0.0) or 0.0),
+961:             "engine_agreement": bool(record.get("engine_agreement", False)),
+962:             "engines": record.get("engines", []),
+963:             "confirmed_at": datetime.now().isoformat(timespec="seconds")
+964:         }
+965:         with self.data_lock:
+966:             self.learning_data.setdefault("examples", []).append(example)
+967:             db = self.learning_dir / "learning_examples_v3.json"
+968:             temp = db.with_suffix(".json.tmp")
+969:             temp.write_text(json.dumps(self.learning_data, indent=2), encoding="utf-8")
+970:             os.replace(temp, db)
+971:             self._sync_learning_type_databases()
+972:             (self.folder / ".case_ocr_settings.json").write_text(
+973:                 json.dumps({"year": self.year_var.get().strip()}, indent=2), encoding="utf-8")
+974:         self._refresh_learning_stats()
+975:         self._save_state()
+976:         # Deliberately do not start training here. Training is deferred until the
+977:         # user finishes the current import/review batch from the main window.
+978: 
+979:     def _auto_label_validation_examples(self, threshold, current_year):
+980:         """Return distinct, manually verified reports in the existing calibration group."""
+981:         validation_by_source = {}
+982:         for example in self.learning_data.get("examples", []):
+983:             source = example.get("source_pdf")
+984:             if not (source and example.get("engine_agreement")
+985:                     and float(example.get("ocr_score", 0.0) or 0.0) >= threshold
+986:                     and example.get("ocr_candidate")
+987:                     and example.get("confirmed_case_number")):
+988:                 continue
+989:             if current_year and not str(example.get("confirmed_case_number", "")).startswith(current_year + "-"):
+990:                 continue
+991:             validation_by_source[source] = example
+992:         return list(validation_by_source.values())
+993: 
+994:     @staticmethod
+995:     def _upper_error_bound(errors, total, confidence=0.95):
+996:         """One-sided exact Clopper-Pearson upper confidence bound for error rate."""
+997:         if total <= 0 or errors < 0 or errors >= total:
+998:             return 1.0
+999:         alpha = 1.0 - confidence
+1000:         if errors == 0:
+1001:             return 1.0 - alpha ** (1.0 / total)
+1002: 
+1003:         def binomial_cdf(k, n, p):
+1004:             # P(X <= k) for X~Binomial(n,p), evaluated recursively for stability.
+1005:             if p <= 0.0:
+1006:                 return 1.0
+1007:             if p >= 1.0:
+1008:                 return 0.0
+1009:             term = (1.0 - p) ** n
+1010:             terms = [term]
+1011:             for i in range(k):
+1012:                 term *= ((n - i) / (i + 1.0)) * (p / (1.0 - p))
+1013:                 terms.append(term)
+1014:             return min(1.0, math.fsum(terms))
+1015: 
+1016:         lo, hi = 0.0, 1.0
+1017:         for _ in range(70):
+1018:             mid = (lo + hi) / 2.0
+1019:             if binomial_cdf(errors, total, mid) > alpha:
+1020:                 lo = mid
+1021:             else:
+1022:                 hi = mid
+1023:         return hi
+1024: 
+1025:     def _auto_label_calibration_stats(self):
+1026:         try:
+1027:             threshold = self._get_auto_threshold()
+1028:             current_year = self.scan_year_prefix or self._year_prefix()
+1029:         except Exception:
+1030:             return 0, 0, 0.0, 1.0, None
+1031:         validation = self._auto_label_validation_examples(threshold, current_year)
+1032:         total = len(validation)
+1033:         correct = sum(
+1034:             1 for example in validation
+1035:             if example.get("ocr_candidate") == example.get("confirmed_case_number"))
+1036:         errors = total - correct
+1037:         pct = (100.0 * correct / total) if total else 0.0
+1038:         upper = self._upper_error_bound(errors, total, 0.95)
+1039:         return total, correct, pct, upper, threshold
+1040: 
+1041:     def _refresh_auto_eligibility_status(self):
+1042:         label = getattr(self, "auto_eligibility_label", None)
+1043:         if label is None:
+1044:             return
+1045:         total, correct, pct, upper, threshold = self._auto_label_calibration_stats()
+1046:         year = getattr(self, "scan_year_prefix", "") or (self.year_var.get().strip()[-2:] if hasattr(self, "year_var") else "08")
+1047:         if threshold is None:
+1048:             message = "Auto-confirm eligibility: enter a score from 90 to 100 and a valid two-digit year."
+1049:         else:
+1050:             errors = total - correct
+1051:             bound_pct = upper * 100.0
+1052:             if not self.auto_label_var.get():
+1053:                 message = (f"Auto-confirm is OFF. Year {year or '08'}, score {threshold:.0f}%+. "
+1054:                            f"Validation: {correct}/{total} exact; observed errors {errors}; "
+1055:                            f"95% upper error bound {bound_pct:.2f}%. Turn on the checkbox to apply the rule.")
+1056:             elif total == 0:
+1057:                 message = (f"Auto-confirm is ON, but no qualifying verified reports are available for "
+1058:                            f"year {year or '08'} at {threshold:.0f}%+. Need a representative verified sample.")
+1059:             elif upper > 0.05:
+1060:                 message = (f"Auto-confirm is ON, but validation is not yet strong enough: {correct}/{total} "
+1061:                            f"exact ({pct:.1f}%), {errors} errors. The one-sided 95% upper error bound is "
+1062:                            f"{bound_pct:.2f}%; it must be 5.00% or lower. Keep confirming reports to build evidence.")
+1063:             else:
+1064:                 message = (f"Auto-confirm is ELIGIBLE for year {year or '08'} at {threshold:.0f}%+: "
+1065:                            f"{correct}/{total} exact ({pct:.1f}%); one-sided 95% upper error bound "
+1066:                            f"{bound_pct:.2f}% (limit 5.00%). New files must still meet score, year, and engine-agreement checks.")
+1067:         label.config(text=message)
+1068: 
+1069:     def _auto_label_block_reason(self, score, engine_agreement, candidate):
+1070:         if not self.auto_label_var.get():
+1071:             return "Auto-confirm checkbox is off."
+1072:         try:
+1073:             threshold = self._get_auto_threshold()
+1074:         except ValueError as exc:
+1075:             return str(exc)
+1076:         current_year = self.scan_year_prefix or self._year_prefix()
+1077:         if current_year and not str(candidate).startswith(current_year + "-"):
+1078:             return f"candidate does not match selected year {current_year}."
+1079:         try:
+1080:             observed_score = float(score or 0.0)
+1081:         except Exception:
+1082:             observed_score = 0.0
+1083:         if observed_score < threshold:
+1084:             return f"OCR detector score {observed_score:.1f}% is below your {threshold:.0f}% setting."
+1085:         if not engine_agreement:
+1086:             return "EasyOCR and TrOCR did not produce the same case number."
+1087:         total, correct, pct, upper, _ = self._auto_label_calibration_stats()
+1088:         errors = total - correct
+1089:         if total == 0:
+1090:             return "no qualifying verified reports are available for statistical validation."
+1091:         if upper > 0.05:
+1092:             return (f"statistical validation is not sufficient yet: {correct}/{total} exact, "
+1093:                     f"{errors} errors; 95% upper error bound {upper*100:.2f}% exceeds 5.00%.")
+1094:         return None
+1095: 
+1096:     def _auto_label_is_calibrated(self, score, engine_agreement, candidate, distinct_count=1):
+1097:         return self._auto_label_block_reason(score, engine_agreement, candidate) is None
+1098: 
+1099:     def _sequence_case_number(self, record):
+1100:         """Use only reviewer-approved or strong two-engine reads as sequence anchors."""
+1101:         if not record:
+1102:             return None
+1103:         number = record.get("confirmed") if record.get("manual_approved") else record.get("candidate")
+1104:         if not number or not CASE_RE.fullmatch(str(number)):
+1105:             return None
+1106:         if not record.get("manual_approved"):
+1107:             try:
+1108:                 threshold = self._get_auto_threshold()
+1109:             except Exception:
+1110:                 threshold = 99.0
+1111:             if not record.get("engine_agreement") or float(record.get("score", 0) or 0) < threshold:
+1112:                 return None
+1113:         return str(number)
+1114: 
+1115:     @staticmethod
+1116:     def _initial_review_reading(record, candidate_values, sequence_values, sequence_message):
+1117:         """Choose the strongest default without converting inference into approval.
+1118: 
+1119:         Exact two-sided agreement from eligible neighboring files takes priority
+1120:         over a partial OCR candidate for unapproved records. Reviewer-confirmed
+1121:         values are never overwritten.
+1122:         """
+1123:         consensus = (
+1124:             len(sequence_values) == 1
+1125:             and "both adjacent files read" in str(sequence_message).lower()
+1126:         )
+1127:         if consensus and not record.get("manual_approved"):
+1128:             return str(sequence_values[0])
+1129:         existing = record.get("confirmed")
+1130:         if existing:
+1131:             return str(existing)
+1132:         candidate = record.get("candidate")
+1133:         if candidate:
+1134:             return str(candidate)
+1135:         return str(candidate_values[0]) if candidate_values else ""
+1136: 
+1137:     def _sequence_hint_for_iid(self, iid):
+1138:         """Back-trace one unresolved file from the immediately adjacent scan files."""
+1139:         ordered = [item[0] for item in self.scan_items]
+1140:         try:
+1141:             pos = ordered.index(iid)
+1142:         except ValueError:
+1143:             return [], ""
+1144:         if pos <= 0 or pos >= len(ordered) - 1:
+1145:             return [], ""
+1146:         previous = self._sequence_case_number(self.records.get(ordered[pos - 1]))
+1147:         following = self._sequence_case_number(self.records.get(ordered[pos + 1]))
+1148:         if not previous or not following:
+1149:             return [], ""
+1150:         match_a, match_b = CASE_RE.fullmatch(previous), CASE_RE.fullmatch(following)
+1151:         if not match_a or not match_b:
+1152:             return [], ""
+1153:         year_a, digits_a = match_a.group(1).split("-", 1)
+1154:         year_b, digits_b = match_b.group(1).split("-", 1)
+1155:         if year_a != year_b:
+1156:             return [], ""
+1157:         a, b = int(digits_a), int(digits_b)
+1158:         if a == b:
+1159:             return [previous], f"Sequence clue: both adjacent files read {previous}; verify whether this file is also {previous}."
+1160:         if b == a + 2:
+1161:             options = [f"{year_a}-{a}", f"{year_a}-{a+1}"]
+1162:             return options, f"Sequence clue: adjacent files are {previous} and {following}; this file may be {options[0]} or {options[1]}."
+1163:         return [], ""
+1164: 
+1165:     @staticmethod
+===== ORIGINAL SOURCE LINES 1275-1678 =====
+1275:     def _open_training_progress(self):
+1276:         """Show a persistent progress window while the model is updating."""
+1277:         if self.training_popup is not None:
+1278:             try:
+1279:                 if self.training_popup.winfo_exists():
+1280:                     self.training_popup.lift()
+1281:                     return
+1282:             except Exception:
+1283:                 pass
+1284: 
+1285:         popup = tk.Toplevel(self.root)
+1286:         popup.title("Updating learning model")
+1287:         popup.geometry("540x205")
+1288:         popup.resizable(False, False)
+1289:         popup.transient(self.root)
+1290:         popup.protocol("WM_DELETE_WINDOW", self._training_popup_close_requested)
+1291:         self.training_popup = popup
+1292: 
+1293:         frame = ttk.Frame(popup, padding=18)
+1294:         frame.pack(fill="both", expand=True)
+1295:         ttk.Label(
+1296:             frame, text="Updating handwriting recognition model",
+1297:             font=("Segoe UI", 12, "bold")).pack(anchor="w")
+1298:         self.training_stage_label = ttk.Label(
+1299:             frame, text="Starting training...", wraplength=490)
+1300:         self.training_stage_label.pack(anchor="w", pady=(12, 8))
+1301:         self.training_progressbar = ttk.Progressbar(
+1302:             frame, mode="determinate", maximum=100, value=0)
+1303:         self.training_progressbar.pack(fill="x", pady=(0, 5))
+1304:         self.training_percent_label = ttk.Label(
+1305:             frame, text="0%", font=("Segoe UI", 10, "bold"))
+1306:         self.training_percent_label.pack(anchor="e")
+1307:         bottom = ttk.Frame(frame)
+1308:         bottom.pack(fill="x", pady=(8, 0))
+1309:         ttk.Label(
+1310:             bottom,
+1311:             text="The percentage is an estimate based on the current training stage.",
+1312:             wraplength=360).pack(side="left")
+1313:         self.training_close_button = ttk.Button(
+1314:             bottom, text="Close", state="disabled",
+1315:             command=self._close_training_popup)
+1316:         self.training_close_button.pack(side="right")
+1317:         popup.update_idletasks()
+1318: 
+1319:     def _training_popup_close_requested(self):
+1320:         # Keep the progress window visible until the background worker reports completion.
+1321:         if not self.trocr_training:
+1322:             self._close_training_popup()
+1323: 
+1324:     def _close_training_popup(self):
+1325:         popup = self.training_popup
+1326:         self.training_popup = None
+1327:         self.training_progressbar = None
+1328:         self.training_percent_label = None
+1329:         self.training_stage_label = None
+1330:         self.training_close_button = None
+1331:         if popup is not None:
+1332:             try:
+1333:                 popup.destroy()
+1334:             except Exception:
+1335:                 pass
+1336: 
+1337:     def _update_training_progress(self, percent, stage, finished=False):
+1338:         percent = max(0, min(100, int(round(percent))))
+1339:         popup = self.training_popup
+1340:         if popup is None:
+1341:             return
+1342:         try:
+1343:             if not popup.winfo_exists():
+1344:                 return
+1345:             self.training_progressbar["value"] = percent
+1346:             self.training_percent_label.config(text=f"{percent}%")
+1347:             self.training_stage_label.config(text=stage)
+1348:             if finished:
+1349:                 self.training_close_button.config(state="normal")
+1350:                 popup.protocol("WM_DELETE_WINDOW", self._close_training_popup)
+1351:         except Exception:
+1352:             pass
+1353: 
+1354:     def _maybe_train_trocr(self):
+1355:         # This method is called only by _finish_import_batch, never when a single
+1356:         # case number is confirmed.
+1357:         if self.trocr_training or not self.learning_dir:
+1358:             return False
+1359:         by_source = {}
+1360:         for index, example in enumerate(self.learning_data.get("examples", [])):
+1361:             if example.get("image") and example.get("confirmed_case_number"):
+1362:                 source = example.get("source_pdf") or example.get("image") or f"legacy-{index}"
+1363:                 by_source[source] = dict(example)
+1364:         examples = list(by_source.values())
+1365:         trained = int(self.learning_data.get("trocr_v2_trained_count", 0))
+1366:         attempted = int(self.learning_data.get("trocr_v2_attempted_count", 0))
+1367:         if len(examples) < 12 or len(examples) < max(trained, attempted) + 5:
+1368:             return False
+1369:         self.trocr_training = True
+1370:         if hasattr(self, "status"):
+1371:             typed_counts = {kind: sum(1 for ex in examples
+1372:                                       if self._normalized_training_type(ex.get("training_type")) == kind)
+1373:                             for kind in ("handwritten", "printed", "unsure")}
+1374:             self.status.config(
+1375:                 text=(f"Updating shared case-number model with {len(examples)} confirmed crops "
+1376:                       f"(handwritten {typed_counts['handwritten']}, printed {typed_counts['printed']}, "
+1377:                       f"unsure {typed_counts['unsure']}). Scanning is paused during training."))
+1378:         self.scan_btn.config(state="disabled")
+1379:         self._open_training_progress()
+1380:         self._update_training_progress(0, "Preparing confirmed image/number examples...")
+1381:         training_dir = Path(self.learning_dir)
+1382:         threading.Thread(
+1383:             target=self._train_trocr_worker,
+1384:             args=(training_dir, examples),
+1385:             daemon=True).start()
+1386:         return True
+1387: 
+1388:     def _finish_import_batch(self):
+1389:         if self.busy or self.trocr_training:
+1390:             messagebox.showinfo(
+1391:                 "Processing in progress",
+1392:                 "Wait until scanning and review activity are finished before updating the learning model.")
+1393:             return
+1394:         if not self.learning_dir:
+1395:             messagebox.showinfo("No folder selected", "Choose the PDF folder first.")
+1396:             return
+1397: 
+1398:         # Require all PDFs in this imported batch to be resolved before training.
+1399:         pending = [
+1400:             record for record in self.records.values()
+1401:             if record.get("path") and Path(record["path"]).is_file()
+1402:             and (not record.get("manual_approved"))
+1403:             and record.get("status") != "Moved to BLANKS"
+1404:         ]
+1405:         if pending:
+1406:             messagebox.showwarning(
+1407:                 "Import batch is not finished",
+1408:                 f"{len(pending)} PDF(s) still need review or manual confirmation. "
+1409:                 "Finish reviewing the imported files first. The learning model has not been updated.")
+1410:             return
+1411: 
+1412:         by_source = {}
+1413:         for index, example in enumerate(self.learning_data.get("examples", [])):
+1414:             if example.get("image") and example.get("confirmed_case_number"):
+1415:                 source = example.get("source_pdf") or example.get("image") or f"legacy-{index}"
+1416:                 by_source[source] = example
+1417:         usable_count = len(by_source)
+1418:         trained = int(self.learning_data.get("trocr_v2_trained_count", 0))
+1419:         attempted = int(self.learning_data.get("trocr_v2_attempted_count", 0))
+1420:         required = max(12, max(trained, attempted) + 5)
+1421:         if usable_count < 12:
+1422:             messagebox.showinfo(
+1423:                 "More training examples needed",
+1424:                 f"You have {usable_count} usable image/number pairs. TrOCR needs at least 12. "
+1425:                 "Your confirmed examples are saved; no training was started.")
+1426:             return
+1427:         if usable_count < required:
+1428:             messagebox.showinfo(
+1429:                 "No new training update needed",
+1430:                 f"You have {usable_count} usable examples. The next training attempt requires "
+1431:                 f"{required} (at least 5 more since the last attempt). Your examples are saved.")
+1432:             return
+1433: 
+1434:         started = self._maybe_train_trocr()
+1435:         if not started:
+1436:             messagebox.showinfo(
+1437:                 "No model update started",
+1438:                 "The training requirements are not met. Your saved examples remain available.")
+1439:             return
+1440:         self.finish_batch_btn.config(state="disabled")
+1441:         self.status.config(
+1442:             text=f"Import batch finished. Updating TrOCR with {usable_count} confirmed image/number pairs.")
+1443: 
+1444:     @staticmethod
+1445:     def _normalize_case_text(value):
+1446:         value = str(value or "").replace("—", "-").replace("–", "-")
+1447:         value = re.sub(r"\s+", "", value)
+1448:         return value.upper()
+1449: 
+1450:     def _train_trocr_worker(self, learning_dir, examples):
+1451:         candidate_dir = None
+1452: 
+1453:         def report(percent, stage):
+1454:             # Worker thread communicates with Tk only through the thread-safe queue.
+1455:             try:
+1456:                 self.queue.put(("training_progress", percent, stage))
+1457:             except Exception:
+1458:                 pass
+1459: 
+1460:         try:
+1461:             import torch
+1462:             from PIL import Image
+1463:             from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+1464: 
+1465:             report(2, "Preparing and checking the saved training crops...")
+1466:             usable = []
+1467:             total_examples = max(1, len(examples))
+1468:             for index, ex in enumerate(examples, 1):
+1469:                 image_path = learning_dir / ex["image"]
+1470:                 if image_path.is_file():
+1471:                     try:
+1472:                         with Image.open(image_path) as im:
+1473:                             usable.append((im.convert("RGB").copy(), ex["confirmed_case_number"]))
+1474:                     except Exception:
+1475:                         self._log("Could not load training crop %s", image_path)
+1476:                 if index == total_examples or index % 5 == 0:
+1477:                     report(
+1478:                         2 + 5 * index / total_examples,
+1479:                         f"Checking training crops: {index}/{total_examples}")
+1480:             if len(usable) < 12:
+1481:                 raise RuntimeError(
+1482:                     f"Only {len(usable)} usable case-number crops; at least 12 are required.")
+1483: 
+1484:             # Deterministic held-out split: every fifth item is validation-only for this run.
+1485:             train_items = [item for idx, item in enumerate(usable) if idx % 5 != 0]
+1486:             validation_items = [item for idx, item in enumerate(usable) if idx % 5 == 0]
+1487:             if len(validation_items) < 2 or len(train_items) < 8:
+1488:                 raise RuntimeError("Not enough examples for a meaningful train/validation split.")
+1489: 
+1490:             device = "cuda" if torch.cuda.is_available() else "cpu"
+1491:             base_name = "microsoft/trocr-base-handwritten"
+1492:             active_dir = learning_dir / "trocr_v2_finetuned"
+1493:             recovery_dir = learning_dir / "trocr_v2_previous"
+1494:             baseline_dir = active_dir if (active_dir / "config.json").exists() else (
+1495:                 recovery_dir if (recovery_dir / "config.json").exists() else None)
+1496: 
+1497:             report(
+1498:                 10,
+1499:                 "Loading TrOCR model and tokenizer. The first load may take longer while model files are downloaded...")
+1500:             if baseline_dir is not None:
+1501:                 processor = TrOCRProcessor.from_pretrained(str(baseline_dir), local_files_only=True)
+1502:                 base_model = VisionEncoderDecoderModel.from_pretrained(
+1503:                     str(baseline_dir), local_files_only=True).to(device)
+1504:                 baseline_source = (
+1505:                     "current fine-tuned model" if baseline_dir == active_dir
+1506:                     else "previous recovery model")
+1507:             else:
+1508:                 processor = TrOCRProcessor.from_pretrained(base_name)
+1509:                 base_model = VisionEncoderDecoderModel.from_pretrained(base_name).to(device)
+1510:                 baseline_source = "Microsoft base model"
+1511: 
+1512:             pad_token_id, decoder_start_token_id = self._configure_trocr_token_ids(
+1513:                 base_model, processor)
+1514:             base_model.eval()
+1515:             report(22, f"Model loaded on {device.upper()}. Testing the current model...")
+1516: 
+1517:             def evaluate(model, start_percent, end_percent, stage_name):
+1518:                 model.eval()
+1519:                 correct = 0
+1520:                 total_validation = len(validation_items)
+1521:                 for index, (image, target) in enumerate(validation_items, 1):
+1522:                     pixels = processor(images=image, return_tensors="pt").pixel_values.to(device)
+1523:                     with torch.inference_mode():
+1524:                         output = model.generate(pixels, max_new_tokens=24, num_beams=2)
+1525:                     predicted = processor.batch_decode(output, skip_special_tokens=True)[0]
+1526:                     if self._normalize_case_text(predicted) == self._normalize_case_text(target):
+1527:                         correct += 1
+1528:                     progress = start_percent + (
+1529:                         (end_percent - start_percent) * index / total_validation)
+1530:                     report(
+1531:                         progress,
+1532:                         f"{stage_name}: example {index}/{total_validation} "
+1533:                         f"({correct} exact matches so far)")
+1534:                 return correct
+1535: 
+1536:             baseline_correct = evaluate(
+1537:                 base_model, 24, 34, "Testing existing model")
+1538: 
+1539:             model = base_model
+1540:             optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+1541:             best_correct = baseline_correct
+1542:             best_state = None
+1543:             best_epoch = 0
+1544:             epochs_completed = 0
+1545:             report(
+1546:                 36,
+1547:                 f"Fine-tuning TrOCR with all {len(train_items)} training examples per pass; "
+1548:                 f"validation is checked after each of up to 2 epochs on {device.upper()}...")
+1549: 
+1550:             # Keep a CPU copy of the best checkpoint seen so far. This lets us
+1551:             # discard a later epoch if it harms validation performance.
+1552:             for epoch in range(2):
+1553:                 model.train()
+1554:                 train_progress_start, train_progress_end = ((36, 52) if epoch == 0 else (65, 81))
+1555:                 for example_index, (image, label) in enumerate(train_items, 1):
+1556:                     pixels = processor(images=image, return_tensors="pt").pixel_values.to(device)
+1557:                     labels = processor.tokenizer(
+1558:                         label, return_tensors="pt", padding="max_length",
+1559:                         max_length=20, truncation=True).input_ids.to(device)
+1560:                     labels[labels == pad_token_id] = -100
+1561:                     loss = model(pixel_values=pixels, labels=labels).loss
+1562:                     loss.backward()
+1563:                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+1564:                     optimizer.step()
+1565:                     optimizer.zero_grad(set_to_none=True)
+1566:                     last_loss = float(loss.detach().cpu().item())
+1567:                     progress = train_progress_start + (
+1568:                         (train_progress_end - train_progress_start) *
+1569:                         example_index / len(train_items))
+1570:                     report(
+1571:                         progress,
+1572:                         f"Fine-tuning epoch {epoch + 1}/2 • "
+1573:                         f"example {example_index}/{len(train_items)} • loss {last_loss:.4f}")
+1574: 
+1575:                 epochs_completed = epoch + 1
+1576:                 eval_start, eval_end = ((55, 65) if epoch == 0 else (78, 90))
+1577:                 epoch_correct = evaluate(
+1578:                     model, eval_start, eval_end,
+1579:                     f"Validation after epoch {epoch + 1}/2")
+1580: 
+1581:                 if epoch_correct > best_correct:
+1582:                     best_correct = epoch_correct
+1583:                     best_epoch = epoch + 1
+1584:                     best_state = {
+1585:                         name: tensor.detach().cpu().clone()
+1586:                         for name, tensor in model.state_dict().items()
+1587:                     }
+1588:                     report(
+1589:                         eval_end,
+1590:                         f"Epoch {epoch + 1} improved validation ({best_correct}/"
+1591:                         f"{len(validation_items)}). Keeping this checkpoint as best so far...")
+1592:                 else:
+1593:                     if best_state is not None:
+1594:                         model.load_state_dict(best_state)
+1595:                     report(
+1596:                         eval_end,
+1597:                         f"Epoch {epoch + 1} did not improve validation. "
+1598:                         f"Stopping and retaining the best checkpoint...")
+1599:                     break
+1600: 
+1601:             if best_state is not None:
+1602:                 model.load_state_dict(best_state)
+1603:             tuned_correct = best_correct
+1604: 
+1605:             baseline_accuracy = 100.0 * baseline_correct / len(validation_items)
+1606:             tuned_accuracy = 100.0 * tuned_correct / len(validation_items)
+1607:             improved = tuned_correct > baseline_correct
+1608:             validation_report = {
+1609:                 "baseline_accuracy_pct": baseline_accuracy,
+1610:                 "accuracy_pct": tuned_accuracy,
+1611:                 "correct": tuned_correct,
+1612:                 "total": len(validation_items),
+1613:                 "training_examples": len(train_items),
+1614:                 "epochs_completed": epochs_completed,
+1615:                 "best_epoch": best_epoch,
+1616:                 "early_stopped": epochs_completed < 2,
+1617:                 "evaluated_at": datetime.now().isoformat(timespec="seconds"),
+1618:                 "saved_as_active": improved,
+1619:                 "baseline_source": baseline_source
+1620:             }
+1621: 
+1622:             if improved:
+1623:                 report(94, "Validation improved. Saving and activating the updated model...")
+1624:                 candidate_dir = learning_dir / f"trocr_candidate_{int(time.time())}"
+1625:                 candidate_dir.mkdir(parents=True, exist_ok=False)
+1626:                 model.eval()
+1627:                 model.save_pretrained(str(candidate_dir))
+1628:                 processor.save_pretrained(str(candidate_dir))
+1629:                 previous_dir = learning_dir / "trocr_v2_previous"
+1630:                 if active_dir.exists():
+1631:                     if previous_dir.exists():
+1632:                         shutil.rmtree(previous_dir)
+1633:                     os.replace(active_dir, previous_dir)
+1634:                 os.replace(candidate_dir, active_dir)
+1635:                 candidate_dir = None
+1636:                 active_text = "New TrOCR model passed the held-out exact-match comparison and was activated."
+1637:             else:
+1638:                 report(94, "Validation did not improve. Keeping the existing model...")
+1639:                 active_text = (
+1640:                     "TrOCR training did not improve held-out exact matches; the existing model was kept.")
+1641: 
+1642:             db = learning_dir / "learning_examples_v3.json"
+1643:             with self.data_lock:
+1644:                 try:
+1645:                     latest = json.loads(db.read_text(encoding="utf-8")) if db.exists() else {}
+1646:                 except Exception:
+1647:                     latest = {}
+1648:                 latest["trocr_v2_validation"] = validation_report
+1649:                 latest["last_training_summary"] = {
+1650:                     "examples_total": len(usable),
+1651:                     "examples_handwritten": sum(1 for ex in examples if self._normalized_training_type(ex.get("training_type")) == "handwritten"),
+1652:                     "examples_printed": sum(1 for ex in examples if self._normalized_training_type(ex.get("training_type")) == "printed"),
+1653:                     "examples_unsure": sum(1 for ex in examples if self._normalized_training_type(ex.get("training_type")) == "unsure"),
+1654:                     "updated_at": validation_report.get("evaluated_at"),
+1655:                     "model_activated": bool(improved)
+1656:                 }
+1657:                 latest["trocr_v2_attempted_count"] = len(usable)
+1658:                 if improved:
+1659:                     latest["trocr_v2_trained_count"] = len(usable)
+1660:                 temp = db.with_suffix(".json.tmp")
+1661:                 temp.write_text(json.dumps(latest, indent=2), encoding="utf-8")
+1662:                 os.replace(temp, db)
+1663: 
+1664:             final_message = (
+1665:                 f"{active_text} Held-out exact match: {tuned_correct}/{len(validation_items)} "
+1666:                 f"({tuned_accuracy:.1f}%), baseline {baseline_correct}/{len(validation_items)}. "
+1667:                 f"Training passes completed: {epochs_completed}/2; best pass: {best_epoch or 'none'}.")
+1668:             report(100, final_message)
+1669:             self.queue.put(("learning_status", final_message))
+1670:         except Exception as exc:
+1671:             self._log("TrOCR training/validation failed: %s", exc)
+1672:             error_message = f"TrOCR update failed; existing model retained: {exc}"
+1673:             report(100, error_message)
+1674:             self.queue.put(("learning_status", error_message))
+1675:         finally:
+1676:             if candidate_dir and candidate_dir.exists():
+1677:                 shutil.rmtree(candidate_dir, ignore_errors=True)
+1678: 
+===== ORIGINAL SOURCE LINES 1679-1837 =====
+1679:     def scan(self):
+1680:         if self.busy or self.trocr_training or not self.records:
+1681:             if self.trocr_training:
+1682:                 messagebox.showinfo(
+1683:                     "Model training in progress",
+1684:                     "Wait for the current learning-model update to finish before starting another scan.")
+1685:             return
+1686:         try:
+1687:             self.scan_year_prefix = self._year_prefix()
+1688:             if self.auto_label_var.get():
+1689:                 self._get_auto_threshold()
+1690:         except ValueError as exc:
+1691:             messagebox.showerror("Invalid setting", str(exc))
+1692:             return
+1693:         if pymupdf is None or easyocr is None or np is None:
+1694:             messagebox.showerror(
+1695:                 "Setup required",
+1696:                 "Run SETUP.bat first. Python 3.11, PyMuPDF, EasyOCR and NumPy must be installed.")
+1697:             return
+1698:         try:
+1699:             settings_path = self.folder / ".case_ocr_settings.json"
+1700:             settings_path.write_text(
+1701:                 json.dumps({"year": self.year_var.get().strip()}, indent=2),
+1702:                 encoding="utf-8")
+1703:         except Exception:
+1704:             self._log("Could not save case-year setting")
+1705:         self.scan_items = [
+1706:             (iid, rec) for iid, rec in self.records.items()
+1707:             if not rec.get("confirmed") and rec.get("status") != "Moved to BLANKS"
+1708:             and Path(rec["path"]).is_file()]
+1709:         if not self.scan_items:
+1710:             self.status.config(text="No unreviewed PDFs remain in the selected root folder.")
+1711:             return
+1712:         self.busy = True
+1713:         self.paused = False
+1714:         self.pause_event.set()
+1715:         self.pause_btn.config(text="PAUSE SCAN", state="normal")
+1716:         self.restart_btn.config(state="disabled")
+1717:         self.scan_btn.config(state="disabled")
+1718:         # Review already-scanned PDFs while the worker continues through the
+1719:         # remaining files. Unprocessed rows remain excluded by _review_ready_ids().
+1720:         self._refresh_review_controls()
+1721:         self._update_completed_count()
+1722:         self.progress.config(maximum=len(self.scan_items), value=0)
+1723:         year_text = f" for year {self.scan_year_prefix}" if self.scan_year_prefix else ""
+1724:         self.status.config(text=f"Scanning PDFs{year_text}. Models initialize locally; first run can take longer.")
+1725:         self._log("Scan started in %s with year filter %s", self.folder, self.scan_year_prefix or "ALL")
+1726:         threading.Thread(target=self._worker, daemon=True).start()
+1727: 
+1728:     def _worker(self):
+1729:         try:
+1730:             try:
+1731:                 import torch
+1732:                 gpu_available = bool(torch.cuda.is_available())
+1733:             except Exception:
+1734:                 gpu_available = False
+1735:             reader_gpu = gpu_available
+1736:             if self.reader is None:
+1737:                 try:
+1738:                     self.reader = easyocr.Reader(["en"], gpu=reader_gpu, verbose=False)
+1739:                 except Exception:
+1740:                     self._log("EasyOCR GPU initialization failed; retrying on CPU")
+1741:                     reader_gpu = False
+1742:                     self.reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+1743:             self.queue.put(("engine_status", f"EasyOCR initialized • {'GPU' if reader_gpu else 'CPU'}"))
+1744:             records_snapshot = list(self.scan_items)
+1745:             total = len(records_snapshot)
+1746:             for idx, (iid, rec) in enumerate(records_snapshot, 1):
+1747:                 while not self.pause_event.wait(timeout=0.2):
+1748:                     pass
+1749:                 source_path = Path(rec["path"])
+1750:                 try:
+1751:                     if not source_path.is_file():
+1752:                         raise FileNotFoundError(f"Source PDF no longer exists: {source_path.name}")
+1753:                     if self._pdf_is_blank(source_path):
+1754:                         blanks_dir = self.folder / "BLANKS"
+1755:                         blanks_dir.mkdir(exist_ok=True)
+1756:                         destination = blanks_dir / source_path.name
+1757:                         if destination.exists():
+1758:                             self.queue.put(("blank_conflict", iid, destination, idx))
+1759:                         else:
+1760:                             shutil.move(str(source_path), str(destination))
+1761:                             self.queue.put(("blank", iid, destination, idx))
+1762:                         continue
+1763:                     result = self._ocr_pdf(source_path)
+1764:                     candidate, snippet, note, handwritten, score, engines, agreement = result
+1765:                     self.queue.put((
+1766:                         "row", iid, candidate, snippet, note, handwritten,
+1767:                         score, engines, agreement, idx))
+1768:                 except Exception as exc:
+1769:                     self._log("Scan failed for %s: %s", source_path, exc)
+1770:                     self.queue.put((
+1771:                         "row", iid, "", None, f"Scan error: {exc}",
+1772:                         False, 0.0, [], False, idx))
+1773:             self.queue.put(("done",))
+1774:         except Exception as exc:
+1775:             self._log("Fatal scan initialization error: %s", exc)
+1776:             self.queue.put(("fatal", str(exc)))
+1777: 
+1778:     def toggle_pause(self):
+1779:         if not self.busy:
+1780:             return
+1781:         if self.paused:
+1782:             self.paused = False
+1783:             self.pause_event.set()
+1784:             self.pause_btn.config(text="PAUSE SCAN")
+1785:             self.status.config(text="Resuming scan...")
+1786:         else:
+1787:             self.paused = True
+1788:             self.pause_event.clear()
+1789:             self.pause_btn.config(text="RESUME SCAN")
+1790:             self.status.config(text="Scan paused. Click Resume Scan to continue.")
+1791: 
+1792:     def restart_scan(self):
+1793:         if self.busy or self.trocr_training:
+1794:             messagebox.showinfo("Processing in progress", "Finish the current scan or model update before restarting.")
+1795:             return
+1796:         if not self.folder:
+1797:             return
+1798:         if not messagebox.askyesno(
+1799:             "Restart scan",
+1800:             "Clear detected candidates and user confirmations for PDFs still in the root folder, then scan them again?"):
+1801:             return
+1802: 
+1803:         # Re-enumerate the root folder so PDFs already moved to BLANKS are not resurrected.
+1804:         previous_records = dict(self.records)
+1805:         for tree in (self.tree, self.completed_tree):
+1806:             for item in tree.get_children():
+1807:                 tree.delete(item)
+1808:         self.records = {}
+1809:         pdfs = sorted(
+1810:             (p for p in self.folder.iterdir()
+1811:              if p.is_file() and p.suffix.lower() == ".pdf"),
+1812:             key=self._natural_pdf_sort_key)
+1813:         for pdf in pdfs:
+1814:             iid = f"pdf::{pdf.name}"
+1815:             previous = previous_records.get(iid, {})
+1816:             if previous.get("exported"):
+1817:                 previous["path"] = pdf
+1818:                 previous["snippet"] = None
+1819:                 previous["completed_iid"] = None
+1820:                 self.records[iid] = previous
+1821:                 continue
+1822:             self.records[iid] = {
+1823:                 "path": pdf, "candidate": "", "confirmed": "", "status": "Not scanned",
+1824:                 "snippet": None, "handwritten": False, "score": 0.0,
+1825:                 "engines": [], "engine_agreement": False, "auto_labeled": False,
+1826:                 "manual_approved": False, "completed_iid": None, "exported": False,
+1827:                 "export_name": ""
+1828:             }
+1829:             self.tree.insert("", "end", iid=iid, values=(pdf.name, "", "—", "Not scanned"))
+1830:         self._save_state()
+1831:         self._update_completed_count()
+1832:         self.scan_btn.config(state="normal" if pdfs else "disabled")
+1833:         self._refresh_review_controls()
+1834:         self.finish_batch_btn.config(state="disabled")
+1835:         self.scan()
+1836: 
+1837:     def _pdf_is_blank(self, path):
+===== ORIGINAL SOURCE LINES 2498-2670 =====
+2498:     def _poll(self):
+2499:         try:
+2500:             while True:
+2501:                 msg = self.queue.get_nowait()
+2502:                 kind = msg[0]
+2503:                 if kind == "blank":
+2504:                     _, iid, destination, idx = msg
+2505:                     if iid in self.records:
+2506:                         self.records[iid]["status"] = "Moved to BLANKS"
+2507:                         if self.tree.exists(iid):
+2508:                             self.tree.delete(iid)
+2509:                     self.progress["value"] = idx
+2510:                     self.status.config(
+2511:                         text=f"Scanned {idx} of {len(self.scan_items)} PDFs. Blank PDF moved to BLANKS: {destination.name}")
+2512:                     self._refresh_review_controls()
+2513:                     self._save_state()
+2514:                 elif kind == "blank_conflict":
+2515:                     _, iid, destination, idx = msg
+2516:                     if iid in self.records:
+2517:                         self.records[iid]["status"] = "Blank candidate — filename conflict; left in root"
+2518:                         if self.tree.exists(iid):
+2519:                             r = self.records[iid]
+2520:                             self.tree.item(iid, values=(r["path"].name, "", "—", r["status"]))
+2521:                     self.progress["value"] = idx
+2522:                     self.status.config(
+2523:                         text=f"Blank PDF not moved because BLANKS already contains {destination.name}.")
+2524:                     self._refresh_review_controls()
+2525:                     self._save_state()
+2526:                 elif kind == "row":
+2527:                     _, iid, cand, snip, note, hand, score, engines, agreement, idx = msg
+2528:                     r = self.records[iid]
+2529:                     r.update(
+2530:                         candidate=cand, snippet=snip, status=note,
+2531:                         handwritten=hand, score=score, engines=engines,
+2532:                         engine_agreement=agreement)
+2533:                     auto_done = False
+2534:                     # Automatic detection only enters Completed as UNAPPROVED.
+2535:                     if cand and self.auto_label_var.get():
+2536:                         block_reason = self._auto_label_block_reason(score, agreement, cand)
+2537:                         if block_reason is None:
+2538:                             r["confirmed"] = cand
+2539:                             r["auto_labeled"] = True
+2540:                             r["manual_approved"] = False
+2541:                             r["status"] = f"Auto-detected ({score:.1f}%, engines agree) — manual approval required"
+2542:                             self._move_to_completed(iid)
+2543:                             auto_done = True
+2544:                         else:
+2545:                             note = f"{note} • Auto-confirm blocked: {block_reason}"
+2546:                             r["status"] = note
+2547:                     if not auto_done and self.tree.exists(iid):
+2548:                         self.tree.item(
+2549:                             iid, values=(
+2550:                                 r["path"].name, cand,
+2551:                                 f"{score:.1f}%" if score else "—", note))
+2552:                     self.progress["value"] = idx
+2553:                     self.status.config(text=f"Scanned {idx} of {len(self.scan_items)} PDF(s).")
+2554:                     self._refresh_review_controls()
+2555:                     self._update_completed_count()
+2556:                     self._save_state()
+2557:                 elif kind == "engine_status":
+2558:                     _, message = msg
+2559:                     self.model_status_label.config(text=message)
+2560:                 elif kind == "engine_warning":
+2561:                     _, message = msg
+2562:                     self.model_status_label.config(text=message)
+2563:                     self._log(message)
+2564:                 elif kind == "model_status":
+2565:                     _, message = msg
+2566:                     self.model_status_label.config(text=message)
+2567:                 elif kind == "training_progress":
+2568:                     _, percent, stage = msg
+2569:                     self._update_training_progress(percent, stage)
+2570:                 elif kind == "learning_status":
+2571:                     _, message = msg
+2572:                     self.trocr_training = False
+2573:                     # The active model can be reloaded from its validated disk checkpoint.
+2574:                     self.trocr_model = None
+2575:                     self.trocr_processor = None
+2576:                     self.trocr_error = ""
+2577:                     self._load_learning_data()
+2578:                     self.status.config(text=message)
+2579:                     self._log(message)
+2580:                     self.scan_btn.config(state="normal" if self.records else "disabled")
+2581:                     self.finish_batch_btn.config(state="normal")
+2582:                     self._update_training_progress(100, message, finished=True)
+2583:                 elif kind == "fatal":
+2584:                     self.busy = False
+2585:                     self.scan_btn.config(state="normal")
+2586:                     self.pause_btn.config(state="disabled", text="PAUSE SCAN")
+2587:                     self.restart_btn.config(state="normal")
+2588:                     self._refresh_review_controls()
+2589:                     self.finish_batch_btn.config(state="normal")
+2590:                     self._update_completed_count()
+2591:                     self._log("Fatal scan error: %s", msg[1])
+2592:                     messagebox.showerror("OCR initialization failed", msg[1])
+2593:                 elif kind == "update_check_result":
+2594:                     self.update_busy = False
+2595:                     self.update_btn.config(state="normal", text="UPDATE")
+2596:                     latest_version = msg[1]
+2597:                     release = msg[2]
+2598:                     error = msg[3]
+2599:                     if error:
+2600:                         messagebox.showwarning("Update check", error)
+2601:                     elif not release:
+2602:                         messagebox.showinfo("Update check", f"M.F. Case Number OCR is up to date (V{self.app_version}).")
+2603:                     else:
+2604:                         self.update_release = release
+2605:                         if messagebox.askyesno(
+2606:                             "Update available",
+2607:                             f"Version {latest_version} is available. You are running V{self.app_version}.\n\n"
+2608:                             "Download and install the update now? The program will restart when installation finishes."):
+2609:                             self._download_update(release)
+2610:                 elif kind == "update_download_ready":
+2611:                     self.update_busy = False
+2612:                     self.update_btn.config(state="normal", text="UPDATE")
+2613:                     archive = Path(msg[1])
+2614:                     version = msg[2]
+2615:                     if messagebox.askyesno(
+2616:                         "Install update",
+2617:                         f"Version {version} has downloaded and passed ZIP integrity checks.\n\n"
+2618:                         "The app will close, install the update, and reopen. Continue?"):
+2619:                         self._launch_update_installer(archive)
+2620:                     else:
+2621:                         try:
+2622:                             archive.unlink(missing_ok=True)
+2623:                         except Exception:
+2624:                             pass
+2625:                 elif kind == "update_error":
+2626:                     self.update_busy = False
+2627:                     self.update_btn.config(state="normal", text="UPDATE")
+2628:                     messagebox.showerror("Update failed", msg[1])
+2629:                 elif kind == "done":
+2630:                     self.busy = False
+2631:                     self.paused = False
+2632:                     self.pause_event.set()
+2633:                     self.scan_btn.config(state="normal")
+2634:                     self.pause_btn.config(state="disabled", text="PAUSE SCAN")
+2635:                     self.restart_btn.config(state="normal")
+2636:                     self._refresh_review_controls()
+2637:                     self.finish_batch_btn.config(state="normal")
+2638:                     self._update_completed_count()
+2639:                     self.status.config(
+2640:                         text="Scan complete. Review every candidate; then finish the batch to update the learning model.")
+2641:                     self._save_state()
+2642:         except queue.Empty:
+2643:             pass
+2644:         self._update_scan_file_count()
+2645:         self.root.after(150, self._poll)
+2646: 
+2647:     def _review_ready_ids(self):
+2648:         ready = []
+2649:         for iid, record in self.records.items():
+2650:             if record.get("status") in ("Not scanned", "Scanning"):
+2651:                 continue
+2652:             if record.get("status") == "Moved to BLANKS":
+2653:                 continue
+2654:             record_path = record.get("path")
+2655:             if not record_path or not Path(record_path).is_file():
+2656:                 continue
+2657:             ready.append(iid)
+2658:         return ready
+2659: 
+2660:     def _refresh_review_controls(self):
+2661:         enabled = bool(self._review_ready_ids()) and not self.trocr_training
+2662:         state = "normal" if enabled else "disabled"
+2663:         self.review_btn.config(state=state)
+2664:         self.review_all_btn.config(state=state)
+2665: 
+2666:     def on_double_click(self, event):
+2667:         if self.trocr_training:
+2668:             return
+2669:         iid = self.tree.identify_row(event.y)
+2670:         if iid:
+===== ORIGINAL SOURCE LINES 3095-3177 =====
+3095:     def review_selected(self):
+3096:         if self.trocr_training:
+3097:             return
+3098:         selected = [
+3099:             iid for iid in self.tree.selection()
+3100:             if iid in self._review_ready_ids()]
+3101:         if not selected:
+3102:             messagebox.showinfo(
+3103:                 "Nothing ready to review",
+3104:                 "Select a PDF whose scan has finished. You can review completed scans while the remaining PDFs continue processing.")
+3105:             return
+3106:         self._open_review_queue(selected, 0)
+3107: 
+3108:     def review_next(self):
+3109:         if self.trocr_training:
+3110:             return
+3111:         pending = [
+3112:             iid for iid in self._review_ready_ids()
+3113:             if not self.records[iid].get("confirmed")]
+3114:         if not pending:
+3115:             messagebox.showinfo(
+3116:                 "No scanned files ready",
+3117:                 "No completed OCR results are waiting for review yet. The scanner may still be processing the remaining PDFs.")
+3118:             return
+3119:         self._open_review_queue(pending, 0)
+3120: 
+3121:     def review_completed_selected(self):
+3122:         if self.trocr_training:
+3123:             return
+3124:         selected = list(self.completed_tree.selection())
+3125:         if not selected:
+3126:             messagebox.showinfo(
+3127:                 "Select completed files",
+3128:                 "Select one or more files in Completed to inspect and approve them.")
+3129:             return
+3130:         self._open_review_queue(selected, 0)
+3131: 
+3132:     def _open_review_queue(self, iids, index=0):
+3133:         ready = set(self._review_ready_ids())
+3134:         self.review_queue = [
+3135:             iid for iid in iids
+3136:             if iid in self.records and
+3137:             (iid in ready or self.records[iid].get("confirmed"))
+3138:         ]
+3139:         if not self.review_queue:
+3140:             return
+3141:         self._show_review_item(index)
+3142: 
+3143:     def _move_to_completed(self, iid):
+3144:         r = self.records[iid]
+3145:         if r.get("manual_approved"):
+3146:             queue_status = "Approved — ready for export"
+3147:         elif r.get("auto_labeled"):
+3148:             queue_status = "Auto-detected — review required"
+3149:         else:
+3150:             queue_status = "Confirmed — ready for export"
+3151:         r["status"] = queue_status
+3152:         self._insert_completed_row(iid, r)
+3153:         r["completed_iid"] = iid
+3154:         if self.tree.exists(iid):
+3155:             self.tree.delete(iid)
+3156:         self._update_completed_count()
+3157:         self._update_scan_file_count()
+3158:         self._save_state()
+3159: 
+3160:     def _update_completed_count(self):
+3161:         approved = sum(
+3162:             1 for r in self.records.values()
+3163:             if r.get("confirmed") and r.get("manual_approved") and not r.get("exported"))
+3164:         needs_review = sum(
+3165:             1 for r in self.records.values()
+3166:             if r.get("confirmed") and r.get("auto_labeled")
+3167:             and not r.get("manual_approved") and not r.get("exported"))
+3168:         self.completed_count.config(
+3169:             text=f"{approved} approved for export • {needs_review} auto-detected awaiting review")
+3170:         self.export_btn.config(state="normal" if approved else "disabled")
+3171:         pending_review = any(
+3172:             r.get("confirmed") and not r.get("manual_approved")
+3173:             and not r.get("exported") for r in self.records.values())
+3174:         self.review_completed_btn.config(
+3175:             state="normal" if pending_review and not self.trocr_training else "disabled")
+3176: 
+3177:     def _ensure_preview(self, record):
+===== ORIGINAL SOURCE LINES 3200-3388 =====
+3200:     def _show_review_item(self, index):
+3201:         if not self.review_queue:
+3202:             return
+3203:         index = max(0, min(index, len(self.review_queue)-1))
+3204:         self.review_index = index
+3205:         iid = self.review_queue[index]
+3206:         r = self.records[iid]
+3207:         self._ensure_preview(r)
+3208:         visual_candidates = (r.get("snippet")[4]
+3209:                              if r.get("snippet") and len(r.get("snippet")) > 4 else [])
+3210:         candidate_values = []
+3211:         for item in visual_candidates:
+3212:             number = item.get("number")
+3213:             if number and number not in candidate_values:
+3214:                 candidate_values.append(number)
+3215:         if r.get("candidate") and r.get("candidate") not in candidate_values:
+3216:             candidate_values.insert(0, r.get("candidate"))
+3217:         sequence_values, sequence_message = self._sequence_hint_for_iid(iid)
+3218:         # A two-sided exact agreement is a stronger clue than a truncated OCR
+3219:         # candidate. Put that value first in the selector, but keep all OCR
+3220:         # readings available as alternatives for reviewer inspection.
+3221:         sequence_consensus = (
+3222:             len(sequence_values) == 1
+3223:             and "both adjacent files read" in sequence_message.lower()
+3224:         )
+3225:         if sequence_consensus:
+3226:             consensus_value = sequence_values[0]
+3227:             candidate_values = [consensus_value] + [
+3228:                 value for value in candidate_values if value != consensus_value]
+3229:         else:
+3230:             for value in sequence_values:
+3231:                 if value not in candidate_values:
+3232:                     candidate_values.append(value)
+3233: 
+3234:         initial_reading = self._initial_review_reading(
+3235:             r, candidate_values, sequence_values, sequence_message)
+3236: 
+3237:         win = tk.Toplevel(self.root)
+3238:         win.title(f"Verify Case Number ({index+1} of {len(self.review_queue)})")
+3239:         win.transient(self.root)
+3240:         win.grab_set()
+3241:         try:
+3242:             win.state("zoomed")
+3243:         except tk.TclError:
+3244:             win.geometry("1400x900")
+3245: 
+3246:         # Two-pane review: portrait document on the left, all controls on the right.
+3247:         body = ttk.Frame(win, padding=10)
+3248:         body.pack(fill="both", expand=True)
+3249:         body.columnconfigure(0, weight=3)
+3250:         body.columnconfigure(1, weight=1, minsize=300)
+3251:         body.rowconfigure(0, weight=1)
+3252: 
+3253:         preview_panel = ttk.Frame(body)
+3254:         preview_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+3255:         preview_panel.rowconfigure(0, weight=1)
+3256:         preview_panel.columnconfigure(0, weight=1)
+3257: 
+3258:         canvas = tk.Canvas(preview_panel, bg="#333", highlightthickness=0)
+3259:         sx = ttk.Scrollbar(preview_panel, orient="horizontal", command=canvas.xview)
+3260:         sy = ttk.Scrollbar(preview_panel, orient="vertical", command=canvas.yview)
+3261:         canvas.configure(xscrollcommand=sx.set, yscrollcommand=sy.set)
+3262:         canvas.grid(row=0, column=0, sticky="nsew")
+3263:         sy.grid(row=0, column=1, sticky="ns")
+3264:         sx.grid(row=1, column=0, sticky="ew")
+3265: 
+3266:         controls = ttk.Frame(body, padding=12)
+3267:         controls.grid(row=0, column=1, sticky="nsew")
+3268:         controls.columnconfigure(0, weight=1)
+3269: 
+3270:         ttk.Label(controls, text=f"File {index+1} of {len(self.review_queue)}",
+3271:                   font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
+3272:         ttk.Label(controls, text=r["path"].name, wraplength=280).grid(
+3273:             row=1, column=0, sticky="w", pady=(0, 12))
+3274: 
+3275:         size_button = ttk.Button(controls, text="Restore Window")
+3276:         size_button.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+3277: 
+3278:         def toggle_size():
+3279:             try:
+3280:                 if win.state() == "zoomed":
+3281:                     win.state("normal")
+3282:                     win.geometry("1400x900")
+3283:                     size_button.config(text="Full Screen")
+3284:                 else:
+3285:                     win.state("zoomed")
+3286:                     size_button.config(text="Restore Window")
+3287:             except tk.TclError:
+3288:                 pass
+3289:         size_button.config(command=toggle_size)
+3290: 
+3291:         ttk.Label(controls, text="OCR candidates (select a reading):",
+3292:                   font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")
+3293:         candidate_choice_var = tk.StringVar(value=initial_reading)
+3294:         candidate_selector = ttk.Combobox(
+3295:             controls, textvariable=candidate_choice_var,
+3296:             values=candidate_values, state="readonly" if candidate_values else "disabled")
+3297:         candidate_selector.grid(row=4, column=0, sticky="ew", pady=(2, 4))
+3298:         if sequence_message:
+3299:             if sequence_consensus and not r.get("manual_approved"):
+3300:                 sequence_display = (
+3301:                     f"{sequence_message} The strongest suggestion ({sequence_values[0]}) "
+3302:                     "has been placed in the confirmation field. Verify it against the document before confirming."
+3303:                 )
+3304:             else:
+3305:                 sequence_display = sequence_message
+3306:             ttk.Label(controls, text=sequence_display, wraplength=280,
+3307:                       foreground="#8a5a00").grid(row=5, column=0, sticky="w", pady=(0, 8))
+3308:             label_row = 6
+3309:         else:
+3310:             label_row = 5
+3311:         ttk.Label(controls, text="Confirmed case number (YY- plus 1–7 digits):",
+3312:                   wraplength=280).grid(row=label_row, column=0, sticky="w")
+3313:         entry = ttk.Entry(controls, font=("Segoe UI", 14))
+3314:         entry.grid(row=label_row + 1, column=0, sticky="ew", pady=(5, 4))
+3315:         entry.insert(0, initial_reading)
+3316:         def use_selected_candidate(_event=None):
+3317:             selected_value = candidate_choice_var.get().strip()
+3318:             if selected_value:
+3319:                 entry.delete(0, "end")
+3320:                 entry.insert(0, selected_value)
+3321:         candidate_selector.bind("<<ComboboxSelected>>", use_selected_candidate)
+3322:         err = ttk.Label(controls, text="", foreground="red", wraplength=280)
+3323:         err.grid(row=label_row + 2, column=0, sticky="w", pady=(0, 12))
+3324: 
+3325:         ttk.Separator(controls).grid(row=label_row + 3, column=0, sticky="ew", pady=8)
+3326: 
+3327:         nav_buttons = ttk.Frame(controls)
+3328:         nav_buttons.grid(row=label_row + 4, column=0, sticky="ew", pady=(4, 8))
+3329:         nav_buttons.columnconfigure(0, weight=1)
+3330:         nav_buttons.columnconfigure(1, weight=1)
+3331: 
+3332:         def move(delta):
+3333:             win.destroy()
+3334:             nxt = index + delta
+3335:             if 0 <= nxt < len(self.review_queue):
+3336:                 self._show_review_item(nxt)
+3337: 
+3338:         ttk.Button(nav_buttons, text="◀ Previous",
+3339:                    command=lambda: move(-1),
+3340:                    state="normal" if index > 0 else "disabled").grid(
+3341:                        row=0, column=0, sticky="ew", padx=(0, 4))
+3342:         ttk.Button(nav_buttons, text="Next ▶",
+3343:                    command=lambda: move(1),
+3344:                    state="normal" if index < len(self.review_queue)-1 else "disabled").grid(
+3345:                        row=0, column=1, sticky="ew", padx=(4, 0))
+3346: 
+3347:         def confirm():
+3348:             value = entry.get().strip()
+3349:             try:
+3350:                 year_prefix = self._year_prefix()
+3351:             except ValueError as exc:
+3352:                 err.config(text=str(exc))
+3353:                 return
+3354:             if re.fullmatch(r"\d{1,7}", value) and year_prefix:
+3355:                 value = f"{year_prefix}-{value}"
+3356:             if not re.fullmatch(r"\d{2}-\d{1,7}", value):
+3357:                 err.config(text="Enter YY- plus 1–7 digits, or just 1–7 digits when a batch year is set.")
+3358:                 return
+3359:             if year_prefix and value[:2] != year_prefix:
+3360:                 if not messagebox.askyesno(
+3361:                     "Year differs",
+3362:                     f"The number starts with {value[:2]}, but the batch year is {year_prefix}. Keep it?",
+3363:                     parent=win
+3364:                 ):
+3365:                     return
+3366:             r["confirmed"] = value
+3367:             r["manual_approved"] = True
+3368:             r["training_type"] = r.get("training_type", "unsure")
+3369:             r["status"] = "User confirmed"
+3370:             try:
+3371:                 self._save_learning_example(r, value)
+3372:             except Exception as exc:
+3373:                 self._log("Confirmed example could not be saved: %s", exc)
+3374:                 messagebox.showwarning(
+3375:                     "Learning example not saved",
+3376:                     f"The case number was approved, but its training example could not be saved: {exc}",
+3377:                     parent=win)
+3378:             self._move_to_completed(iid)
+3379:             win.destroy()
+3380:             next_index = index + 1
+3381:             if next_index < len(self.review_queue):
+3382:                 self._show_review_item(next_index)
+3383: 
+3384:         action_row = label_row + 5
+3385:         ttk.Button(controls, text="CONFIRM & MOVE TO COMPLETED",
+3386:                    command=confirm).grid(row=action_row, column=0, sticky="ew", pady=(0, 8))
+3387:         ttk.Button(controls, text="Leave for Later",
+3388:                    command=win.destroy).grid(row=action_row + 1, column=0, sticky="ew")
