@@ -1,1 +1,1 @@
-Publish V3.3.6 after rebuilding and verifying the recorded package SHA256.
+Build deterministic V3.3.6 ZIP and report checksum.
