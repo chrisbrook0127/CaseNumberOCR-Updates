@@ -1,1 +1,1 @@
-Verify and refresh V3.3.6 release asset after correcting digest lookup.
+Verify hashlib dependency and rebuild V3.3.6.
