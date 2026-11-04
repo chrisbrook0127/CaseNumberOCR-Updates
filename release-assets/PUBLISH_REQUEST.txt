@@ -1,1 +1,1 @@
-Retry V3.3.6 validation after scan-button patch correction.
+Build V3.3.6 after removing obsolete scan patch.
