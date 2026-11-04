@@ -994,7 +994,7 @@ for method_name in (
         )
 ui_method = next(node for node in app_class.body if isinstance(node, ast.FunctionDef) and node.name == "_ui")
 ui_literals = [
-    node.value.value for node in ast.walk(ui_method)
+    node.value for node in ast.walk(ui_method)
     if isinstance(node, ast.Constant) and isinstance(node.value, str)
 ]
 for forbidden in ("OCR score is a detector score", "Minimum OCR score %", "Inspect Learning Data",
