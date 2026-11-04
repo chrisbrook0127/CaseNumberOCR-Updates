@@ -1,1 +1,1 @@
-Build V3.3.6 after removing obsolete scan patch.
+Rebuild V3.3.6 after training popup and cancellation safeguards.
