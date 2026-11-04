@@ -1,1 +1,1 @@
-Build and validate V3.3.6 package. Publish only after checksum is independently recorded.
+Build and validate V3.3.6 after generator syntax correction.
