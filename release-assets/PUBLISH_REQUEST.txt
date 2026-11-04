@@ -1,1 +1,1 @@
-Replace V3.3.6 with corrected hash-dependency package and verify release digest.
+Run method inspection now for the new V3.3.6 learning save exception.
