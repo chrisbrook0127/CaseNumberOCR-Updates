@@ -1,1 +1,1 @@
-Retry publish V3.3.5 after fixing GitHub Actions token interpolation.
+Inspect V3.3.5 source package for next feature update.
