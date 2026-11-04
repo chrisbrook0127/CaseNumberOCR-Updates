@@ -1,0 +1,79 @@
+
+==== _normalized_training_type matches: [739] ====
+737:             }
+738:         self._refresh_learning_stats()
+739: 
+740:     def _normalized_training_type(value):
+741:         value = str(value or "unsure").strip().lower()
+742:         return value if value in {"handwritten", "printed"} else "unsure"
+743: 
+744:     def _sync_learning_type_databases(self):
+745:         """Write independently inspectable category libraries from the V3 master set."""
+746:         if not self.learning_dir:
+747:             return
+748:         examples = self.learning_data.get("examples", [])
+749:         for category in ("handwritten", "printed", "unsure"):
+750:             category_examples = [
+751:                 dict(ex) for ex in examples
+
+==== _sync_learning_type_databases matches: [743] ====
+741:         value = str(value or "unsure").strip().lower()
+742:         return value if value in {"handwritten", "printed"} else "unsure"
+743: 
+744:     def _sync_learning_type_databases(self):
+745:         """Write independently inspectable category libraries from the V3 master set."""
+746:         if not self.learning_dir:
+747:             return
+748:         examples = self.learning_data.get("examples", [])
+749:         for category in ("handwritten", "printed", "unsure"):
+750:             category_examples = [
+751:                 dict(ex) for ex in examples
+752:                 if self._normalized_training_type(ex.get("training_type")) == category]
+753:             payload = {
+754:                 "category": category,
+755:                 "count": len(category_examples),
+
+==== _save_learning_example matches: [877] ====
+875:         """The department standard is fixed at 95%; this is not a user setting."""
+876:         return 95.0
+877: 
+878:     def _save_learning_example(self, record, confirmed_number):
+879:         # Prefer the rectangle drawn by the reviewer; otherwise use the OCR rectangle.
+880:         training_type = self._normalized_training_type(record.get("training_type", "unsure"))
+881:         examples_dir = self.learning_dir / "examples_v3" / training_type
+882:         examples_dir.mkdir(parents=True, exist_ok=True)
+883:         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+884:         image_rel = None
+885:         snippet = record.get("snippet")
+886:         # Keep two rectangles conceptually separate: the full green field box
+887:         # teaches the app where INCIDENT NO. / CASE NUMBER and the number live, while the
+888:         # neural OCR crop should contain the number itself whenever possible.
+889:         field_rect = record.get("manual_crop_rect") or (snippet[3] if snippet else None)
+
+==== _load_learning_data matches: [677] ====
+675:         raw = f"{image}|{source}|{confirmed}"
+676:         return hashlib.sha256(raw.encode("utf-8")).hexdigest() if image and confirmed else ""
+677: 
+678:     def _load_learning_data(self):
+679:         db_v3 = self.learning_dir / "learning_examples_v3.json"
+680:         db_v2 = self.learning_dir / "learning_examples_v2.json"
+681:         legacy_db = self.learning_dir / "learning_examples.json"
+682:         try:
+683:             source_db = db_v3 if db_v3.exists() else (db_v2 if db_v2.exists() else legacy_db)
+684:             loaded = json.loads(source_db.read_text(encoding="utf-8")) if source_db.exists() else {}
+685:             self.learning_data = {
+686:                 "examples": loaded.get("examples", []),
+687:                 "corrections": loaded.get("corrections", {}),
+688:                 "trocr_v2_trained_count": int(loaded.get("trocr_v2_trained_count", 0)),
+689:                 "trocr_v2_attempted_count": int(loaded.get("trocr_v2_attempted_count", 0)),
+
+==== CALLS ====
+740:     def _normalized_training_type(value):
+752:                 if self._normalized_training_type(ex.get("training_type")) == category]
+776:                            if self._normalized_training_type(ex.get("training_type")) == kind
+808:             category = self._normalized_training_type(ex.get("training_type"))
+855:                                  if self._normalized_training_type(ex.get("training_type")) == kind
+880:         training_type = self._normalized_training_type(record.get("training_type", "unsure"))
+1751:                     "examples_handwritten": sum(1 for ex in examples if self._normalized_training_type(ex.get("training_type")) == "handwritten"),
+1752:                     "examples_printed": sum(1 for ex in examples if self._normalized_training_type(ex.get("training_type")) == "printed"),
+1753:                     "examples_unsure": sum(1 for ex in examples if self._normalized_training_type(ex.get("training_type")) == "unsure"),
