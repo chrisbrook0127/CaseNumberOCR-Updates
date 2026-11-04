@@ -1,1 +1,1 @@
-Publish V3.3.6 after exact checksum verification.
+Verify and refresh V3.3.6 release asset after correcting digest lookup.
