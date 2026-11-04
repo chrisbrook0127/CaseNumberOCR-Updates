@@ -966,6 +966,44 @@ if "README.txt" in files:
         b"PDF originals are preserved. SEND TO KURT only copies manually approved PDFs.\r\n"
     )
 
+import ast
+module_ast = ast.parse(src, filename="case_number_ocr.py")
+app_class = next(
+    (node for node in module_ast.body if isinstance(node, ast.ClassDef) and node.name == "App"),
+    None
+)
+if app_class is None:
+    raise RuntimeError("App class is missing.")
+method_names = [
+    node.name for node in app_class.body
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+]
+for method_name in (
+    "_open_training_progress", "_training_popup_close_requested",
+    "_close_training_popup", "_update_training_progress",
+    "_toggle_learning_pause", "_stop_learning_update",
+    "_wait_for_learning_control", "_maybe_train_trocr",
+    "_finish_import_batch", "_sequence_hint_for_iid",
+    "_apply_sequence_consensus", "scan", "_worker",
+    "toggle_pause", "stop_or_restart_scan"
+):
+    if method_names.count(method_name) != 1:
+        raise RuntimeError(
+            f"Expected exactly one definition of {method_name}; "
+            f"found {method_names.count(method_name)}."
+        )
+ui_method = next(node for node in app_class.body if isinstance(node, ast.FunctionDef) and node.name == "_ui")
+ui_literals = [
+    node.value.value for node in ast.walk(ui_method)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str)
+]
+for forbidden in ("OCR score is a detector score", "Minimum OCR score %", "Inspect Learning Data",
+                  "Finish Batch / Update Learning Model"):
+    if forbidden in ui_literals:
+        raise RuntimeError(f"Old technical text remains in Select Files UI: {forbidden}")
+if 'self.app_version = "3.3.6"' not in src:
+    raise RuntimeError("Application version was not updated to 3.3.6.")
+
 compile(src, "case_number_ocr.py", "exec")
 # Static verification of key requirements.
 for required in [
