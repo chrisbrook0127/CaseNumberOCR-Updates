@@ -1,1 +1,1 @@
-Rebuild after removing duplicate finish-learning method.
+Final V3.3.6 build after correcting AST UI check.
