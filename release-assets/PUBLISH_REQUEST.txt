@@ -1,1 +1,1 @@
-Build deterministic V3.3.6 ZIP and report checksum.
+Publish V3.3.6 after exact checksum verification.
