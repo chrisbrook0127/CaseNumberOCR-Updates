@@ -16,6 +16,14 @@ def replace_method(source, name, replacement):
     end = start + len(marker) + match.start() if match else len(source)
     return source[:start] + replacement.rstrip() + "\n\n" + source[end:]
 
+def replace_method_block(source, start_name, end_name, replacement):
+    start = source.find(f"    def {start_name}(")
+    end = source.find(f"    def {end_name}(", start + 1)
+    if start < 0 or end < 0:
+        raise RuntimeError(f"Could not find method block {start_name}..{end_name}")
+    return source[:start] + replacement.rstrip() + "\\n\\n" + source[end:]
+
+
 def replace_once(source, old, new, label):
     count = source.count(old)
     if count != 1:
@@ -616,7 +624,7 @@ popup = r'''    def _open_training_progress(self):
         except Exception:
             pass
 '''
-src = replace_method(src, "_open_training_progress", popup)
+src = replace_method_block(src, "_open_training_progress", "_maybe_train_trocr", popup)
 
 # Extend current training worker to accept new IDs, honor pause/stop, and only mark this batch used.
 src = replace_once(
