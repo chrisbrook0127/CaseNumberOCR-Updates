@@ -1,1 +1,1 @@
-Build and validate V3.3.7 learning-save correction. Publish only after checksum verification.
+Publish V3.3.7 after the package checksum was verified from the successful build. Preserve the existing V3.3.6 release and publish the V3.3.7 update ZIP only after checksum validation.
