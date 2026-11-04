@@ -1,1 +1,1 @@
-Publish verified M.F. Case Number OCR V3.3.5 launcher repair through the in-app updater.
+Retry publish V3.3.5 after fixing GitHub Actions token interpolation.
