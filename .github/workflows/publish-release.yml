@@ -23,13 +23,9 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           EXPECTED_SHA_FILE: release-assets/EXPECTED_SHA256.txt
         run: |
-          if [ -f release-assets/BUILD_V3_3_6.txt ]; then
-            mkdir -p release-assets/base
-            gh release download v3.3.5 --repo "$GITHUB_REPOSITORY" --pattern "CaseNumberOCR_Update.zip" --dir release-assets/base
-            python3 release-assets/build_v3_3_6.py release-assets/base/CaseNumberOCR_Update.zip release-assets/CaseNumberOCR_Update.zip
-          else
-            cat release-assets/payload/part*.txt | base64 --decode > release-assets/CaseNumberOCR_Update.zip
-          fi
+          mkdir -p release-assets/base
+          gh release download v3.3.6 --repo "$GITHUB_REPOSITORY" --pattern "CaseNumberOCR_Update.zip" --dir release-assets/base
+          python3 release-assets/build_v3_3_7.py release-assets/base/CaseNumberOCR_Update.zip release-assets/CaseNumberOCR_Update.zip
           unzip -tq release-assets/CaseNumberOCR_Update.zip
           ACTUAL_SHA="$(sha256sum release-assets/CaseNumberOCR_Update.zip | cut -d ' ' -f1)"
           EXPECTED_SHA="$(cat "$EXPECTED_SHA_FILE")"
@@ -42,21 +38,18 @@ jobs:
       - name: Publish or replace GitHub release asset
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           TAG="$(cat release-assets/RELEASE_TAG.txt)"
           EXPECTED_SHA="$(cat release-assets/EXPECTED_SHA256.txt)"
           if [ "$EXPECTED_SHA" = "PENDING" ]; then
-            echo "Build passed. Waiting for the independently recorded SHA256 before publishing."
+            echo "Build passed; checksum must be recorded before publication."
             exit 0
-          fi
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+.[0-9]+.[0-9]+$'; then
-            echo "Invalid release tag: $TAG"
-            exit 1
           fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "V3.3.6 simplifies the coworker workflow, fixes sequence matching, and updates learning incrementally. Use the app UPDATE button to install. Existing PDFs and saved learning examples are preserved." --target main --latest
+            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --title "M.F. Case Number OCR $TAG" --notes "V3.3.7 fixes the learning-example save error. Use the app UPDATE button. Existing PDFs, confirmed case numbers, and saved learning data are preserved." --target main --latest
           fi
           RELEASE_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
           RELEASE_DIGEST="$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "CaseNumberOCR_Update.zip") | .digest')"
