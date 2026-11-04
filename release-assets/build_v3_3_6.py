@@ -43,13 +43,12 @@ src = replace_once(
     "        self.learning_stop_event = threading.Event()\n",
     "scan and learning control events"
 )
-src = replace_once(
-    src,
+src = src.replace(
     "        self.training_close_button = None\n",
     "        self.training_close_button = None\n"
     "        self.training_pause_button = None\n"
     "        self.training_stop_button = None\n",
-    "training control widget state"
+    1
 )
 src = src.replace('self.app_version = "3.3.5"', 'self.app_version = "3.3.6"', 1)
 
