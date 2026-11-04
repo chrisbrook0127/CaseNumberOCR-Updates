@@ -1,1 +1,1 @@
-Rebuild V3.3.6 after repairing validation block.
+Replace V3.3.6 with corrected hash-dependency package and verify release digest.
