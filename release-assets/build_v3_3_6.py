@@ -1007,8 +1007,10 @@ for forbidden in ("OCR score is a detector score", "Minimum OCR score %", "Inspe
     if forbidden in ui_literals:
         raise RuntimeError(f"Old technical text remains in Select Files UI: {forbidden}")
 if 'self.app_version = "3.3.6"' not in src:
-    raise RuntimeError("Application version was not updated if not re.search(r"(?m)^(?:import hashlib\b|from hashlib import )", src):
-    raise RuntimeError("The app is missing its hashlib import.")lib import.")
+    raise RuntimeError("Application version was not updated to 3.3.6.")
+
+if not re.search(r"(?m)^(?:import hashlib\b|from hashlib import )", src):
+    raise RuntimeError("The app is missing its hashlib import.")
 compile(src, "case_number_ocr.py", "exec")
 # Static verification of key requirements.
 for required in [
