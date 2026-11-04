@@ -1,1 +1,1 @@
-Replace V3.3.6 with corrected hash-dependency package and verify release digest.
+Build and validate V3.3.7 learning-save correction. Publish only after checksum verification.
