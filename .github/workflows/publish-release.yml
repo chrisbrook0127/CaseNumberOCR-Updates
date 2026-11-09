@@ -16,7 +16,7 @@ jobs:
       - name: Rebuild and verify update ZIP
         run: |
           mkdir -p release-assets
-          cat release-assets/payload/part*.bin > release-assets/CaseNumberOCR_Update.zip
+          cat release-assets/payload/part*.txt | tr -d '\r\n' | base64 --decode > release-assets/CaseNumberOCR_Update.zip
           unzip -tq release-assets/CaseNumberOCR_Update.zip
           test -s release-assets/CaseNumberOCR_Update.zip
           sha256sum release-assets/CaseNumberOCR_Update.zip
