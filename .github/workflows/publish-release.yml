@@ -1,47 +1,42 @@
 name: Publish M.F. Case Number OCR release
-
 on:
   push:
     branches:
       - "publish/**"
     paths:
       - "release-assets/PUBLISH_REQUEST.txt"
-
 permissions:
   contents: write
-
 jobs:
   publish-release:
     runs-on: ubuntu-latest
     steps:
       - name: Check out release package
         uses: actions/checkout@v4
-
       - name: Rebuild and verify update ZIP
         run: |
           mkdir -p release-assets
-          cat release-assets/payload/part*.txt | tr -d '\\r\\n' | base64 --decode > release-assets/CaseNumberOCR_Update.zip
+          cat release-assets/payload/part*.bin > release-assets/CaseNumberOCR_Update.zip
           unzip -tq release-assets/CaseNumberOCR_Update.zip
           test -s release-assets/CaseNumberOCR_Update.zip
           sha256sum release-assets/CaseNumberOCR_Update.zip
-
       - name: Publish or replace GitHub release asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="$(tr -d '\\r\\n' < release-assets/RELEASE_TAG.txt)"
-          if [[ ! "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
+          TAG="$(tr -d '\r\n' < release-assets/RELEASE_TAG.txt)"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid release tag: $TAG"
             exit 1
           fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip \\
-              --repo "$GITHUB_REPOSITORY" \\
-              --title "M.F. Case Number OCR $TAG" \\
-              --notes "M.F. Case Number OCR update package. Use the app's UPDATE button to install; the application closes and restarts after installation." \\
-              --target main \\
+            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR $TAG" \
+              --notes "M.F. Case Number OCR update package. Use the app's UPDATE button to install; the application closes and restarts after installation." \
+              --target main \
               --latest
           fi
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
