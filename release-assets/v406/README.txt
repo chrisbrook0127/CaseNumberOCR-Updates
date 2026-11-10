@@ -1,0 +1,1 @@
+V4.0.6 preserves user-verified locked V4.0.3 rollback and adds exact-label incident OCR + conservative before/after inference, derived from V4.0.5. Source SHA256: 53c1cc3b2fdbea4e64d95be84cbcc820301b08434b98f7133b5d5b8d6e7d2fc3. Update ZIP contains application code only; no scanned PDFs, confidential files, or shared learning data.

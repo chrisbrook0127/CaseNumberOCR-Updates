@@ -1,0 +1,77 @@
+name: Publish MFCase V4.0.6 incident and sequence update
+on:
+  push:
+    branches:
+      - "publish/**"
+    paths:
+      - "release-assets/PUBLISH_REQUEST_406.txt"
+permissions:
+  contents: write
+jobs:
+  publish-v406:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download tested V4.0.5 source from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/mfcase-v405
+          gh release download v4.0.5 --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir /tmp/mfcase-v405
+      - name: Rebuild V4.0.6 and enforce source integrity
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, re, zipfile
+          previous=pathlib.Path('/tmp/mfcase-v405/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(previous) as z:
+              assert z.namelist()==['case_number_ocr.py'], 'Unexpected baseline contents'
+              old=z.read('case_number_ocr.py')
+          expected_old='d2aa2616a7a55c91a5cb14d1c01640c94841b44aa22a2ace13ef400f1b0f9b28'
+          assert hashlib.sha256(old).hexdigest()==expected_old,'V4.0.5 baseline mismatch'
+          parts=sorted(pathlib.Path('release-assets/v406/patch').glob('part*.txt'))
+          assert len(parts)==9,'V4.0.6 patch parts missing'
+          encoded=''.join(p.read_text().strip() for p in parts)
+          assert len(encoded)==10392,'V4.0.6 patch length mismatch'
+          assert hashlib.sha256(encoded.encode()).hexdigest()=='9f0e296e75dac6c7f771f654724a3075c2e0a473b7ab0e9a912cc137c9eaaa4f','Patch tampered'
+          commands=json.loads(lzma.decompress(base64.b64decode(encoded,validate=True)))
+          lines=old.decode('utf-8').splitlines(keepends=True)
+          new=''.join(''.join(lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
+          expected_new='53c1cc3b2fdbea4e64d95be84cbcc820301b08434b98f7133b5d5b8d6e7d2fc3'
+          assert hashlib.sha256(new).hexdigest()==expected_new,'V4.0.6 source SHA mismatch'
+          compile(new,'case_number_ocr.py','exec')
+          for symbol in (
+              b'self.app_version = "4.0.6"',
+              b'def _find_case_field_label_regions(',
+              b'def _read_incident_to_right(',
+              b'def _incident_hits_from_detections(',
+              b'def _sequence_neighbors(',
+              b'def _apply_sequence_consensus(',
+              b'def _start_completed_edit(',
+              b'def _loader_start(',
+          ):
+              assert symbol in new,symbol
+          assert b'OFFENSE CODE ignored' in new
+          output=pathlib.Path('release-assets/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('case_number_ocr.py',new)
+          with zipfile.ZipFile(output) as z:
+              assert z.namelist()==['case_number_ocr.py'] and z.testzip() is None
+              assert hashlib.sha256(z.read('case_number_ocr.py')).hexdigest()==expected_new
+          print('V4.0.6 verified source sha256',expected_new,'update bytes',output.stat().st_size)
+          PY
+      - name: Publish V4.0.6 as latest update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.0.6 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v4.0.6 release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v4.0.6 --repo "$GITHUB_REPOSITORY" --latest
+          else
+            gh release create v4.0.6 release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR V4.0.6 - Incident Field and Sequence" \
+              --notes "INCIDENT NO. is case-insensitive and always takes priority over OFFENSE CODE. Recognize the COMPLETE case number by joining OCR fragments immediately right of the label; if unreadable or conflicting, send for manual review. Conservatively infer blank scans only when consecutive original filenames are bracketed by two verified identical case numbers. Actual scan readings always take precedence. No auto-training from sequence inference. Preserves V4.0.5 UI and V4.0.4 spinner; V4.0.3 remains locked rollback. UPDATE replaces application code only and never modifies private PDFs or shared learning." \
+              --target publish/v4.0.6 \
+              --latest
+          fi
+          gh release view v4.0.6 --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
