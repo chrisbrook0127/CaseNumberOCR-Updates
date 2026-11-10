@@ -1,0 +1,7 @@
+MFCase Number OCR V4.0.3
+LOCKED FUNCTIONING PRODUCTION BASELINE
+Confirmed working by application owner on 2026-11-10.
+All subsequent development must branch from V4.0.3.
+Full installer SHA256: 53c877d506b8098adb4c2e0b7593298a6649421a945bebe77b2876924e537abe
+Updater source SHA256: 668210ae66382f4ee4b397437a539dd3b157a6e64f24749c1110d88ccecec896
+The updater release contains case_number_ocr.py only. Never overwrite shared learning data.

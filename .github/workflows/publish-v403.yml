@@ -1,0 +1,62 @@
+name: Publish locked MFCase V4.0.3
+on:
+  push:
+    branches:
+      - "publish/**"
+    paths:
+      - "release-assets/PUBLISH_REQUEST_403.txt"
+permissions:
+  contents: write
+jobs:
+  publish-v403:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download existing V3.4.7 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/mfcase-prev
+          gh release download v3.4.7 --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir /tmp/mfcase-prev
+      - name: Reconstruct and validate locked V4.0.3
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, io, json, lzma, pathlib, zipfile
+          previous=pathlib.Path('/tmp/mfcase-prev/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(previous) as z:
+              matches=[n for n in z.namelist() if n.endswith('case_number_ocr.py')]
+              assert len(matches)==1, f'Expected one application source: {matches}'
+              old=z.read(matches[0])
+          expected_old='638e8e526b66008ce2a8bbade21a20d04cef0957d4625988c2d4bf7f937969f9'
+          assert hashlib.sha256(old).hexdigest()==expected_old, 'Previous release differs from verified V3.4.7 baseline'
+          patch=pathlib.Path('release-assets/v403/patch_from_v347.b64').read_text().strip()
+          commands=json.loads(lzma.decompress(base64.b64decode(patch)))
+          lines=old.decode('utf-8').splitlines(keepends=True)
+          result=''.join(''.join(lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
+          expected_new='668210ae66382f4ee4b397437a539dd3b157a6e64f24749c1110d88ccecec896'
+          assert hashlib.sha256(result).hexdigest()==expected_new, 'V4.0.3 source integrity check failed'
+          compile(result,'case_number_ocr.py','exec')
+          output=pathlib.Path('release-assets/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('case_number_ocr.py',result)
+          with zipfile.ZipFile(output) as z:
+              assert z.testzip() is None
+              assert z.namelist()==['case_number_ocr.py']
+          print('Locked V4.0.3 source verified',expected_new,'update bytes',output.stat().st_size)
+          PY
+      - name: Publish V4.0.3 as latest GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.0.3 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v4.0.3 release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v4.0.3 --repo "$GITHUB_REPOSITORY" --latest
+          else
+            gh release create v4.0.3 release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR V4.0.3 - Locked Functioning Baseline" \
+              --notes "User-verified functioning production baseline. Future changes must be based on V4.0.3. UPDATE installs case_number_ocr.py only. Shared learning and user data are not replaced." \
+              --target main \
+              --latest
+          fi
+          gh release view v4.0.3 --repo "$GITHUB_REPOSITORY" --json tagName,isLatest,assets,url
