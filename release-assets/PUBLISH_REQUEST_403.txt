@@ -1,1 +1,1 @@
-Publish locked V4.0.3 baseline - 2026-11-10
+Publish and verify locked V4.0.3 baseline - corrected release check - 2026-11-10
