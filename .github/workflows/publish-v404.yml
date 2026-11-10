@@ -1,0 +1,66 @@
+name: Publish MFCase V4.0.4 spinner update
+on:
+  push:
+    branches:
+      - "publish/**"
+    paths:
+      - "release-assets/PUBLISH_REQUEST_404.txt"
+permissions:
+  contents: write
+jobs:
+  publish-v404:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified locked V4.0.3 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/mfcase-v403
+          gh release download v4.0.3 --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir /tmp/mfcase-v403
+      - name: Reconstruct, compile and validate V4.0.4
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, zipfile
+          base=pathlib.Path('/tmp/mfcase-v403/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(base) as z:
+              assert z.namelist()==['case_number_ocr.py']
+              old=z.read('case_number_ocr.py')
+          expected_old='668210ae66382f4ee4b397437a539dd3b157a6e64f24749c1110d88ccecec896'
+          assert hashlib.sha256(old).hexdigest()==expected_old, 'Locked V4.0.3 baseline differs'
+          parts=sorted(pathlib.Path('release-assets/v404/patch').glob('part*.txt'))
+          assert len(parts)==4, 'Missing spinner change patch component'
+          patch=''.join(p.read_text().strip() for p in parts)
+          assert len(patch)==4924, 'Spinner patch length differs'
+          commands=json.loads(lzma.decompress(base64.b64decode(patch)))
+          lines=old.decode('utf-8').splitlines(keepends=True)
+          new=''.join(''.join(lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
+          expected_new='8837c1aea1efecfd31d0f0638850f989429f9a2c15b111e9e1786bf7db8e59c3'
+          assert hashlib.sha256(new).hexdigest()==expected_new, 'V4.0.4 source SHA mismatch'
+          compile(new,'case_number_ocr.py','exec')
+          assert b'self.app_version = "4.0.4"' in new
+          assert b'def _loader_start(' in new and b'def _folder_load_worker(' in new
+          output=pathlib.Path('release-assets/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('case_number_ocr.py',new)
+          with zipfile.ZipFile(output) as z:
+              assert z.testzip() is None and z.namelist()==['case_number_ocr.py']
+              assert hashlib.sha256(z.read('case_number_ocr.py')).hexdigest()==expected_new
+          print('Verified V4.0.4:', expected_new, 'asset bytes:', output.stat().st_size)
+          PY
+      - name: Publish V4.0.4 as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.0.4 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v4.0.4 release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v4.0.4 --repo "$GITHUB_REPOSITORY" --latest
+          else
+            gh release create v4.0.4 release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR V4.0.4 - Loading Spinner" \
+              --notes "Adds animated quarter-window-scale spinner when PDF rolls, shared learning, and OCR models load. Based on locked user-verified V4.0.3; existing data, OCR features, and shared learning are preserved. UPDATE uses a code-only replacement." \
+              --target publish/v4.0.4 \
+              --latest
+          fi
+          gh release view v4.0.4 --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
