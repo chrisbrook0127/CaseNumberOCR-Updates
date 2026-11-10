@@ -35,6 +35,14 @@ jobs:
           new=''.join(''.join(lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
           expected='19370efa4985197f4e7d9f436260612fe764b08f00c8749b8033ff05e143ccb5'
           assert hashlib.sha256(new).hexdigest()==expected, 'Reconstructed source differs from tested V4.0.7'
+          # Align the first learning update's 10-example threshold with the
+          # training worker's 8-train/2-validation split.
+          assert new.count(b'if len(usable) < 12:')==1
+          assert new.count(b'at least 12 are required.')==1
+          new=new.replace(b'if len(usable) < 12:', b'if len(usable) < 10:')
+          new=new.replace(b'at least 12 are required.', b'at least 10 are required.')
+          expected='8ff2f12b2f0d3d3034746fdc8d1d718c325bbebf79f080e945925683a0733ae1'
+          assert hashlib.sha256(new).hexdigest()==expected, 'Final tested V4.0.7 source SHA mismatch'
           compile(new, 'case_number_ocr.py', 'exec')
           checks=(
               b'self.app_version = "4.0.7"',

@@ -1,1 +1,1 @@
-Publish V4.0.7 checked source from locked V4.0.6 - 2026-11-10
+Republish verified MFCase V4.0.7 with corrected 10-example first training threshold - 2026-11-10
