@@ -59,4 +59,4 @@ jobs:
               --target main \
               --latest
           fi
-          gh release view v4.0.3 --repo "$GITHUB_REPOSITORY" --json tagName,isLatest,assets,url
+          gh release view v4.0.3 --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
