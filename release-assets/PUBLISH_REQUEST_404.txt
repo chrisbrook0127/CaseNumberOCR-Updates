@@ -1,1 +1,1 @@
-Publish verified V4.0.4 spinner release - 2026-11-10
+Republish verified V4.0.4 spinner release with exact SHA-matched patch - 2026-11-10
