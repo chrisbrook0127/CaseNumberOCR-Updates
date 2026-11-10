@@ -38,6 +38,14 @@ jobs:
           new=''.join(''.join(lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
           expected_new='53c1cc3b2fdbea4e64d95be84cbcc820301b08434b98f7133b5d5b8d6e7d2fc3'
           assert hashlib.sha256(new).hexdigest()==expected_new,'V4.0.6 source SHA mismatch'
+          performance_patch=pathlib.Path('release-assets/v406/performance_patch.b64').read_text().strip()
+          assert len(performance_patch)==1456,'V4.0.6 performance patch truncated'
+          assert hashlib.sha256(performance_patch.encode()).hexdigest()=='1ffef9fbf63aaddb3550ede722849e9eab133eba6e2a0a90251d892d9bc49563','Performance patch corrupt'
+          perf_commands=json.loads(lzma.decompress(base64.b64decode(performance_patch,validate=True)))
+          old_v406=new.decode('utf-8').splitlines(keepends=True)
+          new=''.join(''.join(old_v406[c[1]:c[2]]) if c[0]=='=' else c[1] for c in perf_commands).encode('utf-8')
+          expected_new='8cf3744aec9c5bd4e228e6277b556189f85c864ad99f53fcae39af9d672d477b'
+          assert hashlib.sha256(new).hexdigest()==expected_new,'Optimized V4.0.6 source SHA mismatch'
           compile(new,'case_number_ocr.py','exec')
           for symbol in (
               b'self.app_version = "4.0.6"',
