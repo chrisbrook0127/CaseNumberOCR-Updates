@@ -1,0 +1,1 @@
+Publish V4.0.9 root-only and startup update/learning with verified source and 27 passed tests — 2026-11-10

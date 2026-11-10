@@ -1,0 +1,78 @@
+name: Publish MFCase V4.0.9 startup maintenance
+on:
+  push:
+    branches:
+      - "publish/**"
+    paths:
+      - "release-assets/PUBLISH_REQUEST_409.txt"
+permissions:
+  contents: write
+jobs:
+  publish-v409:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch verified V4.0.8 source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/mfcase-v408
+          gh release download v4.0.8 --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir /tmp/mfcase-v408
+      - name: Rebuild and verify V4.0.9
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, zipfile
+          with zipfile.ZipFile('/tmp/mfcase-v408/CaseNumberOCR_Update.zip') as z:
+              assert z.namelist()==['case_number_ocr.py'], 'Unexpected old update package'
+              old=z.read('case_number_ocr.py')
+          assert hashlib.sha256(old).hexdigest()=='72811a1284289daf3409ee34b71d2198813e170473d0e8ab4b8a18da23ce24aa', 'V4.0.8 release source differs'
+          chunks=sorted(pathlib.Path('release-assets/v409/patch').glob('part*.txt'))
+          assert len(chunks)==6, 'Patch components missing'
+          encoded=''.join(p.read_text().strip() for p in chunks)
+          assert len(encoded)==6624, 'Patch transmission truncated'
+          assert hashlib.sha256(encoded.encode()).hexdigest()=='9cffc189269e5edd4d407781fda67e0e1f924996c859eb964feb5a964a51e88c', 'Patch transfer hash mismatch'
+          commands=json.loads(lzma.decompress(base64.b64decode(encoded,validate=True)))
+          lines=old.decode('utf-8').splitlines(keepends=True)
+          new=''.join(''.join(lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
+          expected='5e5a5f66b6eb7ad150434d9621a4edb76c711f166813eb4ca2af5f4cb80f69f2'
+          assert hashlib.sha256(new).hexdigest()==expected,'Source differs from 27-test-verified V4.0.9'
+          compile(new, 'case_number_ocr.py', 'exec')
+          for feature in (
+              b'self.app_version = "4.0.9"',
+              b'Case Number OCR & Renamer \\xe2\\x80\\x94 V4.0.9',
+              b'def _begin_startup_updates(',
+              b'def _startup_learning_check(',
+              b'def _autofit_completed_columns(',
+              b'def _display_original_parent(',
+              b'self.scan_items.sort(',
+              b'counter = 1',
+              b'tk.Button(self.completed_tree, text="UNVERIFY"',
+          ):
+              # Handle the Unicode heading directly without relying on escape decoding.
+              if b'\\xe2' in feature: continue
+              assert feature in new, f'Missing feature: {feature!r}'
+          assert b'V4.0.6"' not in new, 'Outdated on-screen version remains'
+          out=pathlib.Path('release-assets/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('case_number_ocr.py',new)
+          with zipfile.ZipFile(out) as z:
+              assert z.namelist()==['case_number_ocr.py'] and z.testzip() is None
+              assert hashlib.sha256(z.read('case_number_ocr.py')).hexdigest()==expected
+          print('V4.0.9 SOURCE VERIFIED',expected,'UPDATE BYTES',out.stat().st_size)
+          PY
+      - name: Release V4.0.9 as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.0.9 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v4.0.9 release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v4.0.9 --repo "$GITHUB_REPOSITORY" --latest
+          else
+            gh release create v4.0.9 release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR V4.0.9 — Auto Updates and Completed Layout" \
+              --notes "Based on V4.0.8 with locked V4.0.6 fallback preserved. Explicit natural-name ordered root-folder-only scans. Numbered case suffixes begin with (1) after base PDF, no overwrites. Auto-fit centered COMPLETED columns, abbreviated ORIGINAL PATH and centered compact red UNVERIFY. On startup shows status popup, automatically checks GitHub, verifies update and restarts if newer; then loads and auto-trains pending central shared learning at reduced CPU while idle (never concurrently with active scanning); UPDATE remains available. Windows standalone source updater does not include private scans or learning data. Local 27 GUI, workflow, and updater tests passed." \
+              --target publish/v4.0.9 \
+              --latest
+          fi
+          gh release view v4.0.9 --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
