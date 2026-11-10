@@ -1,0 +1,1 @@
+MFCase V4.0.8. Based on tested V4.0.7 source sha256 8ff2f12b2f0d3d3034746fdc8d1d718c325bbebf79f080e945925683a0733ae1. Final source sha256 72811a1284289daf3409ee34b71d2198813e170473d0e8ab4b8a18da23ce24aa. Twelve GUI and workflow tests passed. Only app code is in public release; protected learning, state, scanned PDFs, and V4.0.6 user-confirmed rollback remain untouched.

@@ -1,0 +1,73 @@
+name: Publish MFCase V4.0.8 - completed review and Kurt transfer fix
+on:
+  push:
+    branches:
+      - "publish/**"
+    paths:
+      - "release-assets/PUBLISH_REQUEST_408.txt"
+permissions:
+  contents: write
+jobs:
+  publish-v408:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retrieve verified V4.0.7 application source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/mfcase-v407
+          gh release download v4.0.7 --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir /tmp/mfcase-v407
+      - name: Build and check V4.0.8 updater
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, zipfile
+          with zipfile.ZipFile('/tmp/mfcase-v407/CaseNumberOCR_Update.zip') as z:
+              assert z.namelist()==['case_number_ocr.py'],'Unexpected V4.0.7 update archive contents'
+              old=z.read('case_number_ocr.py')
+          expected_old='8ff2f12b2f0d3d3034746fdc8d1d718c325bbebf79f080e945925683a0733ae1'
+          assert hashlib.sha256(old).hexdigest()==expected_old,'V4.0.7 source differs from locked release'
+          patch=pathlib.Path('release-assets/v408/patch_from_v407.b64').read_text().strip()
+          assert len(patch)==2384,'Incomplete V4.0.8 patch'
+          assert hashlib.sha256(patch.encode()).hexdigest()=='ba7786c855b8750a9a3b1208044120b7a31cdbb20dead17c7ab409da321b0ac3','V4.0.8 patch integrity mismatch'
+          operations=json.loads(lzma.decompress(base64.b64decode(patch,validate=True)))
+          old_lines=old.decode('utf-8').splitlines(keepends=True)
+          new=''.join(''.join(old_lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in operations).encode('utf-8')
+          expected_new='72811a1284289daf3409ee34b71d2198813e170473d0e8ab4b8a18da23ce24aa'
+          assert hashlib.sha256(new).hexdigest()==expected_new,'V4.0.8 source does not match tested build'
+          compile(new,'case_number_ocr.py','exec')
+          for feature in (
+              b'self.app_version = "4.0.8"',
+              b'text="APPROVE"',
+              b'def _unsaved_completed_changes(',
+              b'if automatic and (not rec.get("auto_labeled") or human_approved)',
+              b'self.completed_send_status.config(text=message)',
+              b'def _apply_sequence_consensus(',
+              b'def _read_incident_to_right(',
+          ):
+              assert feature in new, f'Feature missing: {feature!r}'
+          assert b'text="APPROVE & SEND TO KURT"' not in new
+          out=pathlib.Path('release-assets/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('case_number_ocr.py',new)
+          with zipfile.ZipFile(out) as z:
+              assert z.namelist()==['case_number_ocr.py'] and z.testzip() is None
+              assert hashlib.sha256(z.read('case_number_ocr.py')).hexdigest()==expected_new
+          print('VERIFIED: V4.0.8 code-only updater',expected_new,'bytes:',out.stat().st_size)
+          PY
+      - name: Publish V4.0.8 latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.0.8 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v4.0.8 release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v4.0.8 --repo "$GITHUB_REPOSITORY" --latest
+          else
+            gh release create v4.0.8 release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR V4.0.8 - Completed SEND TO KURT Fix" \
+              --notes "Fixes Completed edit -> Save -> SEND TO KURT. Initial review now APPROVE only: human-approved cases remain in Completed for correction, and automatic sending is reserved for unambiguous machine-approved scans. Explicit manual approvals override conflicting OCR/sequence flags when sending. Unsaved CHANGE entries block export of stale case numbers. Completed tab shows move success or error without success popups. The locked V4.0.6 baseline is preserved; updater contains application code only, never shared learning or case PDFs." \
+              --target publish/v4.0.8 \
+              --latest
+          fi
+          gh release view v4.0.8 --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
