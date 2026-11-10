@@ -1,0 +1,1 @@
+V4.0.5 Completed List. Baseline: verified V4.0.4. Locked rollback: V4.0.3. SHA256 expected application code: d2aa2616a7a55c91a5cb14d1c01640c94841b44aa22a2ace13ef400f1b0f9b28. Only source code is published. Does not include confidential PDFs, state or learning models.

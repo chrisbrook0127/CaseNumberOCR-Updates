@@ -1,0 +1,66 @@
+name: Publish MFCase V4.0.5 completed-list update
+on:
+  push:
+    branches:
+      - "publish/**"
+    paths:
+      - "release-assets/PUBLISH_REQUEST_405.txt"
+permissions:
+  contents: write
+jobs:
+  publish-v405:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download V4.0.4 production update as baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/mfcase-v404
+          gh release download v4.0.4 --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir /tmp/mfcase-v404
+      - name: Reconstruct and verify V4.0.5
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,lzma,pathlib,zipfile
+          with zipfile.ZipFile('/tmp/mfcase-v404/CaseNumberOCR_Update.zip') as z:
+              assert z.namelist()==['case_number_ocr.py']
+              old=z.read('case_number_ocr.py')
+          assert hashlib.sha256(old).hexdigest()=='8837c1aea1efecfd31d0f0638850f989429f9a2c15b111e9e1786bf7db8e59c3','Unexpected V4.0.4 baseline'
+          parts=sorted(pathlib.Path('release-assets/v405/patch').glob('part*.txt'))
+          assert len(parts)==4,'Incomplete patch transfer'
+          patch=''.join(p.read_text().strip() for p in parts)
+          assert len(patch)==4656,'Unexpected patch length'
+          assert hashlib.sha256(patch.encode()).hexdigest()=='6247e284a332c5294d9d6f879fd1c2efc2f3e558418e7c5faba1e6688b122946','Patch was altered'
+          commands=json.loads(lzma.decompress(base64.b64decode(patch)))
+          old_lines=old.decode('utf-8').splitlines(keepends=True)
+          new=''.join(''.join(old_lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
+          expected='d2aa2616a7a55c91a5cb14d1c01640c94841b44aa22a2ace13ef400f1b0f9b28'
+          assert hashlib.sha256(new).hexdigest()==expected,'V4.0.5 source differs from tested build'
+          compile(new,'case_number_ocr.py','exec')
+          for symbol in [b'def _toggle_completed_select_all(',b'def refresh_completed_list(',b'def _completed_row_values(',b'def _loader_start(']:
+              assert symbol in new,symbol
+          assert b'self.app_version = "4.0.5"' in new
+          out=pathlib.Path('release-assets/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('case_number_ocr.py',new)
+          with zipfile.ZipFile(out) as z:
+              assert z.namelist()==['case_number_ocr.py'] and z.testzip() is None
+              assert hashlib.sha256(z.read('case_number_ocr.py')).hexdigest()==expected
+          print('Validated V4.0.5 source and code-only updater:',expected,'asset size',out.stat().st_size)
+          PY
+      - name: Publish latest V4.0.5 GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.0.5 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v4.0.5 release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v4.0.5 --repo "$GITHUB_REPOSITORY" --latest
+          else
+            gh release create v4.0.5 release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR V4.0.5 - Completed List Controls" \
+              --notes "Completed: far-right per-file checkboxes and SELECT ALL header; IMAGE wider by 0.5 inch; permanent blank CHANGE entry with Save/Cancel; ORIGINAL NAME and simplified percentage APPROVED/AUTOMATCH status; UNVERIFY; REFRESH beside SEND SELECTED. Includes V4.0.4 animated loading spinner; locked V4.0.3 baseline unchanged. Only application code updated: no models, PDFs or shared learning data replaced." \
+              --target publish/v4.0.5 \
+              --latest
+          fi
+          gh release view v4.0.5 --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
