@@ -1,0 +1,77 @@
+name: Publish MFCase V4.0.7 - automatic Kurt transfer and learning
+on:
+  push:
+    branches:
+      - "publish/**"
+    paths:
+      - "release-assets/PUBLISH_REQUEST_407.txt"
+permissions:
+  contents: write
+jobs:
+  publish-v407:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download locked V4.0.6 update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/mfcase-v406
+          gh release download v4.0.6 --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir /tmp/mfcase-v406
+      - name: Reconstruct and validate source
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, zipfile
+          baseline=pathlib.Path('/tmp/mfcase-v406/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(baseline) as z:
+              assert z.namelist()==['case_number_ocr.py'], 'Unexpected V4.0.6 asset layout'
+              old=z.read('case_number_ocr.py')
+          assert hashlib.sha256(old).hexdigest()=='8cf3744aec9c5bd4e228e6277b556189f85c864ad99f53fcae39af9d672d477b', 'Locked baseline changed'
+          patch=pathlib.Path('release-assets/v407/patch_from_v406.b64').read_text().strip()
+          assert len(patch)==7052, 'Release patch truncated'
+          assert hashlib.sha256(patch.encode()).hexdigest()=='a49a378529550ef76f07c2fb2d59ba7348054bb1ee0437892823f35ba1a9030b', 'Release patch SHA mismatch'
+          commands=json.loads(lzma.decompress(base64.b64decode(patch,validate=True)))
+          lines=old.decode('utf-8').splitlines(keepends=True)
+          new=''.join(''.join(lines[c[1]:c[2]]) if c[0]=='=' else c[1] for c in commands).encode('utf-8')
+          expected='19370efa4985197f4e7d9f436260612fe764b08f00c8749b8033ff05e143ccb5'
+          assert hashlib.sha256(new).hexdigest()==expected, 'Reconstructed source differs from tested V4.0.7'
+          compile(new, 'case_number_ocr.py', 'exec')
+          checks=(
+              b'self.app_version = "4.0.7"',
+              b'def _schedule_auto_export(',
+              b'def _export_worker(',
+              b'def _toggle_scan_select_all(',
+              b'def clear_scan_screen(',
+              b'selected_new = pending',
+              b'SEND TO KURT',
+          )
+          for symbol in checks:
+              assert symbol in new, f'Missing expected feature: {symbol!r}'
+          assert b'pending[:24]' not in new, 'Old learning chunk cap persists'
+          assert b'SEND SELECTED TO KURT' not in new, 'Old send button persists'
+          assert b'SEND APPROVED TO KURT' not in new, 'Old send button persists'
+          assert b'"Export complete"' not in new, 'Obsolete transfer popup persists'
+          output=pathlib.Path('release-assets/CaseNumberOCR_Update.zip')
+          with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('case_number_ocr.py',new)
+          with zipfile.ZipFile(output) as z:
+              assert z.namelist()==['case_number_ocr.py'] and z.testzip() is None
+              assert hashlib.sha256(z.read('case_number_ocr.py')).hexdigest()==expected
+          print('V4.0.7 validated, source SHA:', expected, 'asset bytes:', output.stat().st_size)
+          PY
+      - name: Publish V4.0.7 as latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v4.0.7 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v4.0.7 release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit v4.0.7 --repo "$GITHUB_REPOSITORY" --latest
+          else
+            gh release create v4.0.7 release-assets/CaseNumberOCR_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "M.F. Case Number OCR V4.0.7 - Automatic Kurt Sending" \
+              --notes "Built from locked, user-verified V4.0.6. A single SEND TO KURT button; auto-approved and manually approved scans automatically move to COMPLETED after full sequence review, without success popups. Atomic unique output names protect existing originals. Select individual PDF scans, default all checked, CLEAR/REFRESH scan list without deleting data. UPDATE LEARNING processes all pending examples in a single run, loading crops one at a time for lower memory. Code-only update; original PDFs, shared learning and locked rollback remain untouched." \
+              --target publish/v4.0.7 \
+              --latest
+          fi
+          gh release view v4.0.7 --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
