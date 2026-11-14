@@ -1,47 +1,49 @@
 name: Publish M.F. Case Number OCR release
-
 on:
   push:
     branches:
       - "publish/**"
     paths:
       - "release-assets/PUBLISH_REQUEST.txt"
-
 permissions:
   contents: write
-
+concurrency:
+  group: mfcase-release-publisher
+  cancel-in-progress: false
 jobs:
   publish-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out release package
-        uses: actions/checkout@v4
-
-      - name: Rebuild and verify update ZIP
+      - uses: actions/checkout@v4
+      - name: Verify update
         run: |
-          mkdir -p release-assets
-          cat release-assets/payload/part*.txt | tr -d '\\r\\n' | base64 --decode > release-assets/CaseNumberOCR_Update.zip
-          unzip -tq release-assets/CaseNumberOCR_Update.zip
-          test -s release-assets/CaseNumberOCR_Update.zip
-          sha256sum release-assets/CaseNumberOCR_Update.zip
-
-      - name: Publish or replace GitHub release asset
+          python3 - <<'PY'
+          import base64, hashlib, pathlib, re, zipfile
+          root = pathlib.Path("release-assets")
+          tag = (root / "RELEASE_TAG.txt").read_text().strip()
+          assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag), "Invalid tag"
+          data = base64.b64decode((root / "update.base64").read_text(), validate=True)
+          assert hashlib.sha256(data).hexdigest() == (root / "SHA256.txt").read_text().strip()
+          archive = root / "CaseNumberOCR_Update.zip"
+          archive.write_bytes(data)
+          with zipfile.ZipFile(archive) as z:
+              assert z.testzip() is None
+              assert {"case_number_ocr.py", "updater_apply.py"} <= set(z.namelist())
+              assert all("/" not in n and "\\" not in n for n in z.namelist())
+              for name in ("case_number_ocr.py", "updater_apply.py"):
+                  compile(z.read(name), name, "exec")
+              assert ('self.app_version = "' + tag[1:] + '"') in z.read("case_number_ocr.py").decode()
+          PY
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="$(tr -d '\\r\\n' < release-assets/RELEASE_TAG.txt)"
-          if [[ ! "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
-            echo "Invalid release tag: $TAG"
-            exit 1
+          TAG="$(cat release-assets/RELEASE_TAG.txt)"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase $TAG" --notes "MFCase update. Install using the application's UPDATE button."
           fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$TAG" release-assets/CaseNumberOCR_Update.zip \\
-              --repo "$GITHUB_REPOSITORY" \\
-              --title "M.F. Case Number OCR $TAG" \\
-              --notes "M.F. Case Number OCR update package. Use the app's UPDATE button to install; the application closes and restarts after installation." \\
-              --target main \\
-              --latest
-          fi
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,assets,url
+          gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp release-assets/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
