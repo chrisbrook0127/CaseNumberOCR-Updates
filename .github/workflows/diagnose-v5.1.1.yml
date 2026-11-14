@@ -1,0 +1,41 @@
+name: Diagnose MFCase V5.0.10 OCR decision paths
+on:
+  push:
+    branches:
+      - publish/v5.1.1-field-and-handwriting
+    paths:
+      - .github/workflows/diagnose-v5.1.1.yml
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect pinned 5.0.10 source and OCR entrypoints
+        run: |
+          python3 - <<'PY'
+          import base64, io, zipfile, ast, pathlib, hashlib, re
+          data=base64.b64decode(pathlib.Path('release-assets/update.base64').read_text().strip(),validate=True)
+          print('ASSET_SHA256',hashlib.sha256(data).hexdigest())
+          with zipfile.ZipFile(io.BytesIO(data)) as z:
+              print('MEMBERS',z.namelist())
+              src=z.read('case_number_ocr.py').decode()
+          lines=src.splitlines()
+          tree=ast.parse(src)
+          methods={}
+          for n in ast.walk(tree):
+              if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)):
+                  methods[n.name]=n
+          for token in ['_ocr_pdf','_find_case_candidates','_poll','_apply_sequence_consensus','_sequence_neighbors','_sequence_case_number','_auto_label_block_reason','_save_learning_example','_original_pdf_sequence_key','_find_case_field_label_regions','_incident_hits_from_detections','_read_incident_to_right','_get_auto_threshold','_worker']:
+              n=methods.get(token)
+              if n:
+                  print(f'\\n====== {token} ({n.lineno} - {n.end_lineno}) ======')
+                  limit=210 if token in ['_ocr_pdf','_apply_sequence_consensus'] else (260 if token=='_find_case_candidates' else 120)
+                  for i in range(n.lineno,min(n.end_lineno,n.lineno+limit-1)+1):
+                      print(f'{i:5}: {lines[i-1]}')
+          print('KEY SOURCELINES')
+          for i,l in enumerate(lines,1):
+              if 'score = 100' in l or 'score=100' in l or 'scan_source' in l or 'case_number_for_export' in l:
+                  print(f'{i:5}: {l[:190]}')
+          PY
