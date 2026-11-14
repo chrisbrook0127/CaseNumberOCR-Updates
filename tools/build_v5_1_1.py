@@ -92,8 +92,8 @@ replace_once(
 # The header is a distinct, tightly scoped source; the whole 5x5" fallback
 # remains review-only. There is no automatic approval from irrelevant text.
 replace_once(
-    '                     # Diagnostic counters belong to THIS run, not accumulated saved state.',
-    '                     if note.startswith("Upper-right header"):\n'
+    '# Diagnostic counters belong to THIS run, not accumulated saved state.',
+    'if note.startswith("Upper-right header"):\n'
     '                         r["scan_source"]="header"\n'
     '                     # Diagnostic counters belong to THIS run, not accumulated saved state.')
 replace_once(
