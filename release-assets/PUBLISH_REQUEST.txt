@@ -1,1 +1,1 @@
-Publish v5.0.11 leading-zero-only export normalization.
+Publish validated MFCase v5.0.11 as next release; preserve v5.0.10 baseline.
