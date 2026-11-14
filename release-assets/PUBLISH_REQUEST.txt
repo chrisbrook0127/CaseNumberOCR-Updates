@@ -1,1 +1,1 @@
-Validated V5.1.1 case OCR and handwriting rules
+Publish completed tested V5.1.1 OCR/handwriting candidate and sequence update. SHA256 0376f099f14801e20e55cae0313408dd49e4a70fcbd7a88e7a8ccc652c1f617b
