@@ -1,0 +1,24 @@
+name: Prepare MFCase 5.0.11 leading-zero fix
+on:
+  push:
+    branches:
+      - publish/v5.0.11-leading-zeros
+    paths:
+      - .github/workflows/prepare-v5.0.11.yml
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build from the pinned MFCase V5.0.10 release and run tests
+        run: python3 tools/build_v5_0_11.py
+      - name: Commit tested artifact and request release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Publish MFCase V5.0.11 leading-zero normalization update"
+          git push origin HEAD:publish/v5.0.11-leading-zeros
