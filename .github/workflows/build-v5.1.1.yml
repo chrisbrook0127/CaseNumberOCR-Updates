@@ -1,4 +1,5 @@
 name: Build and publish tested MFCase V5.1.1
+# Rebuild after OCR source anchor fix
 on:
   push:
     branches:
