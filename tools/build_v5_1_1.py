@@ -96,14 +96,10 @@ replace_once(
     'if note.startswith("Upper-right header"):\n'
     '                         r["scan_source"]="header"\n'
     '                     # Diagnostic counters belong to THIS run, not accumulated saved state.')
-src, count = re.subn(
-    r'(?m)^([ \\t]*)and r\\["scan_source"\\] in \\("incident", "case"\\)\\s*\\n([ \\t]*)and not r\\["scan_ambiguous"\\]',
-    lambda m: (
-        m.group(1) + 'and (r["scan_source"] in ("incident", "case") or\\n' +
-        m.group(1) + '     (r["scan_source"]=="header" and float(score or 0)>=99.5))\\n' +
-        m.group(2) + 'and not r["scan_ambiguous"]'
-    ), src, count=1)
-assert count==1, "Missing scan auto-label source gate"
+replace_once(
+    'and r["scan_source"] in ("incident", "case")',
+    'and (r["scan_source"] in ("incident", "case") or\n'
+    '                                  (r["scan_source"]=="header" and float(score or 0)>=99.5))')
 # A 100% score only qualifies for header approval when it came from that
 # physical header, not from a random body match. This still respects auto ON.
 replace_once(
