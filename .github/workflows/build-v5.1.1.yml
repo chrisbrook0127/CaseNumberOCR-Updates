@@ -1,0 +1,38 @@
+name: Build and publish tested MFCase V5.1.1
+on:
+  push:
+    branches:
+      - publish/v5.1.1-field-and-handwriting
+    paths:
+      - .github/workflows/build-v5.1.1.yml
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch and validate pinned V5.0.10 release
+        run: python3 tools/build_v5_1_1.py
+      - name: Confirm release format and SHA-256
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, io, zipfile
+          root=Path("release-assets")
+          blob=base64.b64decode((root/"update.base64").read_text(),validate=True)
+          assert blob==(root/"CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(blob).hexdigest()==(root/"SHA256.txt").read_text().strip()
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              assert z.testzip() is None
+              assert "case_number_ocr.py" in z.namelist()
+              assert 'self.app_version = "5.1.1"' in z.read("case_number_ocr.py").decode()
+          PY
+      - name: Commit payload and trigger release publisher
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/update.base64 release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Publish verified MFCase V5.1.1 update package"
+          git push origin HEAD:publish/v5.1.1-field-and-handwriting
