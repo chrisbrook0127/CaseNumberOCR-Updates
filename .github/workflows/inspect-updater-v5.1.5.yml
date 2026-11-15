@@ -1,0 +1,30 @@
+name: Inspect MFCase update worker and scan consensus
+on:
+  push:
+    branches: [publish/v5.1.5-scan-order-updater]
+    paths: [.github/workflows/inspect-updater-v5.1.5.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read pinned current release
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile,base64,io,ast,hashlib
+          r=Path("release-assets")
+          b=base64.b64decode((r/"update.base64").read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="8830ce832e78f5e4eeece7e45de820c4b9fa6b6ce1e6c95c01b16a08a28dabe2"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          t=ast.parse(s)
+          lines=s.splitlines()
+          for n in ast.walk(t):
+              if isinstance(n,ast.FunctionDef) and n.name in {"_update_check_worker","_update_download_worker","_update_install_worker","_update_worker","_apply_sequence_consensus","_sequence_index","_sequence_neighbors","_sequence_case_number","_read_update_config"}:
+                  print("======",n.name,n.lineno,n.end_lineno)
+                  for j in range(n.lineno,n.end_lineno+1):print(f"{j}: {lines[j-1]}")
+          for j,l in enumerate(lines,1):
+              if 'updater_apply.py' in l or 'UPDATE' in l and 'queue.put' in l or 'check_update' in l or '_update_' in l and ('def ' in l or 'subprocess' in l):
+                  print(f"HIT {j}: {l}")
+          PY
