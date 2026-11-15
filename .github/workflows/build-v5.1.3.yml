@@ -1,5 +1,5 @@
 name: Verify and stage MFCase V5.1.3 backward-compatible update
-# Rebuild with safe helper allowlist addition
+# Rebuild with verified released helper guard
 on:
   push:
     branches:
