@@ -69,11 +69,9 @@ repl(r'''            match = INCIDENT_LABEL_RE.search(text)
                 found.append((x0,y0,min(x1,end),y1,label_kind,score))''')
 
 # Distinguish CASE from INCIDENT in joined split-label detections.
-repl('''                                   max(left[3],right[3]), "incident",
-                                   min(left[5],right[5])))''',
-     '''                                   max(left[3],right[3]),
-                                   "incident" if "incident" in match.group(0).lower() else "case",
-                                   min(left[5],right[5])))''')
+repl('max(left[3],right[3]), "incident",',
+     'max(left[3],right[3]),\n                                   '
+     '"incident" if "incident" in match.group(0).lower() else "case",')
 
 # The 95% OCR direct decision is evaluated *before* the secondary sequence rule.
 a=src.index('                    auto_done = False\n')
