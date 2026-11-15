@@ -1,4 +1,5 @@
 name: Build verified MFCase V5.2.4
+# Verify 95pct unambiguous 3x3 and top-of-grid progress indicator
 on:
   push:
     branches: [publish/v5.2.4-progress-case-priority]
