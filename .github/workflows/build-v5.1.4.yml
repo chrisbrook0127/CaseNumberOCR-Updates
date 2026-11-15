@@ -1,0 +1,85 @@
+name: Build and test MFCase V5.1.4 diagnostic update
+on:
+  push:
+    branches: [publish/v5.1.4-diagnostic-log]
+    paths: [.github/workflows/build-v5.1.4.yml]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch verified 5.1.3 and inspect syntax and ZIP
+        run: python3 tools/build_v5_1_4.py
+      - name: Run standalone extraction tests for case filtering, JSONL and ZIP export
+        run: |
+          python3 - <<'PY'
+          import ast, base64, hashlib, io, json, os, pathlib, re, tempfile, threading, types, zipfile
+          from pathlib import Path
+          import logging
+          folder=Path("release-assets")
+          raw=base64.b64decode(folder.joinpath("update.base64").read_text(),validate=True)
+          assert hashlib.sha256(raw).hexdigest()==folder.joinpath("SHA256.txt").read_text().strip()
+          with zipfile.ZipFile(io.BytesIO(raw)) as z:
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              source=z.read("case_number_ocr.py").decode()
+          tree=ast.parse(source)
+          funcs={n.name:n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)}
+          for required in ["_diag_event","_diag_field_filter","_diag_start_run","_diag_export","_ocr_pdf"]:
+              assert required in funcs,required
+          # Build a lightweight class with only the new diagnostic methods.
+          subset=[funcs[name] for name in ["_diag_event","_diag_field_filter",
+                  "_diag_start_run","_diag_hits"]]
+          cls=ast.ClassDef(name="Harness",bases=[],keywords=[],body=subset,decorator_list=[])
+          ast.fix_missing_locations(cls)
+          namespace={"logging":logging,"os":os,"Path":Path,"threading":threading,"re":re}
+          exec(compile(ast.Module(body=[cls],type_ignores=[]),"<mfcase-test>","exec"),namespace)
+          with tempfile.TemporaryDirectory() as d:
+              os.environ["LOCALAPPDATA"]=d
+              x=namespace["Harness"]()
+              x.app_version="5.1.4";x._diag_lock=threading.RLock()
+              x._diag_file=None;x._diag_run_id=None;x._diag_current_file=None
+              x.app_dir=Path(d);x.folder=Path(d)
+              x.scan_year_prefix="08";x.scan_items=[("iid",{"path":Path(d)/"Image4845.pdf"})]
+              x.auto_label_var=types.SimpleNamespace(get=lambda:True)
+              x._log=lambda *a,**kw:None
+              x._year_prefix=lambda:"08"
+              x._diag_start_run()
+              x._diag_current_file="Image4845.pdf"
+              hits=[
+                  {"number":"08-29","score":100,"rect":[900,10,950,35],"engines":["EasyOCR"]},
+                  {"number":"29-29","score":100,"rect":[900,10,950,35],"engines":["EasyOCR"]},
+                  {"number":"08-28","score":73,"rect":[901,10,950,35],"engines":["EasyOCR"]},
+                  {"number":"2014","score":100,"rect":[600,50,650,75],"engines":["EasyOCR"]}]
+              filtered=x._diag_field_filter(hits,"incident")
+              assert len(filtered)==1 and filtered[0]["number"]=="08-29",filtered
+              # Two equally perfect different case reads in the same year must remain.
+              conflict=x._diag_field_filter([hits[0],
+                  {"number":"08-30","score":100,"rect":[900,10,950,35],"engines":["EasyOCR"]}],"incident")
+              assert len(conflict)==2
+              records=[json.loads(line) for line in x._diag_file.read_text().splitlines()]
+              assert records[0]["event"]=="run_start"
+              assert records[-1]["event"]=="candidate_filter"
+              assert len(records[-2]["ignored"])==3
+              assert {i["reason"] for i in records[-2]["ignored"]}=={
+                  "not_a_complete_case_number","year_mismatch","lower_score_than_unique_100pct_label_read"}
+              assert records[-2]["file"]=="Image4845.pdf"
+              print("PASS OCR: non-case filtered, wrong year ignored, 100% unique accepted, true perfect conflict held")
+              print("PASS logs: line-delimited JSON, individual candidates and exclusion reasons")
+          assert 'text="EXPORT WORK LOG"' in source
+          assert 'self._diag_start_run()' in source
+          assert 'self._diag_event("row_decision"' in source
+          assert 'self._diag_event("sequence_decision"' in source
+          assert 'self._diag_event("transfer_result"' in source
+          assert 'self.app_version = "5.1.4"' in source
+          print("PASS wiring: UI export, scan start, OCR, neighbors, approval and transfer")
+          PY
+      - name: Commit vetted update asset and trigger release request separately
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage MFCase 5.1.4 diagnostic log and case field fixes"
+          git push origin HEAD:publish/v5.1.4-diagnostic-log
