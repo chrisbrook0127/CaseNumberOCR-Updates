@@ -54,6 +54,15 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "Shared learning" in app.connection_status_label.cget("text")
     app._show_main_view("select")
     assert app._active_main_view=="select"
+    # Central diagnostics use the existing restricted learning location,
+    # never the public GitHub application repository.
+    diag=location/"mfcase-test-run.jsonl"
+    diag.write_text('{"event":"learning_saved","file":"Image4869.pdf"}\\n')
+    app._diag_file=diag
+    app._diag_sync_shared()
+    copied=list((app.learning_dir/"diagnostics").rglob(diag.name))
+    assert len(copied)==1 and copied[0].read_bytes()==diag.read_bytes()
+    print("PASS: diagnostic log copied to authorized shared learning folder")
     print("PASS: unified SCAN/SETTINGS, SENT and unscanned rows")
 
     # Only a confirmed yes allows a SENT PDF to move out of COMPLETED for
