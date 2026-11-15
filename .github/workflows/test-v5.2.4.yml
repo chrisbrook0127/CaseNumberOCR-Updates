@@ -1,0 +1,32 @@
+name: Test MFCase V5.2.4 OCR and visible scan progress
+on:
+  push:
+    branches: [publish/v5.2.4-progress-case-priority]
+    paths: [.github/workflows/test-v5.2.4.yml]
+permissions: {contents: read}
+jobs:
+  ocr-and-progress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test exact shipped OCR alternates and real progress counts
+        run: python tools/test_v5_2_4_rules.py
+      - name: Test actual multi-file range consensus unchanged
+        run: python tools/test_v5_2_3_range.py
+  real-tk-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install virtual desktop and thumbnail dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb python3-tk
+          python -m pip install -q numpy pillow
+      - name: Test root-only list, review and progress bar ABOVE table
+        run: xvfb-run -a python tools/test_v5_2_4_ui.py
