@@ -1,0 +1,35 @@
+name: Inspect V5.1.5 review, UI, learning and file state
+on:
+  push:
+    branches: [publish/v5.2.0-single-screen]
+    paths: [.github/workflows/inspect-v5.2.0.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect pinned production source methods
+        run: |
+          python3 - <<'PY'
+          import io,zipfile,base64,hashlib,ast
+          from pathlib import Path
+          b=base64.b64decode(Path("release-assets/update.base64").read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="9e687759ebc8d12ce529737102078c9b6f580e575e99e55a96c5a73fbca60ab2"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines()
+          t=ast.parse(s)
+          print("=== TOP ===")
+          for j in range(1,80): print(f"{j}: {lines[j-1]}")
+          print("=== METHODS ===")
+          for n in ast.walk(t):
+              if isinstance(n,ast.FunctionDef):
+                  print(f"{n.name}: {n.lineno}-{n.end_lineno}")
+          print("=== UI ===")
+          for j in range(390,640):print(f"{j}: {lines[j-1]}")
+          for name in ["_save_learning_example","_capture_learning","_save_confirmed_example","_save_training_example","_open_review","review_next","_show_review","_open_review_window","_save_state","_load_state","_load_folder","_show_main_view","_move_to_completed","_apply_export_result","_render_review_file","_review_file"]:
+              for n in ast.walk(t):
+                  if isinstance(n,ast.FunctionDef) and n.name==name:
+                      print(f"=== {name} ===")
+                      for j in range(n.lineno,min(n.end_lineno,n.lineno+185)+1):print(f"{j}: {lines[j-1]}")
+          PY
