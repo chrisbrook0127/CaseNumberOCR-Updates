@@ -1,0 +1,21 @@
+name: Smoke-test MFCase V5.2.0 UI and learning
+on:
+  push:
+    branches: [publish/v5.2.0-single-screen]
+    paths: [.github/workflows/test-v5.2.0.yml]
+permissions: {contents: read}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Prepare virtual desktop and testing libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y xvfb python3-tk
+          python -m pip install --quiet numpy pillow
+      - name: Exercise real Tk interface, sent restoration, and training thumbnail rules
+        run: xvfb-run -a python tools/test_v5_2_0.py
