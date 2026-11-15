@@ -1,4 +1,5 @@
 name: Verify and stage MFCase V5.1.3 backward-compatible update
+# Rebuild after validating the released ZIP membership
 on:
   push:
     branches:
