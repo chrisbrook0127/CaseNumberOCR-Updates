@@ -1,0 +1,43 @@
+name: Build verified MFCase V5.2.3 update
+on:
+  push:
+    branches: [publish/v5.2.3-fallback-autoexport]
+    paths: [.github/workflows/build-v5.2.3.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch immutable published V5.2.2
+        run: git fetch --no-tags --depth=1 origin 452915a030825a3f046f5e89334f082a5d503356
+      - name: Build from exact release source
+        run: python3 tools/build_v5_2_3.py
+      - name: Check ZIP integrity, source syntax and SHA256
+        run: |
+          python3 - <<'PY'
+          import hashlib,base64,io,zipfile
+          from pathlib import Path
+          root=Path("release-assets")
+          blob=base64.b64decode(root.joinpath("update.base64").read_text(),validate=True)
+          assert blob==root.joinpath("CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(blob).hexdigest()==root.joinpath("SHA256.txt").read_text().strip()
+          assert root.joinpath("RELEASE_TAG.txt").read_text().strip()=="v5.2.3"
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for p in z.namelist():compile(z.read(p),p,"exec")
+              s=z.read("case_number_ocr.py").decode()
+              assert "100pct_localized_3x3_fallback" in s
+              assert 'self.app_version = "5.2.3"' in s
+              assert "self._schedule_auto_export()" in s
+          print("PASS actual V5.2.3 source, ZIP integrity and version")
+          PY
+      - name: Stage build for release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage MFCase V5.2.3 exact validated update"
+          git push origin HEAD:publish/v5.2.3-fallback-autoexport
