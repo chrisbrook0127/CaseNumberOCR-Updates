@@ -1,0 +1,24 @@
+name: Inspect critical V5.2.1 OCR decision branches
+on:
+  push:
+    branches: [publish/v5.2.2-field-thumbnails]
+    paths: [.github/workflows/inspect-v522-decisions.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture actual OCR decisions and root row update
+        run: |
+          python3 - <<'PY'
+          import ast,base64,hashlib,io,zipfile
+          from pathlib import Path
+          b=base64.b64decode(Path('release-assets/update.base64').read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=='138a2382736c0c71d0f12ddd3d7247334ac1bdcef6b8558131f5aa45b9a002ed'
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read('case_number_ocr.py').decode()
+          lines=s.splitlines()
+          for lo,hi in [(3430,3490),(3530,3599),(3666,3720),(4030,4160),(4280,4400),(4500,4580),(1571,1610)]:
+              print(f'========= RANGE {lo} {hi}')
+              for i in range(lo,min(hi,len(lines))+1):print(f'{i}: {lines[i-1]}')
+          PY
