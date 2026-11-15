@@ -1,0 +1,17 @@
+name: Test MFCase V5.2.1 in-place updater on Windows
+on:
+  push:
+    branches: [publish/v5.2.1-root-review]
+    paths: [.github/workflows/test-windows-v5.2.1.yml]
+permissions: {contents: read}
+jobs:
+  windows-update:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify real updater changes app and preserves case data
+        shell: pwsh
+        run: python tools/test_update_windows_v521.py
