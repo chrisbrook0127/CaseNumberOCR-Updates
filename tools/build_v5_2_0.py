@@ -412,11 +412,8 @@ replace_one('''                    self._diag_event("run_end",summary=dict(self.
 
 # Simple verification panel: one read score, editable number, optional category
 # toggles, SKIP and SAVE AND SEND. Keep crop edit and PDF preview intact.
-replace_one('''        ttk.Label(controls, text="OCR candidates (select a reading):",
-                   font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")''',
-            '''        ttk.Label(controls,
-                  text=f"OCR READ: {float(r.get('score') or 0):.1f}%",
-                  font=("Segoe UI",12,"bold")).grid(row=3,column=0,sticky="w")''')
+replace_one('''        ttk.Label(controls, text="OCR candidates (select a reading):",''',
+            '''        ttk.Label(controls, text=f"OCR READ: {float(r.get('score') or 0):.1f}%",''')
 replace_one('''        candidate_selector.grid(row=4, column=0, sticky="ew", pady=(2, 4))''',
             '''        # Candidate dropdown hidden; red-box selection remains available on the PDF.''')
 replace_one('''        nav_buttons.grid(row=label_row + 4, column=0, sticky="ew", pady=(4, 8))''',
