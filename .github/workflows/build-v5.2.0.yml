@@ -1,5 +1,5 @@
 name: Build and gate MFCase V5.2.0
-# Training crop intent and send button correction
+# Apply crop patch after base UI patch
 on:
   push:
     branches: [publish/v5.2.0-single-screen]
