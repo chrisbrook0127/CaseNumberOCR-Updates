@@ -1,0 +1,48 @@
+name: Prepare verified MFCase V5.1.2 3-inch OCR release
+on:
+  push:
+    branches:
+      - publish/v5.1.2-region3
+    paths:
+      - .github/workflows/build-v5.1.2.yml
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify source, patch and run rule regression checks
+        run: python3 tools/build_v5_1_2.py
+      - name: Verify archive, parse all shipped Python and assert safe ZIP
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, zipfile, io
+          root=Path("release-assets")
+          b64=root.joinpath("update.base64").read_text()
+          raw=base64.b64decode(b64,validate=True)
+          assert raw==root.joinpath("CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(raw).hexdigest()==root.joinpath("SHA256.txt").read_text().strip()
+          assert root.joinpath("RELEASE_TAG.txt").read_text().strip()=="v5.1.2"
+          with zipfile.ZipFile(io.BytesIO(raw)) as z:
+              assert z.testzip() is None
+              members=z.namelist()
+              assert len(members)==len(set(members))
+              assert all("/" not in n and "\\" not in n for n in members)
+              assert "case_number_ocr.py" in members and "updater_apply.py" in members
+              for fn in ("case_number_ocr.py", "updater_apply.py"):
+                  compile(z.read(fn),fn,"exec")
+              src=z.read("case_number_ocr.py").decode()
+              assert 'self.app_version = "5.1.2"' in src
+              assert "os.utime(destination, None)" in src
+          print("PASS: verified V5.1.2 source / manifest / SHA / ZIP safety")
+          PY
+      - name: Commit signed-by-digest update payload
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage verified MFCase V5.1.2 3x3 scan update"
+          git push origin HEAD:publish/v5.1.2-region3
