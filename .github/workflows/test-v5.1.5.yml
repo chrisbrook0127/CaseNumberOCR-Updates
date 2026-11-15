@@ -1,0 +1,16 @@
+name: Regression-test MFCase V5.1.5 three-read consensus
+on:
+  push:
+    branches: [publish/v5.1.5-scan-order-updater]
+    paths: [.github/workflows/test-v5.1.5.yml]
+permissions: {contents: read}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Execute extracted shipped scan, boundary, gap and confidence rules
+        run: python tools/test_v5_1_5.py
