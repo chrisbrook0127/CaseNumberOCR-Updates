@@ -1,4 +1,5 @@
 name: Regression-test MFCase V5.1.5 three-read consensus
+# Re-verify inferred-middle handling
 on:
   push:
     branches: [publish/v5.1.5-scan-order-updater]
