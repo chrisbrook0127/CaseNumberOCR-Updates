@@ -1,0 +1,36 @@
+name: Inspect exact V5.2.0 selected review and root listing methods
+on:
+  push:
+    branches: [publish/v5.2.1-root-review]
+    paths: [.github/workflows/inspect-v521.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read published V5.2.0 application
+        run: |
+          python3 - <<'PY'
+          import ast,base64,hashlib,io,zipfile,pathlib
+          p=pathlib.Path("release-assets/update.base64")
+          blob=base64.b64decode(p.read_text(),validate=True)
+          assert hashlib.sha256(blob).hexdigest()=="b481635a729fa080e26aa357aa3ef9bec1ca8d8b8295b2e1a3bd04d00eeb0342"
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines(); t=ast.parse(s)
+          names={"_folder_load_worker","_apply_folder_load","_apply_export_result",
+              "_move_to_completed","review_selected","_review_ready_ids",
+              "_refresh_review_controls","_sync_scan_selection",
+              "_on_scan_checkbox_click","_update_scan_file_count",
+              "_show_main_view","_refresh_scan_button","_insert_scan_row"}
+          for n in ast.walk(t):
+              if isinstance(n,ast.FunctionDef) and n.name in names:
+                  print(f"======== {n.name} {n.lineno}:{n.end_lineno}")
+                  for i in range(n.lineno,min(n.end_lineno,n.lineno+100)+1):
+                      print(f"{i}: {lines[i-1]}")
+          print("======== UI REVIEW BUTTON:")
+          for i,l in enumerate(lines,1):
+              if "self.review_btn" in l or "REVIEW SELECTED" in l or "REVIEW FILES" in l:
+                  print(i,l)
+          PY
