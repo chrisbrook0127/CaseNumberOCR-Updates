@@ -1,4 +1,5 @@
 name: Regress MFCase 5.2.2 95-percent OCR and scan preview
+# Recheck shipped OCR rule tests with mock UI status callbacks
 on:
   push:
     branches: [publish/v5.2.2-field-thumbnails]
