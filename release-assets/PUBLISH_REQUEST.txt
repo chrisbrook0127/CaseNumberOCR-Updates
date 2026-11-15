@@ -1,1 +1,3 @@
-V5.2.3: auto-export all COMPLETED after scan and unique 100pct localized fallback
+Publish QA-passed MFCase V5.2.3 with automatic 100% localized 3x3 fallback reads, automatic transfer of all approved root PDFs after scanning, and matching scan-order range anchors across any number of intervening low-confidence or unreadable PDFs. Evidence regression: Image4892 08-44 (100%), Image4894 08-64 (75.3%), Image4895 unreadable, Image4901 08-44 (100%) => infer both middle 08-44; 5-file bounded sequence; conflicting strong reads/manual choices never overwritten.
+Release ZIP SHA256: 33d4a12efa80ccaeaf3e220c99640ee8b710822664e07adc1240362a0c7dedb2
+All range, rules, and Tk UI regression jobs passed.
