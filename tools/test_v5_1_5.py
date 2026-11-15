@@ -121,6 +121,6 @@ with tempfile.TemporaryDirectory() as tmp:
     m=Mock(Path(tmp),["Image1.pdf","Image2.pdf","Image3.pdf"],["08-32"]*3)
     m.records["id1"]["sequence_inferred"]=True
     m._apply_sequence_consensus()
-    assert len(m.moved)==0
-print("PASS: inferred results are not independent OCR anchors")
+    assert m.moved==[("id1",True)],m.moved
+print("PASS: previously inferred middle can be reverified, but cannot anchor the end files")
 print("TOTAL: 10 grouped regression scenarios")
