@@ -1,0 +1,24 @@
+name: Inspect exact approval and UI row
+on:
+  push:
+    branches: [publish/v5.2.2-field-thumbnails]
+    paths: [.github/workflows/inspect-v522-poll.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show OCR approval and sequence helper
+        run: |
+          python - <<'PY'
+          import zipfile,io,base64,hashlib,ast
+          from pathlib import Path
+          b=base64.b64decode(Path("release-assets/update.base64").read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="138a2382736c0c71d0f12ddd3d7247334ac1bdcef6b8558131f5aa45b9a002ed"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines()
+          for lo,hi in [(4190,4299),(2250,2330),(2340,2445),(4100,4190)]:
+              print("=====RANGE",lo,hi)
+              for i in range(lo,hi+1):print(f"{i}: {lines[i-1]}")
+          PY
