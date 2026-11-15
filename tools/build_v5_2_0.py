@@ -564,6 +564,58 @@ replace_one('''CASE_FIELD_LABEL_RE = re.compile(r"(?:Case\s+Number|INCIDENT\s+N[
             '''CASE_FIELD_LABEL_RE = re.compile(
     r"(?:CASE\s*(?:NO\.?|NUM(?:BER)?|#)|INCIDENT\s*(?:N[O0]\s*\.?|NUM(?:BER)?|#))",
     re.IGNORECASE)''')
+# Remove coworker-specific naming from every visible transfer message.
+# Keep internal method identifiers to preserve integration.
+for old,new in (
+    ("to Kurt","to COMPLETED"),
+    ("Kurt transfer","PDF transfer"),
+    ("Kurt Transfer","PDF Transfer"),
+    ("Kurt destination","COMPLETED destination"),
+    ("MFCase-KurtTransfer","MFCase-PDFTransfer"),
+):
+    source=source.replace(old,new)
+
+# Report live GitHub availability separately from on-device OCR readiness.
+# The connection test never blocks Tk's UI thread.
+connection=r'''
+    def _check_connection_status(self):
+        label=getattr(self,"connection_status_label",None)
+        if label is None:
+            return
+        label.config(text="Checking Shared learning, OCR models and GitHub connectivity…")
+        def check_worker():
+            models=bool(getattr(self,"reader",None) is not None and
+                        getattr(self,"trocr_model",None) is not None)
+            try:
+                share=bool(self.learning_dir and Path(self.learning_dir).is_dir())
+            except OSError:
+                share=False
+            try:
+                req=urllib.request.Request(
+                    "https://api.github.com/repos/chrisbrook0127/CaseNumberOCR-Updates/releases/latest",
+                    headers={"User-Agent":"MFCase-Connectivity/5.2.0"})
+                with urllib.request.urlopen(req,timeout=5) as response:
+                    github=(response.status==200)
+            except Exception:
+                github=False
+            report=(
+                f"OCR models: {'READY (runs locally)' if models else 'NOT READY'}   |   "
+                f"Shared learning: {'CONNECTED' if share else 'OFFLINE'}   |   "
+                f"GitHub releases: {'ONLINE' if github else 'OFFLINE'}   |   "
+                f"SCAN: {'READY' if self._startup_ready and models and share else 'LOCKED until required models and share are ready'}"
+            )
+            def show():
+                try:
+                    if label.winfo_exists():label.config(text=report)
+                except tk.TclError:
+                    pass
+            try:self.root.after(0,show)
+            except Exception:pass
+        threading.Thread(target=check_worker,daemon=True,
+                         name="MFCase-ConnectionCheck").start()
+'''
+replace_method("_check_connection_status",connection)
+
 compile(source,"case_number_ocr.py","exec")
 assert 'self.app_version = "5.2.0"' in source
 assert 'root.title("M.F. Case Number OCR — V5.2.0")' in source
