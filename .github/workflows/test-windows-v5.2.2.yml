@@ -1,0 +1,17 @@
+name: Test MFCase V5.2.2 GitHub updater on Windows
+on:
+  push:
+    branches: [publish/v5.2.2-field-thumbnails]
+    paths: [.github/workflows/test-windows-v5.2.2.yml]
+permissions: {contents: read}
+jobs:
+  update:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply real V5.2.2 release and check data preservation
+        shell: pwsh
+        run: python tools/test_update_windows_v522.py
