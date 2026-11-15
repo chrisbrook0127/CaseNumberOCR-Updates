@@ -1,5 +1,5 @@
 name: Build and gate MFCase V5.2.0
-# Live connectivity and neutral destination terminology
+# Learning update diagnostic sync to protected share
 on:
   push:
     branches: [publish/v5.2.0-single-screen]
