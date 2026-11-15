@@ -1,5 +1,5 @@
 name: Build and gate MFCase V5.2.0
-# OCR label anchor correction
+# Send-control state fix
 on:
   push:
     branches: [publish/v5.2.0-single-screen]
