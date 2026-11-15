@@ -1,1 +1,2 @@
-MFCase V5.1.5 sorted scan-read consensus and visible updater error reporting
+Publish MFCase V5.1.5 after green scan-queue and updater-check regression tests.
+ZIP SHA256 9e687759ebc8d12ce529737102078c9b6f580e575e99e55a96c5a73fbca60ab2
