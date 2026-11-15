@@ -1,0 +1,45 @@
+name: Build and stage MFCase V5.2.1 root-only review
+on:
+  push:
+    branches: [publish/v5.2.1-root-review]
+    paths: [.github/workflows/build-v5.2.1.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch immutable V5.2.0 published source
+        run: git fetch --no-tags --depth=1 origin deaad2fb2e0a55810e039325eb4d6d69ca6cf87e
+      - name: Patch root-only listing and restore review selected
+        run: python3 tools/build_v5_2_1.py
+      - name: Verify updater compatibility, version, SHA and ZIP
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64,hashlib,zipfile,io,ast
+          root=Path("release-assets")
+          blob=base64.b64decode(root.joinpath("update.base64").read_text(),validate=True)
+          assert blob==root.joinpath("CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(blob).hexdigest()==root.joinpath("SHA256.txt").read_text().strip()
+          assert root.joinpath("RELEASE_TAG.txt").read_text().strip()=="v5.2.1"
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              app=z.read("case_number_ocr.py").decode()
+              assert "REVIEW SELECTED" in app and "self.review_btn.pack(" in app
+              assert 'root.title("M.F. Case Number OCR — V5.2.1")' in app
+              assert "os.utime(destination, None)" in app
+              assert "minimum_independent_matches=3" in app
+              for item in z.namelist():
+                  compile(z.read(item),item,"exec")
+          print("PASS: verified v5.2.1 two-file release")
+          PY
+      - name: Commit release files to staging branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage verified MFCase v5.2.1 root-only scan and review selected"
+          git push origin HEAD:publish/v5.2.1-root-review
