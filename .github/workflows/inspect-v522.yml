@@ -1,0 +1,34 @@
+name: Inspect V5.2.1 OCR and scan thumbnail implementations
+on:
+  push:
+    branches: [publish/v5.2.2-field-thumbnails]
+    paths: [.github/workflows/inspect-v522.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Print source functions
+        run: |
+          python - <<'PY'
+          import zipfile,base64,hashlib,io,ast,pathlib
+          path=pathlib.Path('release-assets/update.base64')
+          blob=base64.b64decode(path.read_text(),validate=True)
+          assert hashlib.sha256(blob).hexdigest()=='138a2382736c0c71d0f12ddd3d7247334ac1bdcef6b8558131f5aa45b9a002ed'
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:s=z.read('case_number_ocr.py').decode()
+          l=s.splitlines()
+          t=ast.parse(s)
+          names=['_ocr_pdf','_find_case_field_label_regions','_read_incident_to_right','_find_case_candidates','_select_primary_case_hit','_diag_field_filter','_apply_sequence_consensus','_poll','_insert_scan_row','_completed_row_values','_refresh_review_controls','_apply_folder_load','_show_review_item','_save_learning_example','__init__']
+          for n in ast.walk(t):
+              if isinstance(n,ast.FunctionDef) and n.name in names:
+                  print('======',n.name,n.lineno,n.end_lineno)
+                  limit=250 if n.name in ['_ocr_pdf','_find_case_field_label_regions','_read_incident_to_right','_insert_scan_row','_diag_field_filter'] else 130
+                  if n.name=='_poll':limit=240
+                  if n.name=='__init__':limit=230
+                  for i in range(n.lineno,min(n.end_lineno,n.lineno+limit-1)+1):
+                      print(f'{i}: {l[i-1]}')
+          for i,line in enumerate(l,1):
+              if 'CASE_FIELD_LABEL_RE' in line or 'self.tree = ' in line or 'self.tree.column(' in line or 'self.tree.heading(' in line or 'self.tree["show"]' in line or 'self.tree["displaycolumns"]' in line or 'PhotoImage(' in line:
+                  print('KEY',i,line)
+          PY
