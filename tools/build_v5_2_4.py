@@ -197,6 +197,27 @@ repl('''            across={h["number"] for r in results if r[3]==kind
                 across.update(h["number"] for h in
                     self._resolve_ocr_alternates(_filtered,kind,_best))''')
 
+# A handwritten 08-44 at 99.8% is not "100%" but exceeds the user's
+# 95%-minimum primary OCR rule. The localized top-right fallback is already
+# constrained to the 3x3 field. Do not force 99.95% when a uniquely resolved
+# primary case read passes 95% and has a real bounding box.
+repl('''        minimum=99.95 if kind=="fallback" else 95.0''',
+     '''        minimum=95.0''')
+repl('''                        and float(score or 0) >= 99.95''',
+     '''                        and float(score or 0) >= self._get_auto_threshold()''')
+repl('''                    fallback_100 = (''',
+     '''                    fallback_95 = (''')
+repl('''                                 or fallback_100)''',
+     '''                                 or fallback_95)''')
+repl('''                                  else "100pct_localized_3x3_fallback")''',
+     '''                                  else "95pct_localized_3x3_fallback")''')
+repl('''                            "requires an unambiguous localized 100% OCR read "''',
+     '''                            "requires an unambiguous localized 95% OCR read "''')
+repl('''                note="Upper-right fallback within 3x3 — unique 100% localized read may auto-approve"''',
+     '''                note="Upper-right fallback within 3x3 — unique 95% localized read may auto-approve"''')
+repl('''            if (score<99.95 or not isinstance(snip,(tuple,list))''',
+     '''            if (score<95.0 or not isinstance(snip,(tuple,list))''')
+
 # The candidate selection in fallback mode already picks a box in the
 # upper-right region, but its score ranking ignores the selected year. Year
 # filtering happens before resolution; only YY- case numbers are eligible.
@@ -209,7 +230,7 @@ assert 'dimension_px=int(round(3*72*2.2))' in src
 assert 'def _resolve_ocr_alternates(' in src
 assert 'def _scan_progress_update(' in src
 assert 'self.scan_progress_label=' in src
-assert 'minimum=99.95 if kind=="fallback" else 95.0' in src
+assert 'minimum=95.0' in src
 assert 'def _make_scan_preview' in src
 assert 'text="REVIEW SELECTED"' in src
 assert 'os.utime(destination, None)' in src
