@@ -1,2 +1,1 @@
-Publish MFCase V5.1.4 full diagnostic JSONL export and case field conflict correction.
-Verified sha256 8830ce832e78f5e4eeece7e45de820c4b9fa6b6ce1e6c95c01b16a08a28dabe2
+MFCase V5.1.5 sorted scan-read consensus and visible updater error reporting
