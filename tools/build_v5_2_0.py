@@ -35,7 +35,75 @@ def replace_method(name,body):
     if len(matches)!=1:raise AssertionError((name,len(matches)))
     n=matches[0];lines=source.splitlines(keepends=True)
     source="".join(lines[:n.lineno-1])+body.strip("\n")+"\n"+"".join(lines[n.end_lineno:])
-    compile(source,"case_number_ocr.py","exec")
+    # Distinguish OCR candidate selection from an intentionally drawn crop.
+# Drawn crops are authoritative for thumbnail generation. Selected OCR boxes
+# are authoritative until the reviewer draws a new rectangle.
+replace_one('''        if record.get("manual_crop_rect") and field_rect:
+            training_rect=tuple(field_rect)''',
+            '''        if (record.get("manual_crop_rect") and field_rect and
+                (record.get("manual_crop_origin")=="drawn" or not selected_candidate)):
+            training_rect=tuple(field_rect)''')
+replace_one('''        crop_origin = ("manual-field" if record.get("manual_crop_rect")
+                       else "candidate-number-box" if selected_candidate else "ocr")''',
+            '''        crop_origin=("manual-field" if record.get("manual_crop_rect") and
+                     (record.get("manual_crop_origin")=="drawn" or not selected_candidate)
+                     else "candidate-number-box" if selected_candidate else "ocr")''')
+replace_one('''                        selection["preview_rect"] = None
+                    selection_status.config(''',
+            '''                        r["manual_crop_origin"]="candidate"
+                        selection["preview_rect"] = None
+                    selection_status.config(''')
+replace_one('''                        r["manual_crop_rect"]=selected
+                        r["training_type"]=training_type_var.get()''',
+            '''                        r["manual_crop_rect"]=selected
+                        r["manual_crop_origin"]="drawn"
+                        r["training_type"]=training_type_var.get()''')
+replace_one('''                r["manual_crop_rect"] = None
+                selection["drag"] = None''',
+            '''                r["manual_crop_rect"] = None
+                r["manual_crop_origin"]=""
+                selection["drag"] = None''')
+replace_one('''                "manual_crop_rect": list(rec["manual_crop_rect"]) if rec.get("manual_crop_rect") else None,''',
+            '''                "manual_crop_rect": list(rec["manual_crop_rect"]) if rec.get("manual_crop_rect") else None,
+                "manual_crop_origin": rec.get("manual_crop_origin",""),''')
+replace_one('''                "manual_crop_rect": tuple(old.get("manual_crop_rect", [])) if old.get("manual_crop_rect") else None,''',
+            '''                "manual_crop_rect": tuple(old.get("manual_crop_rect", [])) if old.get("manual_crop_rect") else None,
+                "manual_crop_origin": old.get("manual_crop_origin",""),''')
+# Optional category display reflects the existing state without de-selecting it.
+replace_one('''        choose_training_type(training_type_var.get()) if training_type_var.get() in type_buttons else None''',
+            '''        for name,widget in type_buttons.items():
+            active=(training_type_var.get()==name)
+            widget.config(relief="sunken" if active else "raised",
+                          bg="#1456a8" if active else "#ededed",
+                          fg="white" if active else "black")''')
+# Re-enable SEND SELECTED after a scan finishes or a completed record is loaded.
+tree=ast.parse(source)
+method=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=="_refresh_scan_button")
+oldseg=ast.get_source_segment(source,method)
+assert oldseg.count('self._refresh_rescan_button()')==1
+newseg=oldseg.replace('self._refresh_rescan_button()',
+    '''self._refresh_rescan_button()
+        button=getattr(self,"send_selected_btn",None)
+        if button is not None:
+            allowed=(self._startup_ready and not self.busy and
+                    not self.export_busy and not self.trocr_training and
+                    any(self._eligible_for_kurt(iid,self.records[iid])
+                        for iid in self.tree.selection() if iid in self.records))
+            button.config(state="normal" if allowed else "disabled")''')
+source=source.replace(oldseg,newseg,1)
+# Fix stale review status after transfer and selection change.
+replace_one('''            rec["completed_iid"] = None
+            message = f"Moved to COMPLETED:''',
+            '''            rec["completed_iid"] = None
+            self._insert_scan_row(iid,rec)
+            message = f"Moved to COMPLETED:''')
+# Widen support for printed headings without considering any non-case number
+# as a case. The candidate regex remains digit-hyphen-digit only.
+replace_one('''CASE_FIELD_LABEL_RE = re.compile(r"(?:Case\s+Number|INCIDENT\s+N[O0]\s*\.?)", re.IGNORECASE)''',
+            '''CASE_FIELD_LABEL_RE = re.compile(
+    r"(?:CASE\s*(?:NO\.?|NUM(?:BER)?|#)|INCIDENT\s*(?:N[O0]\s*\.?|NUM(?:BER)?|#))",
+    re.IGNORECASE)''')
+compile(source,"case_number_ocr.py","exec")
 
 # Only SCAN and SETTINGS are user-facing. Preserve the former second tree as
 # a hidden compatibility view to avoid breaking approval/export safeguards.
