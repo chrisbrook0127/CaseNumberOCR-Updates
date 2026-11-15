@@ -162,7 +162,7 @@ assert 'dimension_px=int(round(3*72*2.2))' in app
 assert 'observed_score < 95.0' in app
 assert 'os.utime(destination, None)' in app
 assert 'def _diag_export(' in app
-assert 'if left[1] != right[1]:' in app
+assert 'tuple(map(int,left[1].split("-",1))) != tuple(map(int,right[1].split("-",1)))' in app
 assert 'minimum_independent_matches=3' in app
 assert 'filename run' not in ast.get_source_segment(
     app,next(x for x in ast.walk(ast.parse(app))
