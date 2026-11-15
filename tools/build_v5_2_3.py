@@ -146,6 +146,167 @@ swap('''                    if self._export_reschedule:
                     self._schedule_auto_export()
                 elif kind == "engine_status":''')
 
+# Sequence consensus now spans any number of intervening SCANNED files.
+# Evidence is the two nearest independent reliable reads bounding the run,
+# not consecutive filename numbers. No OCR-based inference overrides an
+# independently strong disagreeing read or an existing manual confirmation.
+def replace_method(name,body):
+    global src
+    tree=ast.parse(src)
+    found=[n for n in ast.walk(tree)
+           if isinstance(n,ast.FunctionDef) and n.name==name]
+    assert len(found)==1,(name,len(found))
+    n=found[0];lines=src.splitlines(keepends=True)
+    src="".join(lines[:n.lineno-1])+body.strip("\n")+"\n"+"".join(lines[n.end_lineno:])
+    compile(src,"case_number_ocr.py","exec")
+
+sequence_case=r'''
+    def _sequence_case_number(self, record):
+        """Return an independent anchored OCR case for sequence comparison.
+
+        95% labeled/header or 100% uniquely localized 3x3 fallback can anchor.
+        Manual approvals can anchor. An inferred value cannot anchor.
+        """
+        if (not record or record.get("sequence_inferred") or
+                record.get("sequence_excluded") or
+                str(record.get("status") or "").startswith("Unverified") or
+                record.get("scan_ambiguous") or record.get("sequence_conflict")):
+            return None
+        manually_verified=(bool(record.get("manual_approved")) and
+                           not bool(record.get("auto_labeled")))
+        case=normalize_case_number(
+            record.get("confirmed") if manually_verified else record.get("candidate"))
+        if not CASE_RE.fullmatch(case):
+            return None
+        year=self.scan_year_prefix or self._year_prefix()
+        if (year and year.isdigit() and
+                int(case.split("-",1)[0])!=int(year)):
+            return None
+        if manually_verified:
+            return case
+        score=float(record.get("score") or 0)
+        source=record.get("scan_source")
+        if source=="fallback":
+            snip=record.get("snippet")
+            if (score<99.95 or not isinstance(snip,(tuple,list))
+                    or len(snip)<4 or snip[3] is None):
+                return None
+        elif source not in ("incident","case","header"):
+            return None
+        elif score<95.0:
+            return None
+        return case
+'''
+replace_method("_sequence_case_number",sequence_case)
+
+range_consensus=r'''
+    def _apply_sequence_consensus(self):
+        """Secondary before/after rule over contiguous *scan positions*.
+
+        If two adjacent independent OCR anchors in sorted scan order match,
+        approve every unverified middle item, even with a weak incorrect OCR
+        case (e.g. 08-64 at 75.3% surrounded by 08-44 at 100%).
+        Strong, contradictory reads, manual decisions and OCR conflicts are
+        NEVER silently overwritten. Export occurs after the scan is complete.
+        """
+        if not self.auto_label_var.get():
+            return 0
+        order=[]
+        for iid,_item in (getattr(self,"scan_items",[]) or []):
+            record=self.records.get(iid)
+            if not record:
+                continue
+            # Keep real sequence slots, even if a scan cannot be read; do not
+            # require adjacent source filenames or ascending numeric suffixes.
+            order.append((iid,record))
+        anchors=[]
+        for index,(iid,record) in enumerate(order):
+            number=self._sequence_case_number(record)
+            if number:
+                anchors.append((index,iid,number))
+        self._diag_event("sequence_anchor_snapshot",order=[
+            {"index":pos,"file":Path(rec["path"]).name if rec.get("path") else iid,
+             "candidate":rec.get("candidate"),"score":rec.get("score"),
+             "source":rec.get("scan_source"),"anchor":(
+                 next((case for pos2,aid,case in anchors if pos2==pos),None))}
+            for pos,(iid,rec) in enumerate(order)])
+        updated=0
+        for previous,following in zip(anchors,anchors[1:]):
+            left_pos,left_iid,left_case=previous
+            right_pos,right_iid,right_case=following
+            if right_pos<=left_pos+1:
+                continue
+            numeric=lambda val:tuple(map(int,str(val).split("-",1)))
+            if numeric(left_case)!=numeric(right_case):
+                self._diag_event("sequence_range_rejected",reason="different_anchor_cases",
+                    first=left_case,last=right_case,
+                    from_file=Path(self.records[left_iid]["path"]).name,
+                    to_file=Path(self.records[right_iid]["path"]).name)
+                continue
+            consensus=left_case
+            first_name=Path(self.records[left_iid]["path"]).name
+            last_name=Path(self.records[right_iid]["path"]).name
+            for _pos in range(left_pos+1,right_pos):
+                iid,rec=order[_pos]
+                path=rec.get("path")
+                if (not path or not Path(path).is_file() or
+                        rec.get("exported") or rec.get("sequence_excluded") or
+                        rec.get("manual_approved") or
+                        rec.get("scan_ambiguous") or rec.get("sequence_conflict") or
+                        rec.get("status") in ("Not scanned","Scanning","Moved to BLANKS") or
+                        str(rec.get("status") or "").startswith("Scan error:")):
+                    continue
+                original=normalize_case_number(rec.get("candidate"))
+                score=float(rec.get("score") or 0)
+                valid=bool(CASE_RE.fullmatch(original))
+                if (valid and score>=95.0 and
+                    numeric(original)!=numeric(consensus)):
+                    self._diag_event("sequence_range_rejected",
+                        file=Path(path).name,reason="high_confidence_conflicting_middle",
+                        original=original,score=score,expected=consensus,
+                        first=first_name,last=last_name)
+                    rec["status"]=(f"{score:.1f}% OCR {original} conflicts with "
+                        f"matching range {consensus}; manual review required")
+                    self._insert_scan_row(iid,rec)
+                    continue
+                block=self._auto_label_block_reason(100.0,False,consensus)
+                if block is not None:
+                    self._diag_event("sequence_range_rejected",
+                        file=Path(path).name,reason=block)
+                    continue
+                rec["sequence_original_candidate"]=original
+                rec["sequence_original_score"]=score
+                rec["sequence_original_ambiguous"]=False
+                rec["sequence_anchors"]=[left_iid,right_iid]
+                rec["candidate"]=consensus
+                rec["confirmed"]=consensus
+                rec["sequence_inferred"]=True
+                rec["sequence_excluded"]=False
+                rec["sequence_conflict"]=False
+                rec["scan_ambiguous"]=False
+                rec["auto_labeled"]=True
+                rec["manual_approved"]=True
+                rec["status"]=(
+                    f"Range-confirmed {consensus} between {first_name} and {last_name}"
+                    + (f"; original OCR {original} at {score:.1f}%"
+                       if original else "; original OCR unreadable"))
+                self._diag_event("approval_decision",file=Path(path).name,
+                    outcome="auto_approved",rule="matching_boundary_scan_range",
+                    case=consensus,first=first_name,last=last_name,
+                    original_candidate=original,original_score=score)
+                self._move_to_completed(iid,batch=True)
+                updated+=1
+        if updated:
+            self._refresh_review_controls()
+            self._update_completed_count()
+            self._save_state()
+        self._diag_event("sequence_range_summary",anchors=len(anchors),
+                         inferred=updated,scanned=len(order))
+        self._schedule_auto_export()
+        return updated
+'''
+replace_method("_apply_sequence_consensus",range_consensus)
+
 # Preserve all OCR and file safety logic. No background extra server sends.
 compile(src,"case_number_ocr.py","exec")
 tree=ast.parse(src)
