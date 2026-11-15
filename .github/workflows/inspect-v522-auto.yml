@@ -1,0 +1,23 @@
+name: Inspect autoapproval exact source
+on:
+  push:
+    branches: [publish/v5.2.2-field-thumbnails]
+    paths: [.github/workflows/inspect-v522-auto.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Focus on decision and preview wiring
+        run: |
+          python - <<'PY'
+          import zipfile,io,base64,hashlib,ast,pathlib
+          b=base64.b64decode(pathlib.Path("release-assets/update.base64").read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="138a2382736c0c71d0f12ddd3d7247334ac1bdcef6b8558131f5aa45b9a002ed"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines()
+          for lo,hi in [(4200,4299),(70,120),(2400,2530),(850,910),(1950,1990)]:
+              print("========",lo,hi)
+              for i in range(lo,hi+1):print(f"{i}: {lines[i-1]}")
+          PY
