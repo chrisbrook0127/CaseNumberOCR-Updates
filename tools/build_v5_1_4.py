@@ -8,7 +8,12 @@ from datetime import datetime,timezone
 import ast,base64,hashlib,io,zipfile,re
 
 ROOT=Path("release-assets")
-old=base64.b64decode((ROOT/"update.base64").read_text(),validate=True)
+# Read the immutable 5.1.3 production source, even after the staging branch
+# itself contains a previously built 5.1.4 payload.
+import subprocess
+pinned=subprocess.check_output(
+    ["git","show","FETCH_HEAD:release-assets/update.base64"],text=True)
+old=base64.b64decode(pinned.strip(),validate=True)
 assert hashlib.sha256(old).hexdigest()=="2988f8bc504f225bf13d009555ca5e6286855888a69a98cab2aefbc450dd4ee0"
 with zipfile.ZipFile(io.BytesIO(old)) as z:
     assert z.testzip() is None
