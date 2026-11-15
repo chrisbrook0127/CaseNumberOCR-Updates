@@ -34,7 +34,7 @@ def method_class(name,env):
     section=ast.get_source_segment(code,node)
     assert section and section.lstrip().startswith("def ")
     obj={}
-    exec("class Harness:\n"+section+"\n",env,obj)
+    exec("class Harness:\n    "+section+"\n",env,obj)
     return obj["Harness"]
 
 normalize=lambda x:str(x or "").strip()
