@@ -1,0 +1,31 @@
+name: Inspect V521 OCR labels and Tk selection
+on:
+  push:
+    branches: [publish/v5.2.2-field-thumbnails]
+    paths: [.github/workflows/inspect-v522-extra.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show exact label helpers and list callbacks
+        run: |
+          python3 - <<'PY'
+          import ast,base64,hashlib,io,zipfile,pathlib
+          blob=base64.b64decode(pathlib.Path("release-assets/update.base64").read_text(),validate=True)
+          assert hashlib.sha256(blob).hexdigest()=="138a2382736c0c71d0f12ddd3d7247334ac1bdcef6b8558131f5aa45b9a002ed"
+          with zipfile.ZipFile(io.BytesIO(blob)) as z: s=z.read("case_number_ocr.py").decode()
+          l=s.splitlines();t=ast.parse(s)
+          for lo,hi in [(20,65),(475,535),(1165,1255),(3598,3670),(4740,4860),(4990,5075)]:
+              print("===== RANGE",lo,hi)
+              for i in range(lo,hi+1):print(f"{i}: {l[i-1]}")
+          names={"_incident_hits_from_detections","_merge_case_hits","_get_auto_threshold","_auto_label_block_reason","_completed_row_values","_make_completed_photo","_on_scan_checkbox_click","_set_scan_checkbox","_sync_scan_selection","_show_review_item"}
+          for n in ast.walk(t):
+              if isinstance(n,ast.FunctionDef) and n.name in names:
+                  print("======",n.name,n.lineno,n.end_lineno)
+                  limit=165
+                  if n.name=="_show_review_item":limit=45
+                  for i in range(n.lineno,min(n.end_lineno,n.lineno+limit-1)+1):
+                      print(f"{i}: {l[i-1]}")
+          PY
