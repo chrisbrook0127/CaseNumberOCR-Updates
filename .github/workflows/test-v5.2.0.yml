@@ -1,5 +1,5 @@
 name: Smoke-test MFCase V5.2.0 UI and learning
-# Validate updated learning sync and previously checked sent-files behavior
+# Verify restricted central work-log copy with GUI/learning tests
 on:
   push:
     branches: [publish/v5.2.0-single-screen]
