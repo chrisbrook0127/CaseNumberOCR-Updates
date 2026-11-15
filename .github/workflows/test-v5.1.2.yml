@@ -15,6 +15,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install lightweight array dependency for synthetic PDF tests
-        run: python -m pip install --quiet numpy
+        run: python -m pip install --quiet numpy pillow
       - name: Run exact shipped-method 3in OCR, 95% neighbor and modified-date tests
         run: python tools/test_v5_1_2.py
