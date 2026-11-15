@@ -72,19 +72,39 @@ neighbors=r'''
         length=len(group)
         if length<3:
             return None
-        if index==0:
-            a,b=group[1],group[2]
-        elif index==length-1:
-            a,b=group[length-3],group[length-2]
-        else:
+        candidate=str(self.records[iid].get("candidate") or "").strip()
+        match_key=lambda s: tuple(int(x) for x in str(s).split("-",1)) if (
+            s and re.fullmatch(r"\\d{1,2}-\\d{1,7}",str(s))) else None
+        key=match_key(candidate)
+        windows=[]
+        if index>0 and index+1<length:
+            windows.append((group[index-1],group[index+1]))
+        if index>=2:
+            windows.append((group[index-2],group[index-1]))
+        if index+2<length:
+            windows.append((group[index+1],group[index+2]))
+        for a,b in windows:
+            if key and match_key(a[2])==key and match_key(b[2])==key:
+                return ((a[1],a[2]),(b[1],b[2]))
+        # Keep the original before/after disagreement safeguard. A real
+        # contradictory middle OCR read must go to manual review.
+        if index>0 and index+1<length:
             a,b=group[index-1],group[index+1]
-        if not a[2] or not b[2]:
-            return None
-        return ((a[1],a[2]),(b[1],b[2]))
+            if a[2] and b[2] and match_key(a[2])==match_key(b[2]):
+                return ((a[1],a[2]),(b[1],b[2]))
+        return None
 '''
 app=replace_method(app,"_sequence_index",index)
 app=replace_method(app,"_sequence_neighbors",neighbors)
 
+# Leading zeros are ignored when comparing three independently read cases.
+# Preserve the original detected strings for audit and export normalization.
+app=app.replace(
+    '            if left[1] != right[1]:',
+    '            if tuple(map(int,left[1].split("-",1))) != tuple(map(int,right[1].split("-",1))):',1)
+app=app.replace(
+    '            if candidate != consensus:',
+    '            if tuple(map(int,candidate.split("-",1))) != tuple(map(int,consensus.split("-",1))):',1)
 old='f"Sequence-confirmed {consensus} in 3x3 from consecutive originals "'
 assert app.count(old)==1
 app=app.replace(old,'f"Sequence-confirmed {consensus} from three consecutive scan reads "',1)
