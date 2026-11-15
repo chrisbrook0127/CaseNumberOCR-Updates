@@ -47,9 +47,9 @@ diagnostics='''
                 payload["file"]=self._diag_current_file
             payload.update(details)
             with self._diag_lock:
-                with open(filepath,"a",encoding="utf-8",newline="\\\\n") as handle:
+                with open(filepath,"a",encoding="utf-8",newline="\\n") as handle:
                     handle.write(_json.dumps(payload,ensure_ascii=False,default=str,
-                                             separators=(",",":"))+"\\\\n")
+                                             separators=(",",":"))+"\\n")
         except Exception as exc:
             # Diagnostics must never block evidence processing.
             try: logging.warning("Diagnostic logging failed: %s",exc)
@@ -114,17 +114,17 @@ diagnostics='''
         if not target:
             return
         notes=(
-            "MFCase OCR diagnostic work log, schema mfcase.diagnostic.v1\\\\n"
-            "Each JSONL line is a standalone JSON event. Filter on event/file/run_id.\\\\n"
+            "MFCase OCR diagnostic work log, schema mfcase.diagnostic.v1\\n"
+            "Each JSONL line is a standalone JSON event. Filter on event/file/run_id.\\n"
             "Events: run_start, ocr_label_pass, field_ocr_pass, candidate_pass, "
             "ocr_candidates, candidate_filter, ocr_decision, row_decision, "
-            "sequence_decision, transfer_result, run_end.\\\\n"
-            "bbox is [left,top,right,bottom] in rendered page pixels.\\\\n"
-            "score is the raw OCR engine score, not a statistical guarantee.\\\\n"
-            "ignored contains candidate reads excluded and an explicit reason.\\\\n"
-            "Do not share externally without checking department data policies.\\\\n"
-            "Contains filenames, possible identifiers and OCR text in the 3-inch zone.\\\\n"
-            "No original PDFs or images are included.\\\\n")
+            "sequence_decision, transfer_result, run_end.\\n"
+            "bbox is [left,top,right,bottom] in rendered page pixels.\\n"
+            "score is the raw OCR engine score, not a statistical guarantee.\\n"
+            "ignored contains candidate reads excluded and an explicit reason.\\n"
+            "Do not share externally without checking department data policies.\\n"
+            "Contains filenames, possible identifiers and OCR text in the 3-inch zone.\\n"
+            "No original PDFs or images are included.\\n")
         try:
             with _zipfile.ZipFile(target,"w",compression=_zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("HOW_TO_READ.txt",notes)
@@ -134,7 +134,7 @@ diagnostics='''
                     archive.write(self.log_path,arcname="existing_ocr_log.txt")
             _messagebox.showinfo("Work log saved",
                  "Diagnostic ZIP saved. You can upload it here for a complete "
-                 "file-by-file OCR decision review.\\\\n\\\\n"+str(target))
+                 "file-by-file OCR decision review.\\n\\n"+str(target))
         except Exception as exc:
             _messagebox.showerror("Work log export failed",str(exc))
 
