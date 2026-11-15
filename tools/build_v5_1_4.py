@@ -150,7 +150,7 @@ diagnostics='''
         expected=str(getattr(self,"scan_year_prefix","") or self._year_prefix() or "")
         for h in hits:
             number=str(h.get("number") or "").strip()
-            match=re.fullmatch(r"(\\\\d{1,2})\\\\s*-\\\\s*(\\\\d{1,7})",number)
+            match=re.fullmatch(r"(\\d{1,2})\\s*-\\s*(\\d{1,7})",number)
             if not match:
                 ignored.append({"candidate":self._diag_hits([h])[0],"reason":"not_a_complete_case_number"})
                 continue
