@@ -31,7 +31,7 @@ source=source.replace('self.app_version = "5.1.2"','self.app_version = "5.1.3"',
 old_app='if len(path.parts) != 1 or path.name not in allowed:'
 new_app='''if (len(path.parts) != 1 or path.name != name or
                             (path.name not in allowed and not re.fullmatch(
-                                r"CHANGELOG_V[0-9]+(?:_[0-9]+){1,3}\\\\.txt",path.name))):'''
+                                r"CHANGELOG_V[0-9]+(?:_[0-9]+){1,3}\\.txt",path.name))):'''
 # We intentionally ship NO changelog ZIP entry; this change only prevents
 # future versions falling foul of the new app's validation.
 assert source.count(old_app)==1, "Unexpected primary updater validator"
@@ -46,13 +46,24 @@ apply=apply.replace(
 old_apply='if len(name.parts) != 1 or name.name not in ALLOWED:'
 new_apply='''if (len(name.parts) != 1 or name.name != info.filename or
                     (name.name not in ALLOWED and not re.fullmatch(
-                        r"CHANGELOG_V[0-9]+(?:_[0-9]+){1,3}\\\\.txt",name.name))):'''
+                        r"CHANGELOG_V[0-9]+(?:_[0-9]+){1,3}\\.txt",name.name))):'''
 assert apply.count(old_apply)==1,"Unexpected external updater validator"
 apply=apply.replace(old_apply,new_apply,1)
 
 # Catch syntax regressions and validate that the upstream OCR is preserved.
 compile(source,"case_number_ocr.py","exec")
 compile(apply,"updater_apply.py","exec")
+
+# Run both new updaters' actual ZIP-entry regexes, not just a copied test pattern.
+for update_source in (source, apply):
+    regexes=[n.value for n in ast.walk(ast.parse(update_source))
+             if isinstance(n,ast.Constant) and isinstance(n.value,str)
+             and n.value.startswith("CHANGELOG_V[0-9]+")]
+    assert len(regexes)==1, ("Bad update allowlist regex",regexes)
+    regex=re.compile(regexes[0])
+    assert regex.fullmatch("CHANGELOG_V5_1_3.txt"), regexes[0]
+    assert not regex.fullmatch("bad.py") and not regex.fullmatch("folder/file.txt")
+
 assert source.count("def _ocr_pdf(")==1
 assert 'dimension_px=int(round(3*72*2.2))' in source
 assert 'observed_score < 95.0' in source
