@@ -286,6 +286,27 @@ swap('                    self.queue.put(("export_result", iid, source.name, "",
      '                         outcome="failed",error=repr(exc))\n'
      '                    self.queue.put(("export_result", iid, source.name, "", str(exc)))')
 
+# Cross-page ambiguity must use the SAME filtered numbers as the selected
+# incident field. Otherwise a discarded "29-29" still blocks "08-29".
+swap('            across={h["number"] for r in results if r[3]==kind for h in r[2]}',
+     '            across={h["number"] for r in results if r[3]==kind\n'
+     '                    for h in self._diag_field_filter(r[2],kind)}')
+# Normalize leading zeros ONLY for comparing cases. Show original strings
+# in the detailed log; different exact read strings may represent one case.
+swap('            ambiguous=len(distinct)>1 or len(across)>1',
+     '            numeric_keys=lambda values:{tuple(map(int, v.split("-",1))) for v in values}\n'
+     '            ambiguous=(len(numeric_keys(distinct))>1 or len(numeric_keys(across))>1)')
+# Record the final post-gate status, not only the preliminary OCR reading.
+swap('                    if not auto_done and self.tree.exists(iid):',
+     '                    self._diag_event("row_final",file=Path(r["path"]).name,\n'
+     '                         status=r.get("status"),candidate=normalized_candidate,\n'
+     '                         score=float(score or 0),auto_approved=auto_done,\n'
+     '                         source=r.get("scan_source"),ambiguous=r.get("scan_ambiguous"))\n'
+     '                    if not auto_done and self.tree.exists(iid):')
+swap('                    self._log("Scan-run summary: %s", json.dumps(self._run_outcomes, sort_keys=True))',
+     '                    self._diag_event("run_end",summary=dict(self._run_outcomes))\n'
+     '                    self._log("Scan-run summary: %s", json.dumps(self._run_outcomes, sort_keys=True))')
+
 # The exact raw OCR strings (including unexpected case-like prefixes) explain
 # otherwise opaque conflicts. Limit to the scanned crop, not whole PDF body.
 tree=ast.parse(app)
