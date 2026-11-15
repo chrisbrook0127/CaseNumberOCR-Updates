@@ -1,0 +1,44 @@
+name: Build verified MFCase V5.1.5 read-order update
+on:
+  push:
+    branches: [publish/v5.1.5-scan-order-updater]
+    paths: [.github/workflows/build-v5.1.5.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch immutable production baseline
+        run: git fetch --no-tags --depth=1 origin be0d9f955ce3728f379b9a2253ea2f2fc1663a66
+      - name: Build safe legacy-compatible ZIP from verified source
+        run: python3 tools/build_v5_1_5.py
+      - name: Verify correct app version, syntax, release SHA and ZIP contents
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64,hashlib,io,ast,zipfile
+          p=Path("release-assets")
+          b=base64.b64decode(p.joinpath("update.base64").read_text(),validate=True)
+          assert b==p.joinpath("CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(b).hexdigest()==p.joinpath("SHA256.txt").read_text().strip()
+          assert p.joinpath("RELEASE_TAG.txt").read_text().strip()=="v5.1.5"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for n in z.namelist(): compile(z.read(n),n,"exec")
+              app=z.read("case_number_ocr.py").decode()
+              assert 'self.app_version = "5.1.5"' in app
+              assert 'root.title("M.F. Case Number OCR — V5.1.5")' in app
+              assert "def _diag_export" in app
+              assert "dimension_px=int(round(3*72*2.2))" in app
+          print("PASS package source, version, updater-compatible contents and SHA256")
+          PY
+      - name: Commit verified payload to GitHub branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage verified MFCase V5.1.5 read-order release"
+          git push origin HEAD:publish/v5.1.5-scan-order-updater
