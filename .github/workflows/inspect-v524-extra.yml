@@ -1,0 +1,28 @@
+name: Inspect UI progress location and OCR hit geometry
+on:
+  push:
+    branches: [publish/v5.2.4-progress-case-priority]
+    paths: [.github/workflows/inspect-v524-extra.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Print progress layout, full completion gates, and OCR confidence methods
+        run: |
+          python - <<'PY'
+          import ast,base64,hashlib,io,zipfile,re
+          from pathlib import Path
+          b=base64.b64decode(Path('release-assets/update.base64').read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="33d4a12efa80ccaeaf3e220c99640ee8b710822664e07adc1240362a0c7dedb2"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines()
+          for lo,hi in [(450,550),(4285,4385),(4548,4575),(1700,1755),(3650,3699)]:
+              print("===== RANGE",lo,hi)
+              for i in range(lo,hi+1):print(f"{i}: {lines[i-1]}")
+          for n in ast.walk(ast.parse(s)):
+              if isinstance(n,ast.FunctionDef) and ("find_case" in n.name or "header_field" in n.name or "_worker"==n.name):
+                  print("====== METHOD",n.name,n.lineno,n.end_lineno)
+                  for i in range(n.lineno,min(n.end_lineno,n.lineno+185)+1):print(f"{i}: {lines[i-1]}")
+          PY
