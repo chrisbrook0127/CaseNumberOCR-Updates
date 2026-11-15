@@ -118,8 +118,17 @@ src=src[:a]+new_block+src[b:]
 # Snapshots from the scan queue include already-transferred ANCHORS.
 # Previously, as soon as high-confidence neighbors auto-sent, they vanished
 # from sequence lookup and could not rescue an unreadable middle file.
-repl('''        if (record.get("exported") or record.get("sequence_excluded")''',
-     '''        if (record.get("sequence_excluded")''')
+# Keep strong OCR anchors even after their PDFs have been moved to COMPLETED.
+# Other eligibility protections remain unchanged.
+t=ast.parse(src)
+m=next(n for n in ast.walk(t) if isinstance(n,ast.FunctionDef)
+       and n.name=="_sequence_case_number")
+segment=ast.get_source_segment(src,m)
+cleaned=re.sub(r'record\.get\("exported"\)\s+or\s+',"",segment)
+cleaned=re.sub(r'\s+or\s+record\.get\("exported"\)',"",cleaned)
+if cleaned!=segment:
+    src=src.replace(segment,cleaned,1)
+
 repl('''            if not path or rec.get("exported") or not path.is_file():
                 continue
             case=self._sequence_case_number(rec)''',
