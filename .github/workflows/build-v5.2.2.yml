@@ -1,4 +1,5 @@
 name: Build MFCase V5.2.2 field-first scan thumbnails
+# Correct case field regex patch escaping
 on:
   push:
     branches: [publish/v5.2.2-field-thumbnails]
