@@ -19,7 +19,7 @@ with zipfile.ZipFile(io.BytesIO(old)) as inp:
     assert len(names)==len(set(names))
     assert all(n and "/" not in n and "\\" not in n for n in names)
     extra=[n for n in names if n not in {"case_number_ocr.py","updater_apply.py"}]
-    assert all(n.startswith("CHANGELOG_") and n.endswith(".txt") for n in extra),extra
+    assert all(n in {"RUN_CASE_OCR.bat","README.txt"} or (n.startswith("CHANGELOG_") and n.endswith(".txt")) for n in extra),extra
     source=inp.read("case_number_ocr.py").decode("utf-8")
     apply=inp.read("updater_apply.py").decode("utf-8")
 assert source.count('self.app_version = "5.1.2"')==1
