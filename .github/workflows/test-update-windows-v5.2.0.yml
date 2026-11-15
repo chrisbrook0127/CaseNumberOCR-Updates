@@ -1,0 +1,17 @@
+name: Verify V5.2.0 in-place updater on Windows
+on:
+  push:
+    branches: [publish/v5.2.0-single-screen]
+    paths: [.github/workflows/test-update-windows-v5.2.0.yml]
+permissions: {contents: read}
+jobs:
+  windows-updater:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply real release with updater and check rollback safety
+        shell: pwsh
+        run: python tools/test_update_windows_v520.py
