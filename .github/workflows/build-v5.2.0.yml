@@ -1,5 +1,5 @@
 name: Build and gate MFCase V5.2.0
-# Apply crop patch after base UI patch
+# Live connectivity and neutral destination terminology
 on:
   push:
     branches: [publish/v5.2.0-single-screen]
