@@ -198,9 +198,11 @@ with tempfile.TemporaryDirectory() as d:
     tested.root=SimpleNamespace(after=lambda delay,fn:invoked.append((delay,fn)) or "scheduled")
     sent=[]
     tested.export=lambda **kwargs:sent.append(kwargs)
+    tested.busy=False
     assert tested._eligible_for_kurt("manual",tested.records["manual"],automatic=True)
     assert tested._eligible_for_kurt("machine",tested.records["machine"],automatic=True)
     assert not tested._eligible_for_kurt("unverified",tested.records["unverified"],automatic=True)
+    tested.busy=True
     tested._schedule_auto_export()
     assert not invoked,"Nothing should transfer during an active scan"
     tested.busy=False
