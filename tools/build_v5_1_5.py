@@ -74,7 +74,7 @@ neighbors=r'''
             return None
         candidate=str(self.records[iid].get("candidate") or "").strip()
         match_key=lambda s: tuple(int(x) for x in str(s).split("-",1)) if (
-            s and re.fullmatch(r"\\d{1,2}-\\d{1,7}",str(s))) else None
+            s and re.fullmatch(r"\d{1,2}-\d{1,7}",str(s))) else None
         key=match_key(candidate)
         windows=[]
         if index>0 and index+1<length:
