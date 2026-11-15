@@ -1,0 +1,45 @@
+name: Build and gate MFCase V5.2.0
+on:
+  push:
+    branches: [publish/v5.2.0-single-screen]
+    paths: [.github/workflows/build-v5.2.0.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch immutable V5.1.5 source release
+        run: git fetch --no-tags --depth=1 origin a8a1f94352c22ad9ae09c67a132865974db25d07
+      - name: Patch and validate application
+        run: python3 tools/build_v5_2_0.py
+      - name: Test update ZIP layout and published application version
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast,hashlib,base64,io,zipfile
+          p=Path('release-assets')
+          data=base64.b64decode(p.joinpath('update.base64').read_text(),validate=True)
+          assert hashlib.sha256(data).hexdigest()==p.joinpath('SHA256.txt').read_text().strip()
+          assert data==p.joinpath('CaseNumberOCR_Update.zip').read_bytes()
+          with zipfile.ZipFile(io.BytesIO(data)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={'case_number_ocr.py','updater_apply.py'}
+              code=z.read('case_number_ocr.py').decode()
+              compile(code,'case_number_ocr.py','exec')
+              compile(z.read('updater_apply.py'),'updater_apply.py','exec')
+              assert 'self.app_version = "5.2.0"' in code
+              assert 'SEND ALL SELECTED' in code
+              assert 'manual_crop_rect' in code
+              assert 'def _diag_sync_shared' in code
+              assert 'SETTINGS' in code
+          print('PASS V5.2.0 release source, syntax, layout, signature checks')
+          PY
+      - name: Commit build output to release branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage tested MFCase V5.2.0 single-screen application"
+          git push origin HEAD:publish/v5.2.0-single-screen
