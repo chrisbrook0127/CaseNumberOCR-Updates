@@ -1,0 +1,17 @@
+name: Test MFCase V5.2.4 updater on Windows
+on:
+  push:
+    branches: [publish/v5.2.4-progress-case-priority]
+    paths: [.github/workflows/test-windows-v5.2.4.yml]
+permissions: {contents: read}
+jobs:
+  updater:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply real two-file release and verify private data preservation
+        shell: pwsh
+        run: python tools/test_update_windows_v524.py
