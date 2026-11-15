@@ -1,1 +1,3 @@
-V5.2.1: root-only SCAN and restored REVIEW SELECTED
+Publish verified MFCase V5.2.1 release with root-only SCAN listing and restored REVIEW SELECTED button.
+QA: real Tk GUI tested (root-only enumeration, completed-but-unsent visible, review window invocation, failed move retention, successful move removal, reload filtering, restored-file safety).
+SHA256: 138a2382736c0c71d0f12ddd3d7247334ac1bdcef6b8558131f5aa45b9a002ed
