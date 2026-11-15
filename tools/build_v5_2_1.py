@@ -144,6 +144,17 @@ replace_once('''        selected = [
             if iid in ready and not self.records[iid].get("exported")
             and (not self.folder or Path(self.records[iid]["path"]).parent==Path(self.folder))]''')
 
+# Failed transfers have not left root; update the visible status.
+replace_once('''            if self.completed_tree.exists(iid):
+                self.completed_tree.item(iid, values=self._completed_row_values(iid, rec))
+        else:
+            target = Path(destination)''',
+'''            if self.completed_tree.exists(iid):
+                self.completed_tree.item(iid, values=self._completed_row_values(iid, rec))
+            self._insert_scan_row(iid,rec)
+        else:
+            target = Path(destination)''')
+
 # Update instructions to describe actual single-screen behavior.
 src=src.replace(
     'The root PDFs and the root/COMPLETED subfolder are displayed together; no other subfolders are scanned.',
