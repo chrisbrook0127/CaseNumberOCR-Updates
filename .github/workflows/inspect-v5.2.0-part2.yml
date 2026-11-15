@@ -1,0 +1,24 @@
+name: Inspect current folder, review and sent decisions
+on:
+  push:
+    branches: [publish/v5.2.0-single-screen]
+    paths: [.github/workflows/inspect-v5.2.0-part2.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect V5.1.5 case and review paths
+        run: |
+          python3 - <<'PY'
+          import io,zipfile,base64,hashlib,ast
+          from pathlib import Path
+          b=base64.b64decode(Path("release-assets/update.base64").read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="9e687759ebc8d12ce529737102078c9b6f580e575e99e55a96c5a73fbca60ab2"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines()
+          for lo,hi in [(298,398),(912,975),(1000,1198),(4296,4310),(4991,5063),(5121,5280),(5280,5400),(5480,5685),(5720,5848)]:
+              print("======= RANGE",lo,hi,"=======")
+              for j in range(lo,hi+1):print(f"{j}: {lines[j-1]}")
+          PY
