@@ -1,0 +1,47 @@
+name: Verify and stage MFCase V5.1.3 backward-compatible update
+on:
+  push:
+    branches:
+      - publish/v5.1.3-updater-fix
+    paths:
+      - .github/workflows/build-v5.1.3.yml
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build from pinned published v5.1.2 and check old updater compatibility
+        run: python3 tools/build_v5_1_3.py
+      - name: Validate archive safety, Python syntax, and old exact allowlist
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, io, zipfile, hashlib, ast
+          p=Path("release-assets")
+          b=base64.b64decode(p.joinpath("update.base64").read_text(), validate=True)
+          assert hashlib.sha256(b).hexdigest() == p.joinpath("SHA256.txt").read_text().strip()
+          assert b == p.joinpath("CaseNumberOCR_Update.zip").read_bytes()
+          with zipfile.ZipFile(io.BytesIO(b)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist()) == {"case_number_ocr.py","updater_apply.py"}
+              assert all("/" not in n and "\\" not in n for n in z.namelist())
+              app=z.read("case_number_ocr.py").decode()
+              helper=z.read("updater_apply.py").decode()
+              assert 'self.app_version = "5.1.3"' in app
+              assert 'dimension_px=int(round(3*72*2.2))' in app
+              assert "os.utime(destination, None)" in app
+              assert len([n for n in ast.walk(ast.parse(app)) if isinstance(n,ast.FunctionDef) and n.name=="_ocr_pdf"]) == 1
+              compile(app,"case_number_ocr.py","exec")
+              compile(helper,"updater_apply.py","exec")
+          print("PASS: old 5.1.2 preflight accepts every V5.1.3 member; no changelog files")
+          PY
+      - name: Commit tested payload to release branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage MFCase v5.1.3 compatible update payload"
+          git push origin HEAD:publish/v5.1.3-updater-fix
