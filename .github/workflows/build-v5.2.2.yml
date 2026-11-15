@@ -1,0 +1,42 @@
+name: Build MFCase V5.2.2 field-first scan thumbnails
+on:
+  push:
+    branches: [publish/v5.2.2-field-thumbnails]
+    paths: [.github/workflows/build-v5.2.2.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned published 5.2.1
+        run: git fetch --no-tags --depth=1 origin fd8b175469f0fa28f7d6388b9aab663c8535651c
+      - name: Build and check syntax, OCR priorities and updater compatibility
+        run: python3 tools/build_v5_2_2.py
+      - name: Inspect ZIP and SHA-256
+        run: |
+          python3 - <<'PY'
+          import zipfile,io,base64,hashlib
+          from pathlib import Path
+          p=Path("release-assets")
+          data=base64.b64decode(p.joinpath("update.base64").read_text(),validate=True)
+          assert data==p.joinpath("CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(data).hexdigest()==p.joinpath("SHA256.txt").read_text().strip()
+          with zipfile.ZipFile(io.BytesIO(data)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for n in z.namelist(): compile(z.read(n),n,"exec")
+              app=z.read("case_number_ocr.py").decode()
+              assert 'self.app_version = "5.2.2"' in app
+              assert 'dimension_px=int(round(3*72*2.2))' in app
+              assert 'self._make_scan_preview(' in app
+          print("PASS V5.2.2 zip integrity and source QA")
+          PY
+      - name: Commit verified update bundle
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage verified MFCase V5.2.2 update"
+          git push origin HEAD:publish/v5.2.2-field-thumbnails
