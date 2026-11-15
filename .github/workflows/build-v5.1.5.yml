@@ -1,4 +1,5 @@
 name: Build verified MFCase V5.1.5 read-order update
+# Re-run after case-equivalence assertion correction
 on:
   push:
     branches: [publish/v5.1.5-scan-order-updater]
