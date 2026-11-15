@@ -51,6 +51,10 @@ class OCR(Base):
         self._move_to_completed=lambda iid,*a,**k:self.scanned.append(iid)
         self._refresh_review_controls=lambda:None
         self._update_completed_count=lambda:None
+        self._update_scan_file_count=lambda:None
+        self._refresh_scan_button=lambda:None
+        self._refresh_rescan_button=lambda:None
+        self._refresh_scan_checkbox_heading=lambda:None
         self._save_state=lambda:None
         self._insert_scan_row=lambda *a,**k:None
         self._diag_event=lambda *args,**kw:self.diags.append((args,kw))
