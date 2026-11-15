@@ -1,2 +1,1 @@
-Release MFCase v5.1.2 after complete synthetic OCR and file metadata regression pass.
-SHA256: f5aa1ee267a47cb47f45e08fb873fc407dc23d98802d635b0c9736acd473d30a
+Tested backward-compatible V5.1.3 updater package
