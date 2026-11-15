@@ -1,2 +1,1 @@
-Release tested MFCase V5.2.2. Primary unique case number beside INCIDENT NO or CASE NUMBER at 95% or higher automatically sends. Unlabeled unique top-right case at 95% or higher also sends. Secondary before/after applies ONLY when middle scan has no readable case number; two independent adjacent matching scans required. Thumbnail beside PDF name in SCAN. Root-only files and REVIEW SELECTED preserved. QA passed OCR decision harness and real Tk thumbnail/regression suite.
-SHA256 97c8f05fd9ffbe1b806967a0974682b50717651f106945330d04a222e589d196
+V5.2.3: auto-export all COMPLETED after scan and unique 100pct localized fallback
