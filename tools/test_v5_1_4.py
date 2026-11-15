@@ -224,3 +224,43 @@ with tempfile.TemporaryDirectory() as tmp:
     assert (p/"COMPLETED"/"08-19 (1).pdf").is_file()
 print("PASS transfer: original bytes preserved, Date modified refreshed, copy suffix retained")
 print("TOTAL REGRESSION SCENARIOS: 26")
+
+
+# Validate that the real EXPORT WORK LOG method produces a usable ZIP with
+# raw JSONL, the old human-readable log and an explanatory data dictionary.
+import sys
+tk=types.ModuleType("tkinter")
+fd=types.ModuleType("tkinter.filedialog")
+mb=types.ModuleType("tkinter.messagebox")
+sys.modules["tkinter"]=tk
+sys.modules["tkinter.filedialog"]=fd
+sys.modules["tkinter.messagebox"]=mb
+tk.filedialog=fd
+tk.messagebox=mb
+LogClass=method_class("_diag_export",{"Path":Path,"os":os})
+with tempfile.TemporaryDirectory() as d:
+    os.environ["LOCALAPPDATA"]=d
+    directory=Path(d)/"MFCase"/"diagnostics"
+    directory.mkdir(parents=True)
+    diag=directory/"mfcase-20261115T151000-deadbeef.jsonl"
+    diag.write_text('{"schema":"mfcase.diagnostic.v1","event":"candidate_filter","file":"Image4845.pdf","kept":[{"number":"08-29"}]}\n')
+    oldlog=Path(d)/".case_ocr_log.txt"
+    oldlog.write_text("Earlier scanner diagnostic")
+    target=Path(d)/"MFCase_Work_Log_TEST.zip"
+    messages=[]
+    fd.asksaveasfilename=lambda **kw:str(target)
+    mb.showinfo=lambda *args:messages.append(args)
+    mb.showerror=lambda *args:messages.append(("ERROR",args))
+    app=LogClass()
+    app.app_dir=Path(d)
+    app._diag_file=diag
+    app.log_path=oldlog
+    app._diag_export()
+    assert target.is_file() and messages and not any(x[0]=="ERROR" for x in messages)
+    with zipfile.ZipFile(target) as archive:
+        assert archive.testzip() is None
+        assert set(archive.namelist())=={"HOW_TO_READ.txt",diag.name,"existing_ocr_log.txt"}
+        assert b'"08-29"' in archive.read(diag.name)
+        assert b"Earlier scanner diagnostic"==archive.read("existing_ocr_log.txt")
+        assert b"No original PDFs or images" in archive.read("HOW_TO_READ.txt")
+    print("PASS actual EXPORT WORK LOG: ZIP includes raw JSONL, earlier log, readable glossary")
