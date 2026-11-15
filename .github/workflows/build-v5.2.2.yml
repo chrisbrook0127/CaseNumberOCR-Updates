@@ -1,5 +1,5 @@
 name: Build MFCase V5.2.2 field-first scan thumbnails
-# Field priority and true blank-middle sequence fallback
+# Retest extracted sequence-anchor guard
 on:
   push:
     branches: [publish/v5.2.2-field-thumbnails]
