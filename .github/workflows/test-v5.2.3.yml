@@ -1,4 +1,5 @@
 name: Validate MFCase V5.2.3 OCR and post-scan sending
+# Test rebuilt multi-file range inference against V5.2.3 exact package
 on:
   push:
     branches: [publish/v5.2.3-fallback-autoexport]
