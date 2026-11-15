@@ -1,4 +1,5 @@
 name: Regression-test MFCase v5.1.2 before publication
+# Test harness indentation fix
 on:
   push:
     branches: [publish/v5.1.2-region3]
