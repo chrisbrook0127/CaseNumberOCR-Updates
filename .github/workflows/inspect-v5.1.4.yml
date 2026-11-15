@@ -1,0 +1,47 @@
+name: Inspect MFCase current OCR and diagnostic integration points
+on:
+  push:
+    branches: [publish/v5.1.4-diagnostic-log]
+    paths: [.github/workflows/inspect-v5.1.4.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast,base64,hashlib,io,zipfile,re
+          root=Path("release-assets")
+          data=base64.b64decode(root.joinpath("update.base64").read_text(),validate=True)
+          assert hashlib.sha256(data).hexdigest()=="2988f8bc504f225bf13d009555ca5e6286855888a69a98cab2aefbc450dd4ee0"
+          with zipfile.ZipFile(io.BytesIO(data)) as z:
+              s=z.read("case_number_ocr.py").decode()
+          t=ast.parse(s);lines=s.splitlines()
+          print("TOP IMPORTS",*lines[:88],sep="\n")
+          print("METHOD NAMES")
+          print([(n.name,n.lineno,n.end_lineno) for n in ast.walk(t) if isinstance(n,ast.FunctionDef)
+                  and any(k in n.name for k in ["log","scan","ocr","candidate","sequence","export","review","ui","button","row","folder","complete","poll"])])
+          names={"__init__","_ocr_pdf","_find_case_candidates","_incident_hits_from_detections",
+                 "_apply_sequence_consensus","_sequence_neighbors","_sequence_case_number","_merge_case_hits",
+                 "_select_primary_case_hit","_poll","_scan_worker","_worker","_export_worker",
+                 "_auto_label_block_reason","_log","_save_state","_start_scan"}
+          for n in ast.walk(t):
+              if isinstance(n,ast.FunctionDef) and n.name in names:
+                  print("======",n.name,n.lineno,n.end_lineno)
+                  beg=n.lineno;end=n.end_lineno
+                  if n.name=="__init__":end=min(end,beg+215)
+                  if n.name=="_poll":
+                      starts=[i for i in range(beg,end) if 'elif kind == "row"' in lines[i-1]]
+                      if starts:beg=starts[0];end=min(end,beg+76)
+                  if n.name=="_find_case_candidates":end=min(end,beg+40)
+                  for i in range(beg,end+1):
+                      print(f"{i}: {lines[i-1]}")
+          print("===== LOG / UI / PROCESS REFERENCES =====")
+          for i,line in enumerate(lines,1):
+              if any(k in line for k in ('_log(','.case_ocr_log','_start_scan','Review Files','REVIEW FILES','SCAN','self.scan_items','self.queue.put(("row"', '_apply_sequence_consensus','_move_to_completed','ttk.Button(','tk.Button(')):
+                  if len(line)<400: print(f"{i}: {line}")
+          PY
