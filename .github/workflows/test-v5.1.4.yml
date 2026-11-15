@@ -1,4 +1,5 @@
 name: Regression test exact MFCase V5.1.4 application methods
+# Retest staticmethod harness
 on:
   push:
     branches: [publish/v5.1.4-diagnostic-log]
