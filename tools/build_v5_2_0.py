@@ -138,6 +138,13 @@ listing=r'''
         if iid in self.scan_checked_iids and iid not in self.tree.selection():
             self.tree.selection_add(iid)
 
+        btn=getattr(self,"send_selected_btn",None)
+        if btn is not None:
+            allowed=(not self.busy and not self.export_busy and not self.trocr_training
+                     and any(self._eligible_for_kurt(x,self.records[x])
+                             for x in self.tree.selection() if x in self.records))
+            btn.config(state="normal" if allowed else "disabled")
+
     def _send_all_selected(self):
         """Send only selected, approved, unsent PDFs; no misleading send-all."""
         if self.busy or self.trocr_training or self.export_busy:
@@ -489,22 +496,6 @@ replace_one('''        self._refresh_rescan_button()
             '''        self._refresh_rescan_button()
  
     def clear_scan_screen''') if False else None
-# Add safe call at end of UI-row insertion which is invoked on approval/export.
-replace_one('''        if iid in self.scan_checked_iids and iid not in self.tree.selection():
-            self.tree.selection_add(iid)
-
-    def _obsolete_insert_scan_row''',
-            '''        if iid in self.scan_checked_iids and iid not in self.tree.selection():
-            self.tree.selection_add(iid)
-        btn=getattr(self,"send_selected_btn",None)
-        if btn is not None:
-            allowed=(not self.busy and not self.export_busy and not self.trocr_training
-                     and any(self._eligible_for_kurt(x,self.records[x])
-                             for x in self.tree.selection() if x in self.records))
-            btn.config(state="normal" if allowed else "disabled")
-
-    def _obsolete_insert_scan_row''')
-
 compile(source,"case_number_ocr.py","exec")
 assert 'self.app_version = "5.2.0"' in source
 assert 'root.title("M.F. Case Number OCR — V5.2.0")' in source
