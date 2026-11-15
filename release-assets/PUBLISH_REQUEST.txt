@@ -1,1 +1,3 @@
-V5.2.0 unified scan, review, learning crop, sent persistence and secure diagnostics
+Publish tested MFCase V5.2.0 unified Scan / Settings workflow, learning crop precedence, sent PDF persistence and secure network diagnostics.
+GitHub update SHA256: b481635a729fa080e26aa357aa3ef9bec1ca8d8b8295b2e1a3bd04d00eeb0342
+CI passed: full source build and Tk UI, sent restore, OCR crop and secure log sharing smoke tests.
