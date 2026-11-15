@@ -53,7 +53,7 @@ repl('''"reason":"lower_score_than_unique_100pct_label_read"''',
 
 # Capture CASE NO., CASE NUMBER, INCIDENT NO., INCIDENT NUMBER, even when the
 # printed label and number are returned as one combined OCR text box.
-repl('''            match = INCIDENT_LABEL_RE.search(text)
+repl(r'''            match = INCIDENT_LABEL_RE.search(text)
             if match:
                 # The label and the case digits can be in ONE OCR detection.
                 end = x0 + (x1 - x0) * (match.end() / max(1, len(text)))
@@ -62,7 +62,7 @@ repl('''            match = INCIDENT_LABEL_RE.search(text)
                 match = re.search(r"case\s+number", text, re.I)
                 end = x0 + (x1 - x0) * match.end() / max(1, len(text))
                 found.append((x0, y0, min(x1, end), y1, "case", score))''',
-     '''            match = CASE_FIELD_LABEL_RE.search(text)
+     r'''            match = CASE_FIELD_LABEL_RE.search(text)
             if match:
                 end = x0 + (x1-x0)*(match.end()/max(1,len(text)))
                 label_kind = "incident" if "incident" in match.group(0).lower() else "case"
