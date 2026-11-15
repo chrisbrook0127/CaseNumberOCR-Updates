@@ -14,6 +14,15 @@ jobs:
           python-version: "3.11"
       - name: Run exact shipped 100 percent fallback, manual and automatic export rules
         run: python tools/test_v5_2_3_rules.py
+  range-consensus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test multi-file before/after scan ranges and OCR anchor safeguards
+        run: python tools/test_v5_2_3_range.py
   ui:
     runs-on: ubuntu-latest
     steps:
