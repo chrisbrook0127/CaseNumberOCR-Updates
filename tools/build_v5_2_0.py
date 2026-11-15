@@ -616,6 +616,23 @@ connection=r'''
 '''
 replace_method("_check_connection_status",connection)
 
+# Completing UPDATE LEARNING also synchronizes the current diagnostic record
+# to the restricted shared folder. Never auto-upload logs to public GitHub.
+tree=ast.parse(source)
+method=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)
+            and n.name=="_update_training_progress")
+seg=ast.get_source_segment(source,method)
+assert seg.startswith('def _update_training_progress(self, percent, stage, finished=False):')
+lines=source.splitlines(keepends=True)
+insertion='''        if finished:
+            self._diag_event("learning_update_finished",
+                             percent=percent,stage=stage)
+            threading.Thread(target=self._diag_sync_shared,
+                             daemon=True).start()
+'''
+line=method.lineno
+source="".join(lines[:line])+insertion+"".join(lines[line:])
+
 compile(source,"case_number_ocr.py","exec")
 assert 'self.app_version = "5.2.0"' in source
 assert 'root.title("M.F. Case Number OCR — V5.2.0")' in source
