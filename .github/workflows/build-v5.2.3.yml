@@ -1,4 +1,5 @@
 name: Build verified MFCase V5.2.3 update
+# Include matching bounding anchors and multi-file range inference
 on:
   push:
     branches: [publish/v5.2.3-fallback-autoexport]
