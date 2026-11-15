@@ -1,0 +1,19 @@
+name: Regression test exact MFCase V5.1.4 application methods
+on:
+  push:
+    branches: [publish/v5.1.4-diagnostic-log]
+    paths: [.github/workflows/test-v5.1.4.yml]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test-only synthetic raster dependencies
+        run: python -m pip install --quiet numpy pillow
+      - name: Test OCR conflict, field location, neighbor and transfer using shipped methods
+        run: python tools/test_v5_1_4.py
