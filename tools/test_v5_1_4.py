@@ -71,6 +71,7 @@ helper_env.update(helper)
 OCRClass=method_class("_ocr_pdf",helper_env)
 FilterClass=method_class("_diag_field_filter",{"re":re})
 HitsClass=method_class("_diag_hits",{})
+HitsClass._diag_hits=staticmethod(HitsClass._diag_hits)
 
 class OCRHarness(OCRClass,FilterClass,HitsClass):
     def __init__(self,kind,score=100.0):
