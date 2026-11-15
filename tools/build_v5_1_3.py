@@ -48,17 +48,13 @@ if not re.search(r"(?m)^import [^\n]*\bre\b",apply):
 # Adapt the released helper's existing allowlist while preserving all of its
 # path-safety checks. The installed helper (pre-update) is unchanged, so this
 # only affects later releases after V5.1.3 has been installed.
-anchor="name = Path(info.filename)"
-if anchor not in apply:
-    print("HELPER ENTRY HANDLING:",
-          [line for line in apply.splitlines()
-           if "ALLOWED" in line or "filename" in line or "Unexpected" in line])
-assert apply.count(anchor)==1, "Updater helper filename extraction changed"
-apply=apply.replace(anchor,anchor+'''
-            if re.fullmatch(
-                r"CHANGELOG_V[0-9]+(?:_[0-9]+){1,3}\\.txt", name.name
-            ):
-                ALLOWED.add(name.name)''',1)
+old_apply='if len(path.parts) != 1 or path.name not in ALLOWED or info.file_size > 20_000_000:'
+new_apply='''if (len(path.parts) != 1 or path.name != info.filename or
+                    (path.name not in ALLOWED and not re.fullmatch(
+                        r"CHANGELOG_V[0-9]+(?:_[0-9]+){1,3}\\.txt",path.name))
+                    or info.file_size > 20_000_000):'''
+assert apply.count(old_apply)==1,"Unexpected production helper path/size guard"
+apply=apply.replace(old_apply,new_apply,1)
 
 # Catch syntax regressions and validate that the upstream OCR is preserved.
 compile(source,"case_number_ocr.py","exec")
