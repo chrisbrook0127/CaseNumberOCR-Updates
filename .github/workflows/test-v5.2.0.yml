@@ -1,4 +1,5 @@
 name: Smoke-test MFCase V5.2.0 UI and learning
+# Final test against live connection-status revision
 on:
   push:
     branches: [publish/v5.2.0-single-screen]
