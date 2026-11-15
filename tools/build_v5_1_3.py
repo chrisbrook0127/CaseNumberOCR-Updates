@@ -39,10 +39,12 @@ source=source.replace(old_app,new_app,1)
 
 # The helper was originally hard-coded to allow only a small number of
 # historical changelogs; mirror the same constrained future rule.
-assert apply.count("import argparse, ctypes, os, subprocess, sys, tempfile, time, zipfile")==1
-apply=apply.replace(
-    "import argparse, ctypes, os, subprocess, sys, tempfile, time, zipfile",
-    "import argparse, ctypes, os, re, subprocess, sys, tempfile, time, zipfile",1)
+# The packaged helper can differ from the full install bootstrap copy.
+# Import re only if the production helper has not already imported it.
+if not re.search(r"(?m)^import [^\\n]*\\bre\\b",apply):
+    assert apply.count("from __future__ import annotations\\n")==1
+    apply=apply.replace("from __future__ import annotations\\n",
+                        "from __future__ import annotations\\nimport re\\n",1)
 old_apply='if len(name.parts) != 1 or name.name not in ALLOWED:'
 new_apply='''if (len(name.parts) != 1 or name.name != info.filename or
                     (name.name not in ALLOWED and not re.fullmatch(
