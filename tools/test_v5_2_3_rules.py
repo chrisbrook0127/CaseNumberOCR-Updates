@@ -148,7 +148,7 @@ with tempfile.TemporaryDirectory() as tmp:
     folder=Path(tmp)
     scenarios=[
         ("",False,"08-32",95.0,True,True),
-        ("08-33",False,"08-32",95.0,True,False),
+        ("08-33",False,"08-32",95.0,True,True),
         ("",True,"08-32",95.0,True,False),
         ("",False,"08-34",95.0,True,False),
         ("",False,"08-32",94.9,True,False),
@@ -162,7 +162,7 @@ with tempfile.TemporaryDirectory() as tmp:
             rec=model.records["id1"]
             assert rec["confirmed"]=="08-32" and rec["sequence_inferred"] is True
             assert model.moved==[("id1",{"batch":True})]
-    print("PASS: blank-middle before/after fallback, exported anchors, filename gaps, no overwrite/conflict")
+    print("PASS: bounded range resolves weak mistaken OCR and blanks; preserves ambiguity, anchor disagreement and auto-off")
 
 print("ALL PRIMARY AND FALLBACK REGRESSION CASES PASSED")
 
