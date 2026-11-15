@@ -1,5 +1,5 @@
 name: Build and test MFCase V5.1.4 diagnostic update
-# Retry with case regex escape correction
+# Verify cross-page candidate filtering and post-decision logging
 on:
   push:
     branches: [publish/v5.1.4-diagnostic-log]
