@@ -375,6 +375,83 @@ repl('''            if any_label:
                 # A complete labeled read wins over any fallback or header.
                 results=[r for r in results if r[3] in ("incident","case")]''')
 
+# Replace the old broad sequence-confirmation workflow. The user's
+# before/after rule is ONLY for a missing / unusable middle case number.
+# A known candidate (even weak) is not silently changed into its neighbors'
+# value, and a strong labeled or header read never waits for neighbors.
+sequence_method=r'''
+    def _apply_sequence_consensus(self):
+        """Secondary fallback ONLY for no usable case number in the middle.
+
+        Scan filenames need not have consecutive numbers. The two immediate
+        scan neighbors must independently OCR the same full case number.
+        Already-transferred strong reads remain valid sequence anchors.
+        """
+        updated=0
+        seq=self._sequence_index()
+        for iid,rec in list(self.records.items()):
+            path=rec.get("path")
+            if (rec.get("exported") or rec.get("sequence_excluded")
+                    or not path or not path.is_file()
+                    or rec.get("status") in ("Not scanned","Scanning","Moved to BLANKS")
+                    or str(rec.get("status") or "").startswith("Scan error:")):
+                continue
+            candidate=normalize_case_number(rec.get("candidate"))
+            if candidate and CASE_RE.fullmatch(candidate):
+                # Read exists: only field/header 95% rule, or manual review,
+                # may authorize it. Never infer over a readable case number.
+                continue
+            if rec.get("scan_ambiguous") or rec.get("sequence_conflict"):
+                continue
+            if rec.get("manual_approved") and not rec.get("sequence_inferred"):
+                continue
+            neighbors=self._sequence_neighbors(iid,seq)
+            self._diag_event("sequence_decision",
+                file=path.name,candidate=candidate,
+                neighbors=neighbors,stage="blank_middle_before_after_fallback")
+            if not neighbors:
+                continue
+            before,after=neighbors
+            try:
+                first=tuple(map(int,str(before[1]).split("-",1)))
+                last=tuple(map(int,str(after[1]).split("-",1)))
+            except (TypeError,ValueError):
+                continue
+            if first!=last:
+                rec["status"]=f"Sequence boundary {before[1]} / {after[1]} — manual review"
+                self._insert_scan_row(iid,rec)
+                continue
+            consensus=str(before[1])
+            if self._auto_label_block_reason(100.0,False,consensus) is not None:
+                rec["sequence_suggestion"]=consensus
+                rec["status"]=f"Before/after suggests {consensus} — manual review"
+                self._insert_scan_row(iid,rec)
+                updated+=1
+                continue
+            rec["sequence_original_candidate"]=candidate
+            rec["sequence_original_ambiguous"]=False
+            rec["scan_ambiguous"]=False
+            rec["sequence_conflict"]=False
+            rec["sequence_anchors"]=[before[0],after[0]]
+            rec["confirmed"]=consensus
+            rec["sequence_inferred"]=True
+            rec["auto_labeled"]=True
+            rec["manual_approved"]=True
+            rec["status"]=f"No OCR read — {consensus} inferred from matching before/after scans"
+            self._diag_event("approval_decision",file=path.name,
+                outcome="auto_approved",rule="blank_middle_matching_neighbors",
+                case=consensus,anchors=[before[0],after[0]],ocr_found=False)
+            self._move_to_completed(iid,batch=True)
+            updated+=1
+        if updated:
+            self._refresh_review_controls()
+            self._update_completed_count()
+            self._save_state()
+        self._schedule_auto_export()
+        return updated
+'''
+method("_apply_sequence_consensus",sequence_method)
+
 # Strictly preserve the 3x3 OCR region, root-folder scan only, shared learning,
 # manually selected training crop, and legacy two-file updater compatibility.
 compile(src,"case_number_ocr.py","exec")
