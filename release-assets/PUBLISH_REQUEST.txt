@@ -1,1 +1,2 @@
-Tested backward-compatible V5.1.3 updater package
+Publish validated MFCase V5.1.3 updater compatibility repair.
+Two-file legacy-safe ZIP; release SHA256: 2988f8bc504f225bf13d009555ca5e6286855888a69a98cab2aefbc450dd4ee0
