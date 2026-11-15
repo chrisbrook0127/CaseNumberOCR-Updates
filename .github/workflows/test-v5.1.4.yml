@@ -1,5 +1,5 @@
 name: Regression test exact MFCase V5.1.4 application methods
-# Retest extracted sequence method dependencies
+# Verify exported JSONL ZIP contents and metadata too
 on:
   push:
     branches: [publish/v5.1.4-diagnostic-log]
