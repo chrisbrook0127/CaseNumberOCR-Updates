@@ -1,0 +1,43 @@
+name: Inspect current MFCase v5.1.1 decision logic
+on:
+  push:
+    branches: [publish/v5.1.2-region3]
+    paths: [.github/workflows/inspect-v5.1.2.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode release and inspect exact functions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast, base64, hashlib, io, zipfile
+          root=Path("release-assets")
+          zbytes=base64.b64decode(root.joinpath("update.base64").read_text(),validate=True)
+          assert hashlib.sha256(zbytes).hexdigest()=="0376f099f14801e20e55cae0313408dd49e4a70fcbd7a88e7a8ccc652c1f617b"
+          with zipfile.ZipFile(io.BytesIO(zbytes)) as z:src=z.read("case_number_ocr.py").decode()
+          tree=ast.parse(src)
+          lines=src.splitlines()
+          keys={"_ocr_pdf","_apply_sequence_consensus","_sequence_case_number",
+                "_poll","_incident_hits_from_detections","_read_incident_to_right",
+                "_mfcase_header_field_candidates","_export_worker",
+                "_auto_label_block_reason","_find_case_field_label_regions"}
+          for node in ast.walk(tree):
+              if isinstance(node,ast.FunctionDef) and node.name in keys:
+                  print(f"======== {node.name}: {node.lineno}..{node.end_lineno} ========")
+                  beg=node.lineno;end=node.end_lineno
+                  if node.name=="_poll":
+                      for i in range(beg,end+1):
+                          line=lines[i-1]
+                          if ('kind == "row"' in line):
+                              beg=i;end=min(end,i+80);break
+                  for i in range(beg,end+1):
+                      print(f"{i}: {lines[i-1]}")
+          print("======== SEARCH SCALE / AUTO EXPORT =========")
+          for i,l in enumerate(lines,1):
+              if any(t in l for t in ["search_w","search_h","5*72*2.2","5 * 72 * 2.2","_schedule_auto_export","_eligible_for_kurt"]):
+                  print(f"{i}: {l[:190]}")
+          PY
