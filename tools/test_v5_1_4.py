@@ -137,7 +137,8 @@ print("PASS synthetic PDF regions: labeled priority, invalid 2014, wrong year, t
 # ONLY if both independent neighbors are 08-19. Blank reads are never inferred.
 SeqClass=method_class("_apply_sequence_consensus",{
     "normalize_case_number":normalize,
-    "CASE_RE":re.compile(r"\d{1,2}-\d{1,7}")
+    "CASE_RE":re.compile(r"\d{1,2}-\d{1,7}"),
+    "Path":Path
 })
 class FakePath:
     def is_file(self):return True
