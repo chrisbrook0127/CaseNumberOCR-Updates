@@ -1,0 +1,24 @@
+name: Inspect update launcher
+on:
+  push:
+    branches: [publish/v5.1.5-scan-order-updater]
+    paths: [.github/workflows/inspect-launch-v5.1.5.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Display updater launch and update UI handlers
+        run: |
+          python3 - <<'PY'
+          import zipfile,base64,io,hashlib
+          from pathlib import Path
+          b=base64.b64decode(Path("release-assets/update.base64").read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="8830ce832e78f5e4eeece7e45de820c4b9fa6b6ce1e6c95c01b16a08a28dabe2"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines()
+          for a,b in [(850,900),(4020,4140)]:
+              print("====",a,b)
+              for i in range(a,b+1):print(f"{i}: {lines[i-1]}")
+          PY
