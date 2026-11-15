@@ -1,5 +1,5 @@
 name: Build and test MFCase V5.1.4 diagnostic update
-# Verify cross-page candidate filtering and post-decision logging
+# Rebuild pinned V5.1.3 after cross-page filtering repair
 on:
   push:
     branches: [publish/v5.1.4-diagnostic-log]
@@ -12,7 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Patch verified 5.1.3 and inspect syntax and ZIP
-        run: python3 tools/build_v5_1_4.py
+        run: |
+          git fetch --no-tags --depth=1 origin ae20b31d04e1b01323aa60d3deb7978c5210c526
+          python3 tools/build_v5_1_4.py
       - name: Run standalone extraction tests for case filtering, JSONL and ZIP export
         run: |
           python3 - <<'PY'
