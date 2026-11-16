@@ -1,5 +1,5 @@
 name: Test MFCase V5.2.7 manual review, refresh and send
-# Verify actual visible Entry instead of hidden Combobox
+# Verify no auto-advance and authoritative manual 08- corrections
 on:
   push:
     branches: [publish/v5.2.7-manual-review-send-selected]
