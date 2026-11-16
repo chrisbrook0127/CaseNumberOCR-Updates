@@ -125,7 +125,7 @@ replace_method("_mfcase_header_field_candidates",header)
 #    treated as a case-number source for downstream TrOCR guesses.
 patch('''            if run_trocr and likely_case_line:
                 try:''',
-'''            # Fax pagination, e.g. "122 P.005/015", is not a case number.
+r'''            # Fax pagination, e.g. "122 P.005/015", is not a case number.
             # Never let TrOCR hallucinations turn a slash into an 08- prefix.
             fax_pagination=bool(re.search(
                 r"(?:\bP\s*[.:-]?\s*\d{1,4}\s*/\s*\d{1,4}\b|"
