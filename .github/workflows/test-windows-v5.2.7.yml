@@ -1,4 +1,5 @@
 name: Verify MFCase V5.2.7 updater and data preservation Windows
+# Final candidate includes return-to-list after manual SAVE REVIEW
 on:
   push:
     branches: [publish/v5.2.7-manual-review-send-selected]
