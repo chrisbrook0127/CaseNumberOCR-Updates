@@ -1,5 +1,5 @@
 name: Test MFCase V5.2.5 case OCR, sequence and UI
-# Verify fax rejection, corner location and previous OCR progress regression
+# Include updated independent-anchor range harness
 on:
   push:
     branches: [publish/v5.2.5-upper-right-case-ocr]
@@ -20,7 +20,7 @@ jobs:
       - name: Verify original 08-44 false-conflict and scan-progress rules
         run: python tools/test_v5_2_5_legacy_rules.py
       - name: Test entire matching before/after range in source scan order
-        run: python tools/test_v5_2_3_range.py
+        run: python tools/test_v5_2_5_range.py
   interface:
     runs-on: ubuntu-latest
     steps:
