@@ -47,7 +47,7 @@ for a,b in [("M.F. Case Number OCR — V5.2.7","M.F. Case Number OCR — V5.3.0"
 # telemetry features of model-client libraries before they import.
 swap('''        self._startup_learning_pending = True''',
 '''        self._startup_learning_pending = False
-        self._offline_prepare_busy = False''',1)
+        self._offline_prepare_busy = False''',2)
 swap('''        # Production starts its maintenance check automatically. The opt-out is
         # only for automated/headless regression tests, not the normal launcher.
         if os.environ.get("MFCASE_SKIP_STARTUP_MAINTENANCE") != "1":
