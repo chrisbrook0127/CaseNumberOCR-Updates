@@ -385,6 +385,56 @@ swap('''                        text=f"Selected OCR reading {number}. Its red OC
                               f"Confirmed case remains {entry.get().strip()}. "
                               "Typing a correction has priority over OCR box selection. "
                               "You can redraw the training crop if needed."))''')
+# Fix stale in-app instructions. They previously told users that updates and
+# shared logs happened automatically, which is no longer true or acceptable.
+instructions_start=s.index('        text.insert("1.0",\\n            "M.F. CASE NUMBER OCR — HOW TO USE')
+instructions_end=s.index('        text.configure(state="disabled")',instructions_start)
+new_instructions='''        text.insert("1.0",
+            "M.F. CASE NUMBER OCR — HOW TO USE (OFFLINE FIRST)\\n\\n"
+            "1. SELECT FILES lists ONLY PDFs in the selected root folder. "
+            "Subfolders, including COMPLETED, are not scanned.\\n\\n"
+            "2. SCAN recognizes only case numbers beginning with 08-. "
+            "It first examines the top-right 3 by 3 inches. Only if no "
+            "valid 08- candidate exists does it retry the top-right "
+            "5 by 5 inches. Other years are ignored completely.\\n\\n"
+            "3. REVIEW SELECTED opens an editable case entry and crop selection. "
+            "The typed correction overrides an OCR crop selection. "
+            "SAVE REVIEW retains the corrected file in the root folder.\\n\\n"
+            "4. Auto-approved and manually reviewed PDFs remain visible "
+            "and editable in SCAN. Nothing is moved until you click "
+            "SEND ALL SELECTED with the approved files highlighted.\\n\\n"
+            "5. UPDATE checks GitHub ONLY when clicked; UPDATE LEARNING "
+            "trains the local handwriting model ONLY when clicked. "
+            "These buttons are separate; neither runs at startup.\\n\\n"
+            "6. OFFLINE: installed OCR models, learning examples and diagnostic "
+            "logs remain on this computer. Once models are installed, "
+            "scanning needs no internet or shared-drive access.\\n\\n"
+            "7. PREPARE OFFLINE MODELS is an optional explicit download of "
+            "public EasyOCR and TrOCR model files. It does not upload "
+            "PDFs, crops, learning or case numbers. It may need over 1 GB.\\n\\n"
+            "8. EXPORT WORK LOG saves a local ZIP when you select a destination. "
+            "Never place identifiable case logs in the public GitHub repository. "
+            "The app does not automatically upload or share diagnostics.\\n")
+'''
+s=s[:instructions_start]+new_instructions+s[instructions_end:]
+
+# Make second-pass failures clearly identify BOTH OCR regions rather than
+# incorrectly claiming the 5x5 crop was merely a 3x3 check.
+swap('''                why=("Case-number caption in 3x3 area but no complete adjacent "
+                     "case number — MANUAL REVIEW" if any_label else
+                     "No case number found in top-right 3x3 inches — MANUAL REVIEW")''',
+'''                why=("Case label but no complete 08- case in "
+                     f"{_search_inches}x{_search_inches} — MANUAL REVIEW"
+                     if any_label else
+                     "No valid 08- case after 3x3 and 5x5 passes — MANUAL REVIEW")''')
+swap('''                return ("",(index,image,"3x3 case read rejected",None,[]),
+                         "3x3 field has no valid case number matching selected year — MANUAL REVIEW",''',
+'''                return ("",(index,image,
+                         f"{_search_inches}x{_search_inches} case read rejected",None,[]),
+                         "No valid 08- case after 3x3 and 5x5 passes — MANUAL REVIEW",''')
+swap('''                  scan_region_inches=[3,3],''',
+'''                  scan_region_inches=[3,3],
+                  fallback_region_inches=[5,5],''')
 compile(s,"case_number_ocr.py","exec")
 tree=ast.parse(s)
 assert 'self.app_version = "5.3.0"' in s
