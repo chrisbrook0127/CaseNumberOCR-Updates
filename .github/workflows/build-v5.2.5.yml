@@ -1,0 +1,44 @@
+name: Build and check MFCase V5.2.5 right-margin OCR
+on:
+  push:
+    branches: [publish/v5.2.5-upper-right-case-ocr]
+    paths: [.github/workflows/build-v5.2.5.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch immutable published V5.2.4 source
+        run: git fetch --no-tags --depth=1 origin b879902949ad6834d3a0ce25d3fa892aff2a306b
+      - name: Build V5.2.5 with compilation and regression assertions
+        run: python tools/build_v5_2_5.py
+      - name: Validate source, update ZIP and exact SHA-256
+        run: |
+          python - <<'PY'
+          import base64,hashlib,io,zipfile
+          from pathlib import Path
+          p=Path("release-assets")
+          b=base64.b64decode(p.joinpath("update.base64").read_text(),validate=True)
+          assert p.joinpath("CaseNumberOCR_Update.zip").read_bytes()==b
+          assert hashlib.sha256(b).hexdigest()==p.joinpath("SHA256.txt").read_text().strip()
+          assert p.joinpath("RELEASE_TAG.txt").read_text().strip()=="v5.2.5"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for name in z.namelist():compile(z.read(name),name,"exec")
+              s=z.read("case_number_ocr.py").decode()
+              assert 'self.app_version = "5.2.5"' in s
+              assert "handwritten_margin_pass" in s
+              assert "fax_pagination" in s
+              assert "_is_corner_case_rect" in s
+          print("PASS V5.2.5 release signature/zip integrity")
+          PY
+      - name: Stage verified release for publication
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage verified MFCase V5.2.5 case-position priority OCR"
+          git push origin HEAD:publish/v5.2.5-upper-right-case-ocr
