@@ -1,0 +1,44 @@
+name: Inspect V5.2.4 upper-right OCR and range selection
+on:
+  push:
+    branches: [publish/v5.2.5-upper-right-case-ocr]
+    paths: [.github/workflows/inspect-v525.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract published OCR source and inspect critical functions
+        run: |
+          python - <<'PY'
+          import io,base64,hashlib,zipfile,ast,pathlib,re
+          p=pathlib.Path('release-assets/update.base64')
+          blob=base64.b64decode(p.read_text(),validate=True)
+          assert hashlib.sha256(blob).hexdigest()=='93daa71262881dadf9d1436b4eb8218b92194011002f8599cacd356271b36d32'
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              source=z.read('case_number_ocr.py').decode()
+          lines=source.splitlines()
+          tree=ast.parse(source)
+          print('==== ALL METHODS ====')
+          for n in ast.walk(tree):
+              if isinstance(n,ast.FunctionDef):
+                  print('METHOD',n.name,n.lineno,n.end_lineno)
+          names={'_ocr_pdf','_diag_field_filter','_resolve_ocr_alternates',
+                 '_sequence_case_number','_apply_sequence_consensus',
+                 '_read_incident_to_right','_incident_hits_from_detections',
+                 '_find_case_field_label_regions','_select_primary_case_hit',
+                 '_normalize_case_number','_auto_label_block_reason'}
+          for n in ast.walk(tree):
+              if isinstance(n,ast.FunctionDef) and n.name in names:
+                  print('===== FUNCTION',n.name,n.lineno,n.end_lineno)
+                  for i in range(n.lineno,min(n.end_lineno,n.lineno+(300 if n.name=='_ocr_pdf' else 180))+1):
+                      print(f'{i}: {lines[i-1]}')
+          print('==== REGION MARKERS ===')
+          for i,line in enumerate(lines,1):
+              if ('Case field' in line or 'Upper-right fallback' in line or 
+                  '_ocr_extract' in line or 'CASE_RE =' in line or
+                  'case field has conflicting' in line or 'strongest suggestion' in line
+                  or 'sequence_suggestion' in line or 'P.00' in line):
+                  print(f'{i}: {line}')
+          PY
