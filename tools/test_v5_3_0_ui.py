@@ -103,6 +103,14 @@ with tempfile.TemporaryDirectory(prefix="MFCase 5.3.0 real GUI ") as tmp:
     win=find_review()
     entry=find_text_entry(win,"08-15")
     entry.delete(0,"end");entry.insert(0,"08-44")
+    # Selecting the red OCR box after typing must not erase the manual value.
+    combos=[w for w in descend(win) if isinstance(w,ttk.Combobox)]
+    assert combos
+    combos[0].set("08-15")
+    combos[0].event_generate("<<ComboboxSelected>>")
+    root.update_idletasks()
+    assert entry.get()=="08-44",("OCR crop selection reset manual entry",entry.get())
+    print("PASS: red OCR crop selection does not overwrite edited case number")
     click_save_review(win)
     root.update_idletasks()
     assert rec["confirmed"]=="08-44",rec
