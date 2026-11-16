@@ -89,7 +89,7 @@ swap('''        if not CASE_RE.fullmatch(normalized):
 swap('''        year = self.scan_year_prefix or self._year_prefix()
         observed_year=normalized.split("-",1)[0]
         if year and not (year.isdigit() and observed_year.isdigit() and
-                          int(observed_year)==int(year)):
+                         int(observed_year)==int(year)):
             return "Case number does not match the selected year."''',
 '''        observed_year=normalized.split("-",1)[0]
         if observed_year!=REQUIRED_CASE_YEAR:
