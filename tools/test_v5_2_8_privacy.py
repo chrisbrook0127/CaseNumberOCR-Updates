@@ -35,7 +35,7 @@ for path in ("_begin_startup_updates","_check_connection_status"):
     part=ast.get_source_segment(s,methods[path])
     assert "urlopen(" not in part and "https://" not in part
 assert 'if automatic:\n            return  # No automatic calls' in ast.get_source_segment(s,methods["check_for_updates"])
-assert 'if automatic:\n            return' in ast.get_source_segment(s,methods["export"])
+assert "automatic_export_blocked" in ast.get_source_segment(s,methods["export"])
 assert "manual_override_locked" in s
 print("PASS: only user-triggered UPDATE can request GitHub; no startup or background log uploads")
 print("PASS: EasyOCR and TrOCR use offline/cached model weights, telemetry disabled")
