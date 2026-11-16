@@ -1,0 +1,41 @@
+name: Build MFCase V5.2.6 strict 08-year application
+on:
+  push:
+    branches: [publish/v5.2.6-strict-08-year]
+    paths: [.github/workflows/build-v5.2.6.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exactly from immutable published V5.2.5
+        run: python3 tools/build_v5_2_6.py
+      - name: Verify syntax, ZIP integrity and strict literals
+        run: |
+          python3 - <<'PY'
+          import ast,base64,hashlib,io,zipfile
+          from pathlib import Path
+          r=Path('release-assets')
+          blob=base64.b64decode(r.joinpath("update.base64").read_text(),validate=True)
+          assert blob==r.joinpath("CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(blob).hexdigest()==r.joinpath("SHA256.txt").read_text().strip()
+          assert r.joinpath("RELEASE_TAG.txt").read_text().strip()=="v5.2.6"
+          with zipfile.ZipFile(io.BytesIO(blob)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for n in z.namelist():compile(z.read(n),n,"exec")
+              s=z.read("case_number_ocr.py").decode()
+              assert 'REQUIRED_CASE_YEAR = "08"' in s
+              assert 'root.title("M.F. Case Number OCR — V5.2.6")' in s
+              assert s==Path("development/v5.2.6_case_number_ocr.py").read_text()
+          print("PASS V5.2.6 strict-08 ZIP and source verification")
+          PY
+      - name: Commit updated release assets and source to staging branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt development/v5.2.6_case_number_ocr.py
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage verified MFCase V5.2.6 strict 08-year update"
+          git push origin HEAD:publish/v5.2.6-strict-08-year
