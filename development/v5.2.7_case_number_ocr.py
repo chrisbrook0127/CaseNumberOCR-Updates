@@ -6007,15 +6007,12 @@ class App:
             self.status.config(text=r["status"])
             win.destroy()
             self._apply_sequence_consensus()
-            next_index=index+1
             if learning_error:
                 messagebox.showwarning("Case number saved",
                     f"{value} is saved and remains in SCAN. Shared learning "
                     f"did not save: {learning_error}\\n\\n"
                     "Reopen REVIEW SELECTED and save again when the learning "
                     "share is available. No PDF was sent.")
-            if next_index<len(self.review_queue):
-                self._show_review_item(next_index)
 
         action_row = label_row + 5
         type_row=ttk.Frame(controls)
