@@ -1,0 +1,37 @@
+name: Extract immutable V5.2.5 code for strict 2008 validation audit
+on:
+  push:
+    branches: [publish/v5.2.6-strict-08-year]
+    paths: [.github/workflows/extract-v5.2.6.yml]
+permissions: {contents: write}
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract and checksum-verify published exact V5.2.5 application
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,io,zipfile
+          from pathlib import Path
+          root=Path("release-assets")
+          raw=base64.b64decode(root.joinpath("update.base64").read_text(),validate=True)
+          assert hashlib.sha256(raw).hexdigest()=="79e6b88976d1c874ba5295458814eaf8d00e3a8368d6ea591fc2e88c24348c3a"
+          with zipfile.ZipFile(io.BytesIO(raw)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              source=z.read("case_number_ocr.py")
+              compile(source,"case_number_ocr.py","exec")
+          p=Path("development/v5.2.5_original_case_number_ocr.py")
+          p.parent.mkdir(parents=True,exist_ok=True)
+          p.write_bytes(source)
+          print("SOURCE EXTRACTED",len(source))
+          PY
+      - name: Commit release-exact source for review
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add development/v5.2.5_original_case_number_ocr.py
+          git diff --cached --quiet && exit 1
+          git commit -m "Save immutable V5.2.5 application source for strict 08-case patch"
+          git push origin HEAD:publish/v5.2.6-strict-08-year
