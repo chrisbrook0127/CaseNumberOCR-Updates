@@ -134,7 +134,7 @@ assert 'def _make_scan_preview(' in source
 assert 'def _scan_progress_update(' in source
 assert 'text="REVIEW SELECTED"' in source
 assert 'os.utime(destination, None)' in source
-assert 'dimension_px=int(round(3*72*2.2))' in source
+assert 'dimension_px=int(round(_search_inches*72*2.2))' in source
 for function in ("_pending_learning_examples","_maybe_train_trocr"):
     node=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==function)
     assert "CASE_RE.fullmatch" in ast.get_source_segment(source,node)
