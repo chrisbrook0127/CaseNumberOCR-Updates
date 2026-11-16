@@ -205,8 +205,7 @@ swap('''        if not self._startup_ready or not self.learning_dir or self.read
 '''        if not self._startup_ready:
             self.status.config(text="Application is not ready.")
             return''')
-swap('''                    self.reader = easyocr.Reader(["en"], gpu=reader_gpu, verbose=False)''',
-'''                    self.reader = easyocr.Reader(["en"], gpu=reader_gpu, verbose=False,download_enabled=False)''')
+# Reader was already made offline above.
 # Top EasyOCR error presented only after local cache checks, not a download.
 swap('''            self.queue.put(("engine_status", f"EasyOCR initialized • {'GPU' if reader_gpu else 'CPU'}"))''',
 '''            self.queue.put(("engine_status", f"Offline EasyOCR initialized • {'GPU' if reader_gpu else 'CPU'}"))''')
@@ -277,43 +276,38 @@ swap('''            expected = str(release.get("digest") or "")
                 raise RuntimeError("Release has no verifiable SHA-256; update denied.")
             if actual_digest.lower() != expected.split(":", 1)[1].lower():''')
 
-# Keep UPDATE LEARNING manual; local crop images and local model checkpoints.
-# Do not accidentally transmit learning when a reviewer saves a correction.
-swap('''        ttk.Label(self.settings_tab,
-                   text="Full OCR logs remain on the authorized workstation and restricted shared learning drive. They are never automatically uploaded to the public GitHub repository.",''',
-'''        ttk.Label(self.settings_tab,
-                   text="Private mode: learning crops, models and OCR logs stay on this PC. Neither GitHub nor the shared learning drive receives case data. Only manual UPDATE checks GitHub. If the PDF folder itself is a network share, normal file operations still use that share.",''')
-swap('''        ttk.Label(self.settings_tab,
-                   text="PDF recognition runs locally after models are installed. Shared learning uses the restricted network drive. GitHub is used for application updates, not case records.",''',
-'''        ttk.Label(self.settings_tab,
-                   text="OFFLINE/PRIVATE MODE. OCR uses previously downloaded models only. UPDATE downloads software on request; UPDATE LEARNING trains local samples without any network synchronization.",''')
-swap('''            "7. OFFLINE: after downloading OCR models, PDF recognition runs "
-            "locally. Shared learning and centralized logs require the "
-            "authorized network drive; updates require GitHub internet access. "
-            "The current startup policy may prevent scanning until shared "
-            "learning and OCR models are available.\\n\\n"''',
-'''            "7. OFFLINE: no startup calls to GitHub, learning shares, or "
-            "model servers. OCR requires local EasyOCR model weights. TrOCR "
-            "uses only trained/cached weights; no remote download is attempted. "
-            "Before disconnecting, run PREPARE_OFFLINE_MODELS.bat manually "
-            "if OCR weights have never been cached on this PC.\\n\\n"''')
-swap('''            "8. EXPORT WORK LOG produces a diagnostic ZIP for troubleshooting. "
-            "Do not upload sensitive case material to the public GitHub repo. "
-            "Use the restricted shared learning drive for coworker diagnostics.\\n")''',
-'''            "8. Learning and diagnostic logs stay in LOCALAPPDATA/MFCaseOCR "
-            "on this PC. UPDATE LEARNING is manual and entirely local. "
-            "EXPORT WORK LOG is a deliberate user-selected export; do not "
-            "upload sensitive information to public services.\\n")''')
-swap('''            "the file for later.\\n\\n"''',
-'''            "the file for later.\\n\\n"''',1)
-# Remove misleading guide claim 'root/COMPLETED' appears in scan list.
-swap('''            "1. SELECT FILES chooses a folder. The root PDFs and the root/COMPLETED "
-            "subfolder are displayed together; no other subfolders are scanned.\\n\\n"''',
-'''            "1. SELECT FILES shows only PDFs still in the selected root folder. "
-            "COMPLETED files already moved out are not shown.\\n\\n"''')
-swap('''            "Handwritten or Printed if known, and press SAVE AND SEND. SKIP leaves "''',
-'''            "Handwritten or Printed if known, and press SAVE REVIEW. SKIP leaves "''')
-
+# Keep all informational text accurate. These are plain text replacements
+# because installed variants differ in line wrapping/indentation.
+for old,new in [
+ ("Full OCR logs remain on the authorized workstation and restricted shared learning drive. They are never automatically uploaded to the public GitHub repository.",
+  "PRIVATE MODE: learning, OCR crops and logs remain on this PC. No case data is uploaded to GitHub or the former shared learning drive. If you choose a network PDF folder, regular PDF and state file operations use that selected folder."),
+ ("PDF recognition runs locally after models are installed. Shared learning uses the restricted network drive. GitHub is used for application updates, not case records.",
+  "OFFLINE/PRIVATE MODE. The UPDATE button alone checks GitHub. UPDATE LEARNING trains local samples on request; no network synchronization."),
+ ("7. OFFLINE: after downloading OCR models, PDF recognition runs ",
+  "7. OFFLINE: no startup calls to GitHub or model servers. Recognition uses "),
+ ("locally. Shared learning and centralized logs require the ",
+  "only locally cached EasyOCR and TrOCR model weights. "),
+ ("authorized network drive; updates require GitHub internet access. ",
+  "Run PREPARE_OFFLINE_MODELS.bat while online before disconnecting if needed. "),
+ ("The current startup policy may prevent scanning until shared ",
+  "After that, no internet is required to scan. "),
+ ("learning and OCR models are available.",
+  "Learning examples and diagnostics stay local."),
+ ("8. EXPORT WORK LOG produces a diagnostic ZIP for troubleshooting. ",
+  "8. UPDATE LEARNING is manual and local. EXPORT WORK LOG is an optional "),
+ ("Do not upload sensitive case material to the public GitHub repo. ",
+  "diagnostic ZIP that is saved only when requested. Do not upload "),
+ ("Use the restricted shared learning drive for coworker diagnostics.",
+  "case data or logs to any public online service."),
+ ("1. SELECT FILES chooses a folder. The root PDFs and the root/COMPLETED ",
+  "1. SELECT FILES shows only PDFs still in the selected root folder. "),
+ ("subfolder are displayed together; no other subfolders are scanned.",
+  "Files already transferred to COMPLETED are not shown."),
+ ("Handwritten or Printed if known, and press SAVE AND SEND. SKIP leaves ",
+  "Handwritten or Printed if known, and press SAVE REVIEW. SKIP leaves ")
+]:
+    assert old in s,("Missing guide text",old[:65])
+    s=s.replace(old,new)
 # Manual correction should not be replaced if the reviewer typed a value
 # and then clicks an unrelated OCR red box. That box teaches the location
 # but NEVER overrides a user-edited confirmation without an explicit prompt.
