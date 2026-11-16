@@ -333,6 +333,16 @@ s=s.replace(
     "When scanning finishes, approved records transfer automatically",
     "Approved records remain on SCAN until SEND ALL SELECTED")
 
+# Saving one review returns to the SCAN list. Do not open another PDF
+# automatically, which could hide the just-saved correction and create
+# overlapping modal review windows if the user reopens a file immediately.
+swap('''            next_index=index+1
+            if learning_error:''',
+     '''            if learning_error:''')
+swap('''            if next_index<len(self.review_queue):
+                self._show_review_item(next_index)
+''','')
+
 compile(s,"case_number_ocr.py","exec")
 tree=ast.parse(s)
 assert 'self.app_version = "5.2.7"' in s
