@@ -1,4 +1,5 @@
 name: Test MFCase V5.2.6 strict 08-only validation and GUI
+# Supply enforced year to isolated OCR and sequence method harnesses
 on:
   push:
     branches: [publish/v5.2.6-strict-08-year]
