@@ -6232,8 +6232,14 @@ class App:
                                if item.get("number") == number), None)
                 if not number:
                     return
-                entry.delete(0, "end")
-                entry.insert(0, number)
+                current_case=normalize_case_number(entry.get().strip())
+                already_verified=bool(r.get("manual_approved") and
+                                      not r.get("auto_labeled"))
+                manually_changed=bool(current_case and
+                                      current_case!=initial_reading)
+                if not (already_verified or manually_changed):
+                    entry.delete(0,"end")
+                    entry.insert(0,number)
                 candidate_choice_var.set(number)
 
                 if chosen:
@@ -6258,7 +6264,10 @@ class App:
                         r["manual_crop_origin"]="candidate"
                         selection["preview_rect"] = None
                     selection_status.config(
-                        text=f"Selected OCR reading {number}. Its red OCR box is selected and the expanded green crop will teach this field location. You can draw a different box instead.")
+                        text=(f"Selected OCR box {number} for crop learning. "
+                              f"Confirmed case remains {entry.get().strip()}. "
+                              "Typing a correction has priority over OCR box selection. "
+                              "You can redraw the training crop if needed."))
                     redraw()
                     update_crop_preview()
                 elif number in sequence_values:
