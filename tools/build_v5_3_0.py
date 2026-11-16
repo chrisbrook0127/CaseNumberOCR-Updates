@@ -246,7 +246,10 @@ swap('''                reader = easyocr.Reader(["en"], gpu=gpu, verbose=False)'
                                         download_enabled=False)''')
 swap('''                reader = easyocr.Reader(["en"], gpu=False, verbose=False)''',
 '''                reader = easyocr.Reader(["en"], gpu=False, verbose=False,
-                                        download_enabled=False)''',2)
+                                        download_enabled=False)''',1)
+swap('''                    self.reader = easyocr.Reader(["en"], gpu=False, verbose=False)''',
+'''                    self.reader = easyocr.Reader(["en"], gpu=False, verbose=False,
+                                                  download_enabled=False)''')
 swap('''            self.reader = easyocr.Reader(["en"], gpu=reader_gpu, verbose=False)''',
 '''            self.reader = easyocr.Reader(
                 ["en"],gpu=reader_gpu,verbose=False,download_enabled=False)''',1)
