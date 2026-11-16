@@ -1,0 +1,36 @@
+name: Test MFCase V5.2.6 strict 08-only validation and GUI
+on:
+  push:
+    branches: [publish/v5.2.6-strict-08-year]
+    paths: [.github/workflows/test-v5.2.6.yml]
+permissions: {contents: read}
+jobs:
+  year-ocr-sequence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install image dependencies
+        run: python -m pip install -q numpy pillow
+      - name: Test strict 08- year in actual release code
+        run: python tools/test_v5_2_6_year.py
+      - name: Preserve upper-right 08-44 OCR precedence and fax filtering
+        run: python tools/test_v5_2_6_ocr.py
+      - name: Preserve multi-file before/after range behavior with 08-only anchors
+        run: python tools/test_v5_2_6_range.py
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install headless display and thumbnails
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y xvfb python3-tk
+          python -m pip install -q numpy pillow
+      - name: Exercise real Tk application and stale saved-year rejection
+        run: xvfb-run -a python tools/test_v5_2_6_ui.py
