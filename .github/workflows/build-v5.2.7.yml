@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch immutable published V5.2.6 release source
+        run: git fetch --no-tags --depth=1 origin 27bbb004bb8f5ac871c00c8840ce2f2b74addae9
       - name: Build verified V5.2.7 from exact published V5.2.6
         run: python3 tools/build_v5_2_7.py
       - name: Integrity, checksum, strict year, updater layout
