@@ -1,5 +1,5 @@
 name: Build MFCase V5.2.8 offline privacy release
-# Disable both startup and retry auto-learning flags
+# Make all OCR library model loads strictly offline
 on:
   push:
     branches: [publish/v5.2.8-manual-update-offline]
