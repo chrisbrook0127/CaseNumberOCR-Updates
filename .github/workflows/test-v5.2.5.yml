@@ -1,5 +1,5 @@
 name: Test MFCase V5.2.5 case OCR, sequence and UI
-# Verify corrected fax word-boundary suppression against actual release
+# Verify fax rejection, corner location and previous OCR progress regression
 on:
   push:
     branches: [publish/v5.2.5-upper-right-case-ocr]
@@ -18,7 +18,7 @@ jobs:
       - name: Exercise actual 08-44 right-margin and fax suppression
         run: python tools/test_v5_2_5_ocr.py
       - name: Verify original 08-44 false-conflict and scan-progress rules
-        run: python tools/test_v5_2_4_rules.py
+        run: python tools/test_v5_2_5_legacy_rules.py
       - name: Test entire matching before/after range in source scan order
         run: python tools/test_v5_2_3_range.py
   interface:
