@@ -66,7 +66,7 @@ swap('''        self.learning_dir = None
         self.learning_dir.mkdir(parents=True,exist_ok=True)
         self.learning_data =''')
 swap('''        self._startup_learning_pending = True''',
-'''        self._startup_learning_pending = False''',1)
+'''        self._startup_learning_pending = False''',2)
 swap('''        # Production starts its maintenance check automatically. The opt-out is
         # only for automated/headless regression tests, not the normal launcher.
         if os.environ.get("MFCASE_SKIP_STARTUP_MAINTENANCE") != "1":
