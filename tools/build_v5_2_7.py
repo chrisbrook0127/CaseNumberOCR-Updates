@@ -8,10 +8,10 @@ Regression fixes:
 - REFRESH spinner uses matching start/finish keys and a bounded wait.
 """
 from pathlib import Path
-import ast,base64,hashlib,io,zipfile
+import ast,base64,hashlib,io,zipfile,subprocess
 
 ROOT=Path("release-assets")
-payload=base64.b64decode(ROOT.joinpath("update.base64").read_text(),validate=True)
+payload=base64.b64decode(subprocess.check_output(["git","show","FETCH_HEAD:release-assets/update.base64"],text=True).strip(),validate=True)
 assert hashlib.sha256(payload).hexdigest()=="1cd31372fda81e93aa019d07e5407571a9af51edd7997df48519c1aefc856a4a"
 with zipfile.ZipFile(io.BytesIO(payload)) as z:
     assert z.testzip() is None
