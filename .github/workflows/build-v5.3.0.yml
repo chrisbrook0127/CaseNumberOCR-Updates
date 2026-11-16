@@ -1,5 +1,5 @@
 name: Build MFCase V5.3.0 secure offline OCR
-# Include accurate offline instructions and 5x5 failure diagnostics
+# Rebuild exact V5.3.0 with clear fallback diagnostics and help
 on:
   push:
     branches: [publish/v5.3.0-offline-ocr-security]
