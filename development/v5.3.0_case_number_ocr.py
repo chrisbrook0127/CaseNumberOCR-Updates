@@ -1239,34 +1239,31 @@ class App:
         text=tk.Text(frame,wrap="word",font=("Segoe UI",10))
         text.pack(fill="both",expand=True)
         text.insert("1.0",
-            "M.F. CASE NUMBER OCR — HOW TO USE\n\n"
-            "1. SELECT FILES chooses a folder. The root PDFs and the root/COMPLETED "
-            "subfolder are displayed together; no other subfolders are scanned.\n\n"
-            "2. SCAN analyzes selected, not-yet-scanned files in natural filename order. "
-            "OCR examines the top-right 3 by 3 inches and prioritizes labeled "
-            "INCIDENT NO. or CASE NUMBER fields.\n\n"
-            "3. REVIEW means an uncertain OCR reading needs a person. Double-click "
-            "a REVIEW row, inspect its case, optionally draw a crop box, choose "
-            "Handwritten or Printed if known, and press SAVE AND SEND. SKIP leaves "
-            "the file for later.\n\n"
-            "4. COMPLETED means an approved PDF is ready to transfer. Select "
-            "COMPLETED rows and click SEND ALL SELECTED.\n\n"
-            "5. SENT means the renamed PDF has actually been moved to the "
-            "COMPLETED subfolder. The program never creates duplicate sent PDFs. "
-            "Only double-clicking followed by confirmation permits reopening "
-            "COMPLETED or SENT. For SENT, the PDF moves back to root without "
-            "overwriting an existing filename.\n\n"
-            "6. Learning examples use the manually drawn crop when provided; "
-            "otherwise the selected OCR box. The confirmed case is the training "
-            "answer. Category selection is optional.\n\n"
-            "7. OFFLINE: after downloading OCR models, PDF recognition runs "
-            "locally. Shared learning and centralized logs require the "
-            "authorized network drive; updates require GitHub internet access. "
-            "The current startup policy may prevent scanning until shared "
-            "learning and OCR models are available.\n\n"
-            "8. EXPORT WORK LOG produces a diagnostic ZIP for troubleshooting. "
-            "Do not upload sensitive case material to the public GitHub repo. "
-            "Use the restricted shared learning drive for coworker diagnostics.\n")
+            "M.F. CASE NUMBER OCR — HOW TO USE (OFFLINE FIRST)\n\n"
+            "1. SELECT FILES lists ONLY PDFs in the selected root folder. "
+            "Subfolders, including COMPLETED, are not scanned.\n\n"
+            "2. SCAN recognizes only case numbers beginning with 08-. "
+            "It first examines the top-right 3 by 3 inches. Only if no "
+            "valid 08- candidate exists does it retry the top-right "
+            "5 by 5 inches. Other years are ignored completely.\n\n"
+            "3. REVIEW SELECTED opens an editable case entry and crop selection. "
+            "The typed correction overrides an OCR crop selection. "
+            "SAVE REVIEW retains the corrected file in the root folder.\n\n"
+            "4. Auto-approved and manually reviewed PDFs remain visible "
+            "and editable in SCAN. Nothing is moved until you click "
+            "SEND ALL SELECTED with the approved files highlighted.\n\n"
+            "5. UPDATE checks GitHub ONLY when clicked; UPDATE LEARNING "
+            "trains the local handwriting model ONLY when clicked. "
+            "These buttons are separate; neither runs at startup.\n\n"
+            "6. OFFLINE: installed OCR models, learning examples and diagnostic "
+            "logs remain on this computer. Once models are installed, "
+            "scanning needs no internet or shared-drive access.\n\n"
+            "7. PREPARE OFFLINE MODELS is an optional explicit download of "
+            "public EasyOCR and TrOCR model files. It does not upload "
+            "PDFs, crops, learning or case numbers. It may need over 1 GB.\n\n"
+            "8. EXPORT WORK LOG saves a local ZIP when you select a destination. "
+            "Never place identifiable case logs in the public GitHub repository. "
+            "The app does not automatically upload or share diagnostics.\n")
         text.configure(state="disabled")
         ttk.Button(frame,text="CLOSE",command=win.destroy).pack(anchor="e",pady=8)
 
@@ -4178,9 +4175,10 @@ class App:
                         reason="no_08_candidate_in_3x3",search_inches=5)
                     return self._ocr_pdf(path,_search_inches=5)
                 index=max(0,len(pages)-1)
-                why=("Case-number caption in 3x3 area but no complete adjacent "
-                     "case number — MANUAL REVIEW" if any_label else
-                     "No case number found in top-right 3x3 inches — MANUAL REVIEW")
+                why=("Case label but no complete 08- case in "
+                     f"{_search_inches}x{_search_inches} — MANUAL REVIEW"
+                     if any_label else
+                     "No valid 08- case after 3x3 and 5x5 passes — MANUAL REVIEW")
                 return ("",(index,pages[-1],"3x3 case field not read",None,[]),
                         why,False,0.0,[],False)
             def rank(entry):
@@ -4202,8 +4200,9 @@ class App:
                     return self._ocr_pdf(path,_search_inches=5)
                 self._diag_event("ocr_decision",page=index+1,source=kind,
                      outcome="manual_review",reason="no_year_matching_case_candidate")
-                return ("",(index,image,"3x3 case read rejected",None,[]),
-                         "3x3 field has no valid case number matching selected year — MANUAL REVIEW",
+                return ("",(index,image,
+                         f"{_search_inches}x{_search_inches} case read rejected",None,[]),
+                         "No valid 08- case after 3x3 and 5x5 passes — MANUAL REVIEW",
                          False,0.0,[],False)
             best=_select_primary_case_hit(hits,kind,image.shape)
             hits=self._resolve_ocr_alternates(hits,kind,best)
