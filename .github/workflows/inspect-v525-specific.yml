@@ -1,0 +1,24 @@
+name: Inspect V5.2.4 field candidates and ranking
+on:
+  push:
+    branches: [publish/v5.2.5-upper-right-case-ocr]
+    paths: [.github/workflows/inspect-v525-specific.yml]
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review complete candidate and score implementation
+        run: |
+          python - <<'PY'
+          import base64,hashlib,zipfile,io
+          from pathlib import Path
+          b=base64.b64decode(Path("release-assets/update.base64").read_text(),validate=True)
+          assert hashlib.sha256(b).hexdigest()=="93daa71262881dadf9d1436b4eb8218b92194011002f8599cacd356271b36d32"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:s=z.read("case_number_ocr.py").decode()
+          lines=s.splitlines()
+          for a,b in [(1,132),(1744,1857),(4147,4412),(4415,4518)]:
+              print(f"===== {a} .. {b}")
+              for i in range(a,b+1):print(f"{i}: {lines[i-1]}")
+          PY
