@@ -122,20 +122,6 @@ assert 'self._save_learning_example(r,value)' in s
 # shares as magically disconnected.
 patch('''                  text="PDF recognition runs locally after models are installed. Shared learning uses the restricted network drive. GitHub is used for application updates, not case records.",''',
 '''                  text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request; PREPARE OFFLINE MODELS downloads public model files only when clicked. Selecting a network PDF folder still uses that network share.",''')
-patch('''             "6. OFFLINE: installed OCR models, learning examples and diagnostic "
-             "logs remain on this computer. Once models are installed, "
-             "scanning needs no internet or shared-drive access.\\n\\n"''',
-'''             "6. OFFLINE: once both OCR models are cached, scans and learning "
-             "run without internet. The app makes no automatic update checks. "
-             "If you choose PDFs on a network share, Windows still transfers "
-             "those PDFs and state over your LAN; choose a local folder for "
-             "fully disconnected operation.\\n\\n"''')
-patch('''             "8. EXPORT WORK LOG saves a local ZIP when you select a destination. "
-             "Never place identifiable case logs in the public GitHub repository. "''',
-'''             "8. EXPORT WORK LOG saves a local ZIP when you select a destination. "
-             "For maximum confidentiality, keep case workstations disconnected "
-             "from external networks and restrict Windows outbound traffic. "
-             "Never place identifiable case logs in the public GitHub repository. "''')
 
 # Remove technical potential to send telemetry automatically in normal run.
 assert 'root.after(250,self._begin_offline_startup)' in s
