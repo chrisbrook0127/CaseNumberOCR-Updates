@@ -89,9 +89,9 @@ with tempfile.TemporaryDirectory(prefix="MFCase 5.2.7 real GUI ") as tmp:
         assert len(wins)==1,[str(w) for w in wins]
         return wins[0]
     def find_text_entry(win,contains):
-        matches=[w for w in descend(win) if isinstance(w,ttk.Entry)
+        matches=[w for w in descend(win) if type(w) is ttk.Entry
                  and contains in str(w.get())]
-        assert matches,[("entry",w.get()) for w in descend(win) if isinstance(w,ttk.Entry)]
+        assert matches,[("entry",w.get()) for w in descend(win) if type(w) is ttk.Entry]
         return matches[0]
     def click_save_review(win):
         buttons=[w for w in descend(win) if isinstance(w,ttk.Button)
