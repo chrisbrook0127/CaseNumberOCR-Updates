@@ -1,4 +1,5 @@
 name: Build MFCase V5.2.7 manual-save and refresh-fix
+# Close review after each saved correction; allow next selection from SCAN
 on:
   push:
     branches: [publish/v5.2.7-manual-review-send-selected]
