@@ -15,7 +15,7 @@ nodes=[n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name in 
 assert {n.name for n in nodes}==names
 cls=ast.ClassDef(name="Base",bases=[],keywords=[],body=nodes,decorator_list=[])
 ast.fix_missing_locations(cls)
-env={"Path":Path,"re":re,
+env={"Path":Path,"re":re,"REQUIRED_CASE_YEAR":"08",
      "normalize_case_number":lambda s:str(s or "").strip(),
      "CASE_RE":re.compile(r"08-\d{1,7}")}
 exec(compile(ast.Module(body=[cls],type_ignores=[]),"<real-methods>","exec"),env)
