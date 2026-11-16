@@ -1,5 +1,5 @@
 name: Build and check MFCase V5.2.5 right-margin OCR
-# Fix exact OCR branch location for focused handwritten margin
+# Correct fax header word-boundary regex escaping
 on:
   push:
     branches: [publish/v5.2.5-upper-right-case-ocr]
