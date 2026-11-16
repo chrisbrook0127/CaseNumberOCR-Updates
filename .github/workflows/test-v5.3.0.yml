@@ -1,5 +1,5 @@
 name: Test MFCase V5.3.0 offline privacy and two-pass OCR
-# Re-run with updated adaptive-window compatibility assertion
+# Validate manual Entry survives subsequent red-box OCR crop selection
 on:
   push:
     branches: [publish/v5.3.0-offline-ocr-security]
