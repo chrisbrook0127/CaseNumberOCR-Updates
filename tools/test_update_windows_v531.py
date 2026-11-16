@@ -36,9 +36,9 @@ with tempfile.TemporaryDirectory(prefix="MFCase Update Windows Test ") as work:
     assert (completed/"08-29.pdf").read_bytes()==b"%PDF-1.4\nsaved PDF\n"
     # Correct version and checksum help distinguish a real update from a
     # stale title label or a silent failed installation.
-    assert b'self.app_version = "5.2.7"' in actual_app
-    assert b'V5.2.7' in actual_app
-    print("PASS real update installed exact 5.2.7 payload and preserved private data")
+    assert b'self.app_version = "5.3.1"' in actual_app
+    assert b'V5.3.1' in actual_app
+    print("PASS real update installed exact 5.3.1 payload and preserved private data")
     # Unexpected archive member must fail before replacing an existing app.
     bad=folder/"bad.zip"
     with zipfile.ZipFile(bad,"w") as z:
