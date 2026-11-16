@@ -1,0 +1,44 @@
+name: Build MFCase V5.2.7 manual-save and refresh-fix
+on:
+  push:
+    branches: [publish/v5.2.7-manual-review-send-selected]
+    paths: [.github/workflows/build-v5.2.7.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build verified V5.2.7 from exact published V5.2.6
+        run: python3 tools/build_v5_2_7.py
+      - name: Integrity, checksum, strict year, updater layout
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,io,zipfile
+          from pathlib import Path
+          p=Path("release-assets")
+          b=base64.b64decode((p/"update.base64").read_text(),validate=True)
+          assert b==(p/"CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(b).hexdigest()==(p/"SHA256.txt").read_text().strip()
+          assert (p/"RELEASE_TAG.txt").read_text().strip()=="v5.2.7"
+          with zipfile.ZipFile(io.BytesIO(b)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for name in z.namelist():compile(z.read(name),name,"exec")
+              s=z.read("case_number_ocr.py").decode()
+              assert 'self.app_version = "5.2.7"' in s
+              assert "def _refresh_timeout" in s
+              assert "SAVE REVIEW" in s
+              assert "automatic_export_blocked" in s
+              assert "learning_pending" in s
+              assert s==(Path("development")/"v5.2.7_case_number_ocr.py").read_text()
+          print("PASS V5.2.7 source and update ZIP")
+          PY
+      - name: Stage verified source and update files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt development/v5.2.7_case_number_ocr.py
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage MFCase V5.2.7 manual review and explicit send-only"
+          git push origin HEAD:publish/v5.2.7-manual-review-send-selected
