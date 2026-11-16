@@ -5803,19 +5803,25 @@ class App:
             label_row = 5
         ttk.Label(controls, text="Confirmed case number (08- plus 1–7 digits):",
                   wraplength=280).grid(row=label_row, column=0, sticky="w")
-        entry = ttk.Entry(controls, font=("Segoe UI", 14))
+        entry_var=tk.StringVar(value=initial_reading)
+        entry = ttk.Entry(controls, font=("Segoe UI", 14),
+                          textvariable=entry_var)
         entry.grid(row=label_row + 1, column=0, sticky="ew", pady=(5, 4))
-        entry.insert(0, initial_reading)
-        manual_entry_changed={"value":False}
-        def mark_manual_entry(_event=None):
-            manual_entry_changed["value"]=True
-        entry.bind("<KeyRelease>",mark_manual_entry,add="+")
-        entry.bind("<<Paste>>",mark_manual_entry,add="+")
+        manual_entry_changed={"value":False,"programmatic":False}
+        def mark_manual_entry(*_):
+            if not manual_entry_changed["programmatic"]:
+                manual_entry_changed["value"]=True
+        entry_var.trace_add("write",mark_manual_entry)
+        def fill_from_ocr(value):
+            if manual_entry_changed["value"]:
+                return
+            manual_entry_changed["programmatic"]=True
+            try:entry_var.set(value)
+            finally:manual_entry_changed["programmatic"]=False
         def use_selected_candidate(_event=None):
             selected_value = candidate_choice_var.get().strip()
-            if selected_value and not manual_entry_changed["value"]:
-                entry.delete(0, "end")
-                entry.insert(0, selected_value)
+            if selected_value:
+                fill_from_ocr(selected_value)
         candidate_selector.bind("<<ComboboxSelected>>", use_selected_candidate)
         err = ttk.Label(controls, text="", foreground="red", wraplength=280)
         err.grid(row=label_row + 2, column=0, sticky="w", pady=(0, 12))
@@ -6114,8 +6120,7 @@ class App:
                 if not number:
                     return
                 if not manual_entry_changed["value"]:
-                    entry.delete(0, "end")
-                    entry.insert(0, number)
+                    fill_from_ocr(number)
                 else:
                     selection_status.config(text="OCR location selected. The case number "
                         "you typed is protected and will not be replaced.")
