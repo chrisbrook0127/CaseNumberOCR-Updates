@@ -1,0 +1,42 @@
+name: Build MFCase V5.2.8 offline privacy release
+on:
+  push:
+    branches: [publish/v5.2.8-manual-update-offline]
+    paths: [.github/workflows/build-v5.2.8.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch immutable published V5.2.7 update baseline
+        run: git fetch --no-tags --depth=1 origin a06c4b9d668dbfc8e69b773b2cf6cfd19264d347
+      - name: Patch published code and verify compile
+        run: python tools/build_v5_2_8.py
+      - name: Verify exact ZIP, SHA and offline protections
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import io,zipfile,base64,hashlib
+          p=Path("release-assets")
+          b=base64.b64decode((p/"update.base64").read_text(),validate=True)
+          assert b==(p/"CaseNumberOCR_Update.zip").read_bytes()
+          assert hashlib.sha256(b).hexdigest()==(p/"SHA256.txt").read_text().strip()
+          with zipfile.ZipFile(io.BytesIO(b)) as z:
+              assert z.testzip() is None and set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for name in z.namelist():compile(z.read(name),name,"exec")
+              source=z.read("case_number_ocr.py").decode()
+          assert source==(Path("development")/"v5.2.8_case_number_ocr.py").read_text()
+          assert 'self.app_version = "5.2.8"' in source
+          assert "manual_override_locked" in source
+          assert "HF_HUB_OFFLINE" in source
+          print("PASS release 5.2.8",len(b))
+          PY
+      - name: Stage verified application source and release assets
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt development/v5.2.8_case_number_ocr.py
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage V5.2.8 manual-only update offline private OCR"
+          git push origin HEAD:publish/v5.2.8-manual-update-offline
