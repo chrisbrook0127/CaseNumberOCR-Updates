@@ -387,7 +387,7 @@ swap('''                        text=f"Selected OCR reading {number}. Its red OC
                               "You can redraw the training crop if needed."))''')
 # Fix stale in-app instructions. They previously told users that updates and
 # shared logs happened automatically, which is no longer true or acceptable.
-instructions_start=s.index('        text.insert("1.0",\\n            "M.F. CASE NUMBER OCR — HOW TO USE')
+instructions_start=s.index('        text.insert("1.0",'+chr(10)+'            "M.F. CASE NUMBER OCR — HOW TO USE')
 instructions_end=s.index('        text.configure(state="disabled")',instructions_start)
 new_instructions='''        text.insert("1.0",
             "M.F. CASE NUMBER OCR — HOW TO USE (OFFLINE FIRST)\\n\\n"
