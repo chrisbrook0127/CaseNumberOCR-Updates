@@ -1,4 +1,5 @@
 name: Build MFCase V5.2.6 strict 08-year application
+# Recheck corrected exact source approval-year indentation
 on:
   push:
     branches: [publish/v5.2.6-strict-08-year]
