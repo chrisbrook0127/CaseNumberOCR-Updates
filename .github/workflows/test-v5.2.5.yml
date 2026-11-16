@@ -1,4 +1,5 @@
 name: Test MFCase V5.2.5 case OCR, sequence and UI
+# Verify corrected fax word-boundary suppression against actual release
 on:
   push:
     branches: [publish/v5.2.5-upper-right-case-ocr]
