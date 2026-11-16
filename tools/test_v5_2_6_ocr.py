@@ -17,7 +17,7 @@ tree=ast.parse(source)
 names={"_select_primary_case_hit","_mfcase_header_field_candidates"}
 module_nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
 assert {n.name for n in module_nodes}==names
-globals_={"re":re,"np":np}
+globals_={"re":re,"np":np,"REQUIRED_CASE_YEAR":"08"}
 exec(compile(ast.Module(body=module_nodes,type_ignores=[]),"<published OCR selectors>","exec"),globals_)
 select=globals_["_select_primary_case_hit"]
 header=globals_["_mfcase_header_field_candidates"]
