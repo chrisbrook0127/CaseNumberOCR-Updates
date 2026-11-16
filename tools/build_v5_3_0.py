@@ -365,6 +365,26 @@ s=s.replace(
     "Shared learning and centralized logs require the authorized network drive; updates require GitHub internet access. ",
     "Learning, diagnostics and OCR remain local; updates require an explicit GitHub request. ")
 
+# Review UX: selecting a red OCR box AFTER typing a corrected case number
+# previously clobbered the Entry back to its original (often incorrect) OCR
+# value. A box click selects only the crop once the human has edited the case.
+swap('''                entry.delete(0, "end")
+                entry.insert(0, number)
+                candidate_choice_var.set(number)''',
+'''                current_case=normalize_case_number(entry.get().strip())
+                already_verified=bool(r.get("manual_approved") and
+                                      not r.get("auto_labeled"))
+                manually_changed=bool(current_case and
+                                      current_case!=initial_reading)
+                if not (already_verified or manually_changed):
+                    entry.delete(0,"end")
+                    entry.insert(0,number)
+                candidate_choice_var.set(number)''')
+swap('''                        text=f"Selected OCR reading {number}. Its red OCR box is selected and the expanded green crop will teach this field location. You can draw a different box instead.")''',
+'''                        text=(f"Selected OCR box {number} for crop learning. "
+                              f"Confirmed case remains {entry.get().strip()}. "
+                              "Typing a correction has priority over OCR box selection. "
+                              "You can redraw the training crop if needed."))''')
 compile(s,"case_number_ocr.py","exec")
 tree=ast.parse(s)
 assert 'self.app_version = "5.3.0"' in s
