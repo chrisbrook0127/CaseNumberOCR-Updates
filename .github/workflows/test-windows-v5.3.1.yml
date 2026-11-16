@@ -1,0 +1,17 @@
+name: Verify MFCase V5.3.1 Windows updater and evidence preservation
+on:
+  push:
+    branches: [publish/v5.2.8-manual-offline-private]
+    paths: [.github/workflows/test-windows-v5.3.1.yml]
+permissions: {contents: read}
+jobs:
+  windows-updater:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test real in-place updater, ZIP controls and preserved learning
+        shell: pwsh
+        run: python tools/test_update_windows_v531.py
