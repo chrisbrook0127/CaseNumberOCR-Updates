@@ -1,0 +1,41 @@
+name: Build verified MFCase V5.3.1 offline by default
+on:
+  push:
+    branches: [publish/v5.2.8-manual-offline-private]
+    paths: [.github/workflows/build-v5.3.1.yml]
+permissions: {contents: write}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exact V5.3.1 from SHA-pinned published V5.3.0
+        run: python3 tools/build_v5_3_1.py
+      - name: Validate source, bundle and checksum
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile,hashlib,base64,io
+          p=Path("release-assets")
+          raw=base64.b64decode((p/"update.base64").read_text(),validate=True)
+          assert (p/"CaseNumberOCR_Update.zip").read_bytes()==raw
+          assert hashlib.sha256(raw).hexdigest()==(p/"SHA256.txt").read_text().strip()
+          assert (p/"RELEASE_TAG.txt").read_text().strip()=="v5.3.1"
+          with zipfile.ZipFile(io.BytesIO(raw)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={"case_number_ocr.py","updater_apply.py"}
+              for n in z.namelist():compile(z.read(n),n,"exec")
+              s=z.read("case_number_ocr.py").decode()
+              assert s==Path("development/v5.3.1_case_number_ocr.py").read_text()
+              assert 'self.app_version = "5.3.1"' in s
+              assert 'os.environ["HF_HUB_OFFLINE"]="1"' in s
+          print("PASS 5.3.1 source, ZIP and verified SHA")
+          PY
+      - name: Stage exact built release and source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-assets/update.base64 release-assets/CaseNumberOCR_Update.zip release-assets/SHA256.txt release-assets/RELEASE_TAG.txt release-assets/PUBLISH_REQUEST.txt development/v5.3.1_case_number_ocr.py
+          git diff --cached --quiet && exit 1
+          git commit -m "Stage MFCase 5.3.1 offline-by-default and manual review protection"
+          git push origin HEAD:publish/v5.2.8-manual-offline-private
