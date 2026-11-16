@@ -1,0 +1,17 @@
+name: Test MFCase V5.2.5 in-place GitHub updater on Windows
+on:
+  push:
+    branches: [publish/v5.2.5-upper-right-case-ocr]
+    paths: [.github/workflows/test-windows-v5.2.5.yml]
+permissions: {contents: read}
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply real V5.2.5 release, validate case-data preservation and reject unsafe ZIP
+        shell: pwsh
+        run: python tools/test_update_windows_v525.py
