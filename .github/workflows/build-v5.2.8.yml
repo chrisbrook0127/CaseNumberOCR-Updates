@@ -1,5 +1,5 @@
 name: Build MFCase V5.2.8 offline privacy release
-# Make all OCR library model loads strictly offline
+# Fix manual-input override using Tk StringVar trace
 on:
   push:
     branches: [publish/v5.2.8-manual-update-offline]
