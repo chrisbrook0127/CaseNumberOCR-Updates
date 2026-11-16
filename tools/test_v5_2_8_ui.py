@@ -145,6 +145,16 @@ with tempfile.TemporaryDirectory(prefix="MFCase 5.2.8 real GUI ") as tmp:
     win=find_review()
     entry=find_text_entry(win,"08-44")
     entry.delete(0,"end");entry.insert(0,"08-45")
+    entry.event_generate("<KeyRelease>",keysym="5")
+    # Delayed red-box/combobox events must NOT revert a manually typed case.
+    dropdowns=[w for w in descend(win) if isinstance(w,ttk.Combobox)
+               and "08-15" in list(w.cget("values"))]
+    assert dropdowns, "Expected OCR box selector"
+    dropdowns[0].set("08-15")
+    dropdowns[0].event_generate("<<ComboboxSelected>>")
+    root.update_idletasks()
+    assert entry.get()=="08-45",entry.get()
+    print("PASS: selecting old OCR box after manual typing cannot overwrite 08-45")
     click_save_review(win)
     assert rec["confirmed"]=="08-45" and app.tree.set(iid,"candidate")=="08-45"
     assert rec["learning_pending"] is False
