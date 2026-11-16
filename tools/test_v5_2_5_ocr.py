@@ -73,7 +73,7 @@ class Harness(globals_["HarnessMethods"]):
     def _log(self,*args):pass
     def _trocr_read_scored(self,img):
         self.trocr_calls+=1
-        return "08-15",100.0
+        return "08-44",96.0
 
 h=Harness()
 filtered=h._prefer_case_margin(items,"fallback",np.full(shape,255,np.uint8))
