@@ -432,9 +432,7 @@ swap('''                return ("",(index,image,"3x3 case read rejected",None,[]
 '''                return ("",(index,image,
                          f"{_search_inches}x{_search_inches} case read rejected",None,[]),
                          "No valid 08- case after 3x3 and 5x5 passes — MANUAL REVIEW",''')
-swap('''                  scan_region_inches=[3,3],''',
-'''                  scan_region_inches=[3,3],
-                  fallback_region_inches=[5,5],''')
+# The diagnostic event records every actual 5x5 retry separately.
 compile(s,"case_number_ocr.py","exec")
 tree=ast.parse(s)
 assert 'self.app_version = "5.3.0"' in s
