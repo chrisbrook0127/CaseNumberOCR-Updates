@@ -371,6 +371,44 @@ swap('''                "manual_override_locked": bool(old.get("manual_override_
                      (old.get("manual_approved") and not old.get("auto_labeled")
                       and old.get("confirmed"))),''')
 
+# Protect manually typed values on EVERY Entry write, including keyboard,
+# mouse paste, accessibility tools and programmatic inserts. KeyRelease alone
+# is insufficient on Tk for paste/IME events or synthetic/manual edits.
+swap('''        entry = ttk.Entry(controls, font=("Segoe UI", 14))
+        entry.grid(row=label_row + 1, column=0, sticky="ew", pady=(5, 4))
+        entry.insert(0, initial_reading)
+        manual_entry_changed={"value":False}
+        def mark_manual_entry(_event=None):
+            manual_entry_changed["value"]=True
+        entry.bind("<KeyRelease>",mark_manual_entry,add="+")
+        entry.bind("<<Paste>>",mark_manual_entry,add="+")''',
+'''        entry_var=tk.StringVar(value=initial_reading)
+        entry = ttk.Entry(controls, font=("Segoe UI", 14),
+                          textvariable=entry_var)
+        entry.grid(row=label_row + 1, column=0, sticky="ew", pady=(5, 4))
+        manual_entry_changed={"value":False,"programmatic":False}
+        def mark_manual_entry(*_):
+            if not manual_entry_changed["programmatic"]:
+                manual_entry_changed["value"]=True
+        entry_var.trace_add("write",mark_manual_entry)
+        def fill_from_ocr(value):
+            if manual_entry_changed["value"]:
+                return
+            manual_entry_changed["programmatic"]=True
+            try:entry_var.set(value)
+            finally:manual_entry_changed["programmatic"]=False''')
+swap('''            if selected_value and not manual_entry_changed["value"]:
+                entry.delete(0, "end")
+                entry.insert(0, selected_value)''',
+'''            if selected_value:
+                fill_from_ocr(selected_value)''')
+swap('''                if not manual_entry_changed["value"]:
+                    entry.delete(0, "end")
+                    entry.insert(0, number)
+                else:''',
+'''                if not manual_entry_changed["value"]:
+                    fill_from_ocr(number)
+                else:''')
 compile(s,"case_number_ocr.py","exec")
 t=ast.parse(s)
 assert 'self.app_version = "5.2.8"' in s
