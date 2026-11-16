@@ -1,4 +1,5 @@
 name: Verify MFCase V5.2.8 Windows updater and local privacy files
+# Validate final manual-review edit-protection update package
 on:
   push:
     branches: [publish/v5.2.8-manual-update-offline]
