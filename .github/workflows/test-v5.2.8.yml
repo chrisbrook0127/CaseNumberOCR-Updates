@@ -1,4 +1,5 @@
 name: Test MFCase V5.2.8 offline privacy, OCR and real UI
+# Test the original auto-export guard using its diagnostic decision
 on:
   push:
     branches: [publish/v5.2.8-manual-update-offline]
