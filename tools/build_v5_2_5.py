@@ -145,11 +145,10 @@ patch('''            for _bbox, raw_text, _raw_score, (bx0, by0, bx1, by1) in pa
 # 4. A localized right-margin crop gets its OWN OCR pass. The chosen
 #    number still must be inside the original 3x3 region; this only improves
 #    recognition of small handwritten case numbers and their trailing digits.
-patch('''                    self._diag_event("candidate_pass",page=page_index+1,
-                          source="unlabeled_3x3",all_hits=self._diag_hits(hits),
-                          region_hits=self._diag_hits(inside))''',
-'''                    # Focus on the actual margin, not the neighboring fax
-                    # header. It is a subset of the same 3"x3" OCR region.
+patch('''                    if inside:
+                        upper=_mfcase_header_field_candidates(inside,image.shape)''',
+'''                    # Focus on rightmost handwriting. This is a subset of
+                    # the existing 3x3 OCR region, never a full-page read.
                     margin_x=int(round(crop_width*.55))
                     margin_h=min(side,int(round(1.5*72*2.2)))
                     margin_crop=region[:margin_h,margin_x:].copy()
@@ -172,9 +171,8 @@ patch('''                    self._diag_event("candidate_pass",page=page_index+1
                             inside=self._merge_case_hits(inside,focused_valid)
                         except Exception as exc:
                             self._log("Top-right margin OCR pass failed: %s",exc)
-                    self._diag_event("candidate_pass",page=page_index+1,
-                          source="unlabeled_3x3",all_hits=self._diag_hits(hits),
-                          region_hits=self._diag_hits(inside))''')
+                    if inside:
+                        upper=_mfcase_header_field_candidates(inside,image.shape)''')
 
 # 5. Never let a fax-header number veto a real handwritten case at the
 #    right margin. Apply this filter BEFORE candidate selection and before
