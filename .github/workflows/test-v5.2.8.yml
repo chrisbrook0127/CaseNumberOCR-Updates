@@ -1,0 +1,40 @@
+name: Test MFCase V5.2.8 offline privacy, OCR and real UI
+on:
+  push:
+    branches: [publish/v5.2.8-manual-update-offline]
+    paths: [.github/workflows/test-v5.2.8.yml]
+permissions: {contents: read}
+jobs:
+  privacy-and-ocr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install virtual UI and lightweight image libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb python3-tk
+          python -m pip install -q pillow numpy
+      - name: Verify no automatic network, private learning crop and manual update controls
+        run: xvfb-run -a python tools/test_v5_2_8_privacy.py
+      - name: Regression test mandatory 08-year, before/after and handwritten OCR rules
+        run: |
+          python tools/test_v5_2_6_year.py
+          python tools/test_v5_2_6_ocr.py
+          python tools/test_v5_2_6_range.py
+  real-gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install UI dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb python3-tk
+          python -m pip install -q pillow numpy
+      - name: Verify offline startup, manual corrections, rerender and refresh
+        run: xvfb-run -a python tools/test_v5_2_8_ui.py
