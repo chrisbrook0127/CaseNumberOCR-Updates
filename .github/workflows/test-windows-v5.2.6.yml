@@ -1,0 +1,17 @@
+name: Test MFCase V5.2.6 Windows auto-updater
+on:
+  push:
+    branches: [publish/v5.2.6-strict-08-year]
+    paths: [.github/workflows/test-windows-v5.2.6.yml]
+permissions: {contents: read}
+jobs:
+  updater:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply exact V5.2.6 release and verify case-data preservation
+        shell: pwsh
+        run: python tools/test_update_windows_v526.py
