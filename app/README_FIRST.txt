@@ -1,4 +1,4 @@
-MFCASE NUMBER OCR V5.3.5 - APPLICATION AND ONLINE DEPENDENCY INSTALLER
+MFCASE NUMBER OCR V5.3.6 - APPLICATION AND ONLINE DEPENDENCY INSTALLER
 
 Existing users: use UPDATE in the app. Existing OCR model files are reused.
 This ZIP contains application code, launchers and dependency setup. It does
@@ -26,10 +26,15 @@ categorized handwritten. Existing examples, crops and checkpoints are not
 migrated or recategorized. Inline corrections append new examples instead of
 relabeling historical ones. UPDATE LEARNING remains a separate manual action.
 
-See CHANGELOG_V5_3_5.txt for validation and limitations.
+See CHANGELOG_V5_3_6.txt for validation and limitations.
 
 BEFORE/AFTER reruns the final check after scanning. Only independently auto-
 confirmed or manually confirmed files anchor. Matching anchors override a
-conflicting middle entry, including manual entries. Multiple conflicts require
+conflicting middle entry, including manual entries. Two or more middle files can be corrected. Competing boundary answers require
 review. Inferred results cannot anchor further corrections. Search starts in
 the upper-right 3x3 and expands to 5x5 only if no valid 08- candidate is found.
+
+Correcting a misread label retains its original number box for the NEW learning
+example. Drawn fields are trimmed after the caption when detectable. Saving an
+example does not retrain the model: press UPDATE LEARNING when enough examples
+are ready. Missing crops report learning failure rather than successful saving.

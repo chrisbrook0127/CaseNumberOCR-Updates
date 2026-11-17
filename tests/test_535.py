@@ -32,9 +32,9 @@ class AdjustableRules(unittest.TestCase):
         a = self.sequence(['08-1111',None,'08-1111'], **{'0':{'candidate':'08-111','auto_labeled':False}})
         self.assertEqual(a.records['1']['confirmed'],'08-1111')
 
-    def test_multiple_manual_conflicts_require_review(self):
+    def test_matching_boundaries_correct_multiple_manual_middle_entries(self):
         a = self.sequence(['08-1111','08-111','08-112','08-1111'], **{'1':{'auto_labeled':False},'2':{'auto_labeled':False}})
-        self.assertTrue(all(a.records[i]['sequence_conflict'] for i in ('1','2')))
+        self.assertTrue(all(a.records[i]['confirmed']=='08-1111' for i in ('1','2')))
 
     def test_button_blocks_busy_and_unfinished_scan(self):
         a = self.app();a.folder=Path('/synthetic');a.records={'x':{}}

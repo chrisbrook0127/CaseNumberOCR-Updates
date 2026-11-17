@@ -1,0 +1,15 @@
+MFCase 5.3.6
+- Matching independently confirmed before/after anchors can now correct two or
+  more middle files, including multiple erroneous or ambiguous OCR readings.
+- Competing overlapping boundary answers still require review. Inferred values
+  cannot anchor. Unconfirmed boundary readings must be confirmed first.
+- New manual learning corrections retain the misread number's original OCR box
+  when no candidate matches the corrected label. User-drawn rectangles still
+  take priority, with field captions trimmed when detectable.
+- Missing learning crops now report failure. SAVE REVIEW explicitly says an
+  example was saved and UPDATE LEARNING is needed to train the model.
+- Existing examples, crops, categories and checkpoints remain untouched.
+  Threshold slider, 08- filtering, search order, training loop and minimums unchanged.
+Validation: 65 automated regression tests. Native Windows UI and the user's
+trained-model accuracy cannot be tested here. This does not guarantee 84 will
+always be recognized correctly; OCR confidence is not verified accuracy.

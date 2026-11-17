@@ -73,14 +73,14 @@ class Rules(unittest.TestCase):
         self.assertEqual(a.records['1']['confirmed'],'08-101')
         self.assertTrue(a.records['1']['sequence_inferred'])
         self.assertEqual(a.records['1']['sequence_original_candidate'],'08-111')
-    def test_multiple_same_wrong_reads_require_review(self):
+    def test_multiple_same_wrong_reads_corrected(self):
         a=self.sequence(['08-101','08-111','08-111','08-101'])
         for i in ('1','2'):
-            self.assertEqual(a.records[i]['confirmed'],'')
-            self.assertTrue(a.records[i]['sequence_conflict'])
-    def test_multiple_different_wrong_reads_require_review(self):
+            self.assertEqual(a.records[i]['confirmed'],'08-101')
+            self.assertTrue(a.records[i]['sequence_inferred'])
+    def test_multiple_different_wrong_reads_corrected(self):
         a=self.sequence(['08-101','08-111','08-112','08-101'])
-        self.assertTrue(all(a.records[i]['sequence_conflict'] for i in ('1','2')))
+        self.assertTrue(all(a.records[i]['confirmed']=='08-101' for i in ('1','2')))
     def test_alternating_conflicts_do_not_cascade(self):
         a=self.sequence(['08-101','08-111','08-101','08-111','08-101'])
         for i in ('1','2','3'):

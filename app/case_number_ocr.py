@@ -156,7 +156,7 @@ def _mfcase_export_case_name(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.3.5")
+        root.title("M.F. Case Number OCR — V5.3.6")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -230,7 +230,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.3.5"
+        self.app_version = "5.3.6"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -469,7 +469,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.5",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.6",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -706,7 +706,7 @@ class App:
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.3.5",
+        ttk.Label(self.settings_tab,text="Application version: V5.3.6",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
                   text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
@@ -1335,7 +1335,7 @@ class App:
             "SAVE REVIEW retains the corrected file in the root folder.\n\n"
             "4. Either engine must meet the selected threshold (default 95%, minimum 75%) for a valid 08- case. "
             "After scanning, matching before/after cases correct a single conflicting OCR read, "
-            "even over a manual middle entry; multiple conflicts require review. Only independently confirmed files anchor. "
+            "even over a manual middle entry; competing boundary answers require review. Only independently confirmed files anchor. "
             "Auto-approved and manually reviewed PDFs remain visible "
             "and editable in SCAN. Nothing is moved until you click "
             "EXPORT COMPLETED. All approved files export, regardless of selection; review files remain.\n\n"
@@ -2414,12 +2414,21 @@ class App:
         selected_candidate = next((c for c in candidates
                                    if str(c.get("number") or "").strip() == str(confirmed_number)
                                    and c.get("rect")), None)
+        if record.get("manual_crop_origin") == "drawn":
+            selected_candidate = None  # User's rectangle takes priority.
+        elif selected_candidate is None:
+            # A corrected label still belongs to the original number's image box.
+            # Never select an unrelated candidate solely because it has a rectangle.
+            selected_candidate = next((c for c in candidates
+                if normalize_case_number(c.get("number") or "") ==
+                   normalize_case_number(record.get("candidate") or "")
+                and c.get("rect")), None)
         if (record.get("manual_crop_rect") and field_rect and
                 (record.get("manual_crop_origin")=="drawn" or not selected_candidate)):
             training_rect=tuple(field_rect)
         elif selected_candidate:
             training_rect=selected_candidate.get("rect")
-        elif field_rect:
+        if field_rect and not selected_candidate:
             # If the reviewer drew around the label plus the number, locate the
             # label inside the selected field and trim it from the character crop.
             # Keep field_rect intact below for spatial learning.
@@ -2446,7 +2455,7 @@ class App:
                                 break
                 except Exception as exc:
                     self._log("Could not trim case-field label from training crop: %s", exc)
-        else:
+        elif not training_rect:
             training_rect = snippet[3] if snippet else None
         crop_origin=("manual-field" if record.get("manual_crop_rect") and
                      (record.get("manual_crop_origin")=="drawn" or not selected_candidate)
@@ -2475,6 +2484,9 @@ class App:
             crop_path = examples_dir / f"{stamp}.png"
             crop.save(crop_path)
             image_rel = f"examples_v3/{training_type}/{stamp}.png"
+
+        if not image_rel:
+            raise ValueError("No usable learning crop was saved. Draw a box around the complete case number and save again.")
 
         candidate = str(record.get("candidate") or "").strip()
         # Remember where the reviewer selected/drew the field inside the same
@@ -2787,23 +2799,20 @@ class App:
             # Confirmed matching boundaries take priority over middle readings.
             if any(excluded(order[j][1]) for j in middle):
                 continue
-            conflicts=[j for j in middle if
-                       (original(order[j][1]) and key(original(order[j][1]))!=k)
-                       or order[j][1].get("scan_ambiguous")]
-            ranges.append((left,pos,case,middle,len(conflicts)>1))
+            ranges.append((left,pos,case,middle))
+        # The number of bad middle reads is not a conflict between boundaries.
+        covered={pos for _,_,_,middle in ranges for pos in middle}
         blocked=set()
         for pos in range(1,len(order)-1):
             left,right=anchors[pos-1],anchors[pos+1]
             current=order[pos][1].get("candidate")
-            if (left and right and key(left)!=key(right) and current
+            if (pos not in covered and left and right and key(left)!=key(right) and current
                     and key(current) not in (key(left),key(right))):
                 blocked.add(pos)  # Two different surrounding answers: no winner.
         # Alternating cases can generate competing sandwiches. Neither may
         # rewrite an anchor used by the other; send their interiors to review.
-        for i,(a,b,case,middle,multiple) in enumerate(ranges):
-            if multiple:
-                blocked.update(middle)
-            for c,d,other,other_middle,_ in ranges[i+1:]:
+        for i,(a,b,case,middle) in enumerate(ranges):
+            for c,d,other,other_middle in ranges[i+1:]:
                 if key(case)!=key(other) and max(a,c)<min(b,d):
                     blocked.update(middle)
                     blocked.update(other_middle)
@@ -2820,8 +2829,8 @@ class App:
             r["completed_iid"]=None
             self._insert_scan_row(iid,r)
             changed+=1
-        for left,right,case,middle,multiple in ranges:
-            if multiple or any(j in blocked for j in middle):
+        for left,right,case,middle in ranges:
+            if any(j in blocked for j in middle):
                 continue
             for pos in middle:
                 iid,r=order[pos]
@@ -6120,7 +6129,7 @@ class App:
                 r["status"]=(f"Manual case {value} SAVED — learning pending; "
                              "awaiting EXPORT COMPLETED")
             else:
-                r["status"]=(f"Manual case {value} SAVED and learning updated — "
+                r["status"]=(f"Manual case {value} SAVED; example saved (UPDATE LEARNING to train) — "
                              "awaiting EXPORT COMPLETED")
             self._diag_event("manual_case_confirmation",
                 file=Path(r["path"]).name,ocr_candidate=original_ocr,
