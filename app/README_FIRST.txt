@@ -1,29 +1,28 @@
-MFCASE NUMBER OCR V5.3.3 - FULL ONLINE INSTALL PACKAGE
+MFCASE NUMBER OCR V5.3.4 - APPLICATION AND ONLINE DEPENDENCY INSTALLER
 
-Existing users: press UPDATE in the application to install the published update.
-Use this full package for a fresh installation or a reference copy.
+Existing users: use UPDATE in the app. Existing OCR model files are reused.
+This ZIP contains application code, launchers and dependency setup. It does
+not contain Python, third-party packages, OCR weights or learning examples.
+The PREPARE OFFLINE MODELS button has been removed. A fresh installation
+requires previously installed/restored local OCR model files before scanning.
 
-INSTALL
-1. Extract ALL files to a permanent local application folder, separate from case documents.
-2. Run SETUP.bat to install Python and required packages (internet required).
-3. Start with the desktop shortcut or RUN_CASE_OCR.bat.
-4. On a new computer, click PREPARE OFFLINE MODELS while connected.
-5. Select your existing document root. Old human corrections remain saved;
-   previous automatic approvals need rescanning under the new rules.
+INSTALL/RESTORE
+1. Extract all files to a permanent local application folder, separate from PDFs.
+2. Run SETUP.bat only if Python or dependencies need installation (internet needed).
+3. Keep your existing local OCR model files and learning directory in place.
+4. Launch RUN_CASE_OCR.bat or the desktop shortcut and select your document root.
 
-Python, dependencies and model weights are downloaded, not embedded in this ZIP.
-Normal scanning and learning operate offline after setup. Department shares
-still require access to the department network. UPDATE and UPDATE LEARNING
-remain separate manual buttons. Documents wait for EXPORT COMPLETED.
+SCAN has a bottom count: ## files displayed.
+Double-click the case-number cell to edit. Enter or clicking away saves a valid
+change and marks the file COMPLETED. Esc cancels. EXPORT COMPLETED moves all
+approved files after the scan's final before/after check; review files remain.
+Leading zeros are preserved. Cases use 08- followed by one to seven digits.
+The recognition path applies to that entire range, including thousands.
 
-EDIT: Double-click a case-number cell; Enter saves, Esc cancels.
-Double-click the filename to open document review.
+Either engine at 100% passes the confidence gate; location, ambiguity, required
+08- format and final before/after safeguards remain. All NEW saved examples are
+categorized handwritten. Existing examples, crops and checkpoints are not
+migrated or recategorized. Inline corrections append new examples instead of
+relabeling historical ones. UPDATE LEARNING remains a separate manual action.
 
-APPROVAL: Both engines must read the same full 08- number above 75%, with
-at least one above 95%. The final before/after pass can correct a single
-conflicting OCR result, including 100% reads. Multiple conflicts need review.
-Manual corrections are protected. No handwriting/printed selection is needed.
-
-See CHANGELOG_V5_3_3.txt for detailed behavior and validation limits.
-
-EXPORT COMPLETED moves all approved files, regardless of selection, leaving review files in the root. Leading zeros are retained exactly (08-01114 stays 08-01114). Export waits for the final before/after pass after scanning.
+See CHANGELOG_V5_3_4.txt for validation and limitations.

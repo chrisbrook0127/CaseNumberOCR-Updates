@@ -156,7 +156,7 @@ def _mfcase_export_case_name(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.3.3")
+        root.title("M.F. Case Number OCR — V5.3.4")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -230,7 +230,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.3.3"
+        self.app_version = "5.3.4"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -469,7 +469,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.3",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.4",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -486,10 +486,6 @@ class App:
             header, text="UPDATE LEARNING", command=self._finish_import_batch, state="disabled")
         self.update_btn.pack(side="right", padx=(8, 0), ipadx=12, ipady=6)
         self.finish_batch_btn.pack(side="right", padx=(8, 0), ipadx=10, ipady=6)
-        self.prepare_offline_btn=ttk.Button(
-            header,text="PREPARE OFFLINE MODELS",
-            command=self._prepare_offline_models)
-        self.prepare_offline_btn.pack(side="right",padx=(8,0),ipadx=8,ipady=6)
         self.settings_nav_btn=tk.Button(
             header,text="SETTINGS",command=lambda:self._show_main_view("settings"),
             bg="#1456a8",fg="white",activebackground="#0d4388",
@@ -564,6 +560,9 @@ class App:
         self.progress.pack(side="left",fill="x",expand=True)
         self.scan_progress_pct=ttk.Label(scan_progress_row,text="0%",width=6,anchor="e")
         self.scan_progress_pct.pack(side="right",padx=(10,0))
+        self.scan_displayed_count_label=ttk.Label(self.review_tab,text="0 files displayed")
+        self.scan_displayed_count_label.pack(side="bottom",anchor="w",pady=(4,2))
+
         pane = ttk.Frame(self.review_tab)
         pane.pack(fill="both", expand=True)
         self._scan_preview_photos={}
@@ -697,10 +696,10 @@ class App:
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.3.3",
+        ttk.Label(self.settings_tab,text="Application version: V5.3.4",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
-                  text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request; PREPARE OFFLINE MODELS downloads public model files only when clicked. Selecting a network PDF folder still uses that network share.",
+                  text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
                   wraplength=900,justify="left").pack(anchor="w",pady=9)
         self.connection_status_label=ttk.Label(
             self.settings_tab,text="Connection status not checked",
@@ -998,6 +997,9 @@ class App:
             visible = set(tree.get_children(""))
             checked = len(visible & self.scan_checked_iids)
             label.config(text=f"{checked:,} of {len(visible):,} selected")
+            footer=getattr(self,"scan_displayed_count_label",None)
+            if footer is not None:
+                footer.config(text=f"{len(visible):,} files displayed")
             self._refresh_scan_checkbox_heading()
         except (tk.TclError, AttributeError):
             pass
@@ -1175,6 +1177,7 @@ class App:
                              for x in self.records))
             btn.config(state="normal" if allowed else "disabled")
         self._schedule_scan_preview_refresh()
+        self._update_scan_file_count()
 
     def export_completed(self):
         """Export every approved unsent record; review rows are left in place."""
@@ -1265,24 +1268,39 @@ class App:
         self._scan_case_editor=editor
         editor.insert(0,record.get("confirmed") or record.get("candidate") or "08-")
         editor.place(x=bounds[0],y=bounds[1],width=max(bounds[2],100),height=bounds[3])
+        initial_value=editor.get()
+        editing={"saving":False,"closed":False}
         def close():
+            editing["closed"]=True
             self._scan_case_editor=None
+            self._scan_case_commit=None
             editor.destroy()
-        def save(_event=None):
+        def save(event=None):
+            if editing["saving"] or editing["closed"]:
+                return "break"
+            focus_out=event is not None and str(getattr(event,"type","")) in ("10","FocusOut")
+            if focus_out and editor.get()==initial_value:
+                close()  # Opening a cell alone does not approve a machine guess.
+                return "break"
             value=normalize_case_number(editor.get())
             if not CASE_RE.fullmatch(value):
-                self.status.config(text="Enter 08- followed by 1–7 digits. Enter saves; Esc cancels.")
-                editor.focus_set()
+                self.status.config(text="Enter 08- followed by 1–7 digits. Invalid edits cannot complete a file.")
                 return "break"
-            if self._save_completed_case_edit(iid,editor) is False:
-                return "break"
-            close()
+            editing["saving"]=True
+            try:
+                if self._save_completed_case_edit(iid,editor) is False:
+                    return "break"
+                close()
+            finally:
+                editing["saving"]=False
             return "break"
+        self._scan_case_commit=save
         editor.bind("<Return>",save)
+        editor.bind("<FocusOut>",save)
         editor.bind("<Escape>",lambda _event:(close(),"break")[1])
         editor.focus_set()
         editor.selection_range(0,"end")
-        self.status.config(text="Edit case number: Enter saves, Esc cancels. Double-click the filename to open review.")
+        self.status.config(text="Edit case number: Enter or clicking away saves and completes it; Esc cancels.")
 
     def _open_instructions(self):
         win=tk.Toplevel(self.root)
@@ -1301,11 +1319,11 @@ class App:
             "It first examines the top-right 3 by 3 inches. Only if no "
             "valid 08- candidate exists does it retry the top-right "
             "5 by 5 inches. Other years are ignored completely.\n\n"
-            "3. Double-click a case-number cell to edit; Enter saves and Esc cancels. "
+            "3. Double-click a case-number cell to edit; Enter or clicking away saves and completes it. Esc cancels. "
             "Double-click the filename to open review. REVIEW SELECTED opens an editable case entry and crop selection. "
             "The typed correction overrides an OCR crop selection. "
             "SAVE REVIEW retains the corrected file in the root folder.\n\n"
-            "4. Both engines must agree above 75%, with at least one above 95%. "
+            "4. Either engine must report 100% for a valid 08- case. "
             "After scanning, matching before/after cases correct a single conflicting OCR read, "
             "even at 100%; multiple conflicts require review. Manual corrections are protected. "
             "Auto-approved and manually reviewed PDFs remain visible "
@@ -1317,9 +1335,8 @@ class App:
             "6. OFFLINE: installed OCR models, learning examples and diagnostic "
             "logs remain on this computer. Once models are installed, "
             "scanning needs no internet or shared-drive access.\n\n"
-            "7. PREPARE OFFLINE MODELS is an optional explicit download of "
-            "public EasyOCR and TrOCR model files. It does not upload "
-            "PDFs, crops, learning or case numbers. It may need over 1 GB.\n\n"
+            "7. Installed model files are reused locally; there is no model-download button. "
+            "Updates do not remove existing learning or checkpoints.\n\n"
             "8. EXPORT WORK LOG saves a local ZIP when you select a destination. "
             "Never place identifiable case logs in the public GitHub repository. "
             "The app does not automatically upload or share diagnostics.\n")
@@ -1729,7 +1746,7 @@ class App:
                  scan_folder=str(self.folder),
                  year_prefix=self.scan_year_prefix,
                  scan_region_inches=[3,3],
-                 both_engine_min_exclusive=75.0,one_engine_min_exclusive=95.0,
+                 either_engine_min_inclusive=100.0,
                  auto_label_enabled=bool(self.auto_label_var.get()),
                  application_version=self.app_version)
             # Keep a bounded history on the workstation (not on the shared share).
@@ -2357,8 +2374,8 @@ class App:
                      f" • {trained} training samples{detail}")
 
     def _get_auto_threshold(self):
-        """Preliminary maximum-score filter; exact dual-engine gate is separate."""
-        return 95.0
+        """Either engine must report 100%; other approval safeguards still apply."""
+        return 100.0
 
     def _save_learning_example(self, record, confirmed_number):
         confirmed_number=normalize_case_number(confirmed_number)
@@ -2367,7 +2384,7 @@ class App:
         if not self.learning_dir:
             raise OSError("The centralized learning share is unavailable; reconnect to the network before saving learning examples.")
         # Prefer the rectangle drawn by the reviewer; otherwise use the OCR rectangle.
-        training_type = self._normalized_training_type(record.get("training_type", "unsure"))
+        training_type = "handwritten"  # New examples only; retain all existing categories/data.
         examples_dir = self.learning_dir / "examples_v3" / training_type
         examples_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -2576,13 +2593,13 @@ class App:
         year = getattr(self, "scan_year_prefix", "") or (
             self.year_var.get().strip()[-2:] if hasattr(self, "year_var") else "08")
         if self.auto_label_var.get():
-            message = "Auto-confirm ON: same 08- case from both engines above 75%, at least one above 95%; final before/after check."
+            message = "Auto-confirm ON: valid 08- case with either engine at 100%; final before/after check."
         else:
             message = "Auto-confirm OFF: manual review required."
         label.config(text=message)
 
     def _auto_label_block_reason(self, score, engine_agreement, candidate, engine_scores=None):
-        """Require both engines above 75 and at least one above 95 on the same case."""
+        """Require a valid 08- case and a 100% reading from either engine."""
         if not self.auto_label_var.get():
             return "Auto-confirm is turned off."
         normalized = normalize_case_number(candidate)
@@ -2595,13 +2612,9 @@ class App:
             observed_score = float(score or 0.0)
         except Exception:
             observed_score = 0.0
-        scores=engine_scores or {}
-        easy=float(scores.get("EasyOCR",0))
-        trocr=float(scores.get("TrOCR",0))
-        if not engine_agreement or min(easy,trocr)<=75.0:
-            return "Both engines must read the same full case number above 75%."
-        if max(easy,trocr)<=95.0:
-            return "At least one engine must be above 95%."
+        # score is this candidate's maximum OCR confidence across engines.
+        if not math.isfinite(observed_score) or observed_score < self._get_auto_threshold():
+            return "At least one OCR engine must report 100%."
         return None
 
     def _auto_label_is_calibrated(self, score, engine_agreement, candidate, distinct_count=1):
@@ -2610,7 +2623,7 @@ class App:
     def _sequence_case_number(self, record):
         """Return an independent anchored OCR case for sequence comparison.
 
-        Only qualifying dual-engine localized reads can anchor.
+        Only qualifying 100% localized reads can anchor.
         Manual approvals can anchor. An inferred value cannot anchor.
         """
         if (not record or record.get("sequence_inferred") or
@@ -2923,7 +2936,8 @@ class App:
             "require over 1 GB of disk space. Continue?"):
             return
         self._offline_prepare_busy=True
-        self.prepare_offline_btn.config(state="disabled",text="DOWNLOADING MODELS…")
+        if getattr(self,"prepare_offline_btn",None) is not None:
+            self.prepare_offline_btn.config(state="disabled",text="DOWNLOADING MODELS…")
         self.status.config(text="Downloading public OCR models by explicit request; "
                                 "no case files are transmitted.")
         threading.Thread(target=self._prepare_offline_models_worker,
@@ -3016,7 +3030,7 @@ class App:
         if getattr(self, "_startup_retry_btn", None) is not None:
             self._startup_retry_btn.config(state="normal")
         self.status.config(text="OFFLINE MODELS NOT READY — "+reason+
-                            ". Click PREPARE OFFLINE MODELS once while online.")
+                            ". Restore the existing installed OCR model files, then click RETRY STARTUP.")
         self._log("Startup blocked: %s", reason)
 
     def _load_trocr(self):
@@ -4670,8 +4684,8 @@ class App:
                         messagebox.showerror("Folder load failed", detail)
                 elif kind == "offline_models_ready":
                     self._offline_prepare_busy=False
-                    self.prepare_offline_btn.config(state="normal",
-                                                    text="PREPARE OFFLINE MODELS")
+                    if getattr(self,"prepare_offline_btn",None) is not None:
+                        self.prepare_offline_btn.config(state="normal")
                     self.reader=None
                     self.trocr_model=None
                     self.trocr_processor=None
@@ -4681,8 +4695,8 @@ class App:
                     self._begin_model_preload()
                 elif kind == "offline_models_error":
                     self._offline_prepare_busy=False
-                    self.prepare_offline_btn.config(state="normal",
-                                                    text="PREPARE OFFLINE MODELS")
+                    if getattr(self,"prepare_offline_btn",None) is not None:
+                        self.prepare_offline_btn.config(state="normal")
                     self.status.config(text="Model preparation failed: "+str(msg[1]))
                     messagebox.showerror("Offline models",
                         "Could not prepare all models; nothing was uploaded. "
@@ -4852,11 +4866,11 @@ class App:
                     elif r["scan_ambiguous"]:
                         r["status"]=note+" — conflicting case-field reads; manual review"
                     elif labeled or positioned_header:
-                        r["status"]=(f"{score:.1f}% case-field OCR; two-engine thresholds not met "
+                        r["status"]=(f"{score:.1f}% case-field OCR; 100% OCR threshold not met "
                                       "or auto-confirm disabled — manual review")
                     elif r["scan_source"]=="fallback":
                         r["status"]=(f"{float(score or 0):.1f}% 3x3 fallback — "
-                            "requires a localized matching read from both engines above 75%, one above 95%, "
+                            "requires a localized matching read from either engine at 100%, "
                             "and auto-confirm enabled; otherwise MANUAL REVIEW")
                     # A fallback at 100% with one localized case can auto-send;
                     # unlocated guesses and conflicting year-matched cases cannot.
@@ -5216,7 +5230,7 @@ class App:
         record["sequence_excluded"] = False
         record["sequence_anchors"] = []
         try:
-            self._save_learning_label_for_file(record["path"].name,value)
+            self._save_learning_example(record,value)  # Append a new example; do not relabel historical examples.
             record["learning_pending"]=False
         except Exception as exc:
             record["learning_pending"]=True
@@ -5226,6 +5240,7 @@ class App:
         self.completed_edit_drafts.pop(iid, None)
         self._close_completed_edit(iid)
         self._insert_completed_row(iid, record)
+        record["completed_iid"]=iid
         saved=self._save_state()
         self._update_completed_count()
         if not saved:
@@ -5835,7 +5850,7 @@ class App:
         elif r.get("auto_labeled") and r.get("manual_approved"):
             source=r.get("scan_source")
             if source=="fallback":
-                queue_status="Two-engine localized OCR approved — ready for export"
+                queue_status="100% localized OCR approved — ready for export"
             else:
                 queue_status=f"{float(r.get('score') or 0):.1f}% OCR approved — ready for export"
         elif r.get("manual_approved"):
@@ -6601,9 +6616,13 @@ class App:
     def export(self, selected_iids=None, automatic=False):
         """Export all verified root PDFs on explicit EXPORT COMPLETED."""
         if getattr(self,"_scan_case_editor",None) is not None:
-            self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
-            self._scan_case_editor.focus_set()
-            return
+            commit=getattr(self,"_scan_case_commit",None)
+            if commit is not None:
+                commit()
+            if getattr(self,"_scan_case_editor",None) is not None:
+                self.status.config(text="Correct or cancel the unfinished case edit before exporting.")
+                self._scan_case_editor.focus_set()
+                return
         if automatic:
             self._diag_event("automatic_export_blocked",
                              reason="explicit_export_completed_required")

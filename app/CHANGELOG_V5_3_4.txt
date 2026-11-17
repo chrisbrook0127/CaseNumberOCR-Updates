@@ -1,0 +1,10 @@
+MFCase 5.3.4
+- Added a bottom SCAN count in the form "## files displayed", refreshed as rows change.
+- A valid changed inline case saves on Enter or focus loss and completes that file. Opening and leaving an unchanged cell does not approve it; invalid drafts remain unapproved; Escape cancels. Export commits valid pending inline edits first.
+- Removed the PREPARE OFFLINE MODELS button and its visible instructions. Existing installed models continue to load offline; missing model files must be restored before scanning.
+- Confirmed generic recognition/parsing/export support for 08- plus 1-7 digits, including thousands, leading zeros and seven-digit cases. No case-number lookup table or three-digit cap.
+- Incorporated the requested 100%-from-either-engine confidence rule; removed the dual-engine 75% requirement. Other approval/sequence safeguards remain.
+- All newly saved learning examples use examples_v3/handwritten and training_type handwritten, regardless of prior record category. Existing category support remains. Inline corrections append examples rather than changing old labels. No migration or deletion of historical examples, crops or checkpoints.
+- Fine-tuning loop, UPDATE LEARNING minimums, final before/after sequence rules and explicit EXPORT COMPLETED behavior remain unchanged.
+
+Validation: 52 automated regression tests, including saving a new handwritten crop while existing category examples/checkpoint bytes remain unchanged, visible counts, focus-loss completion, invalid/Escape behavior, confidence thresholds, sequence, exports, and updater rollback. A local synthetic printed crop test recovered all 12 expected values spanning 1-7 digits. This is not a guarantee of real scanned-document or handwriting accuracy. Native Windows GUI interaction was not executed here.

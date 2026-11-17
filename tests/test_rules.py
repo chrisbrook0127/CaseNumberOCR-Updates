@@ -46,16 +46,16 @@ class Rules(unittest.TestCase):
         self.assertEqual(m.normalize_case_number('08-01114'),'08-01114')
         self.assertEqual(m._mfcase_export_case_name('08-01114'),'08-01114')
         self.assertEqual(m._mfcase_export_case_name('08-101'),'08-101')
-    def test_dual_engine_boundaries(self):
+    def test_either_engine_100_percent_boundary(self):
         a=self.app()
-        for easy,trocr,allowed in [(96,76,True),(76,96,True),(100,75,False),(75,100,False),(95,95,False),(95.01,75.01,True),(100,0,False),(94,94,False)]:
+        for easy,trocr,allowed in [(96,76,False),(76,96,False),(100,75,True),(75,100,True),(95,95,False),(99.999,75.01,False),(100,0,True),(0,100,True)]:
             with self.subTest(easy=easy,trocr=trocr):
                 result=a._auto_label_block_reason(max(easy,trocr),True,'08-101',{'EasyOCR':easy,'TrOCR':trocr})
                 self.assertEqual(result is None,allowed)
     def test_disagreement_and_missing_scores(self):
         a=self.app()
-        self.assertIsNotNone(a._auto_label_block_reason(100,False,'08-101',{'EasyOCR':100,'TrOCR':100}))
-        self.assertIsNotNone(a._auto_label_block_reason(100,True,'08-101'))
+        self.assertIsNone(a._auto_label_block_reason(100,False,'08-101',{'EasyOCR':100,'TrOCR':100}))
+        self.assertIsNone(a._auto_label_block_reason(100,True,'08-101'))
     def test_auto_off(self):
         a=self.app();a.auto_label_var.get=lambda:False
         self.assertIsNotNone(a._auto_label_block_reason(100,True,'08-101',{'EasyOCR':100,'TrOCR':100}))
@@ -105,9 +105,9 @@ class Rules(unittest.TestCase):
     def test_manual_correction_can_anchor(self):
         a=self.sequence(['08-101',None,'08-101'],**{'0':{'auto_labeled':False,'score':0,'engine_scores':{}}})
         self.assertEqual(a.records['1']['confirmed'],'08-101')
-    def test_missing_second_engine_cannot_anchor(self):
+    def test_100_percent_single_engine_can_anchor(self):
         a=self.sequence(['08-101',None,'08-101'],**{'0':{'engine_scores':{'EasyOCR':100}}})
-        self.assertEqual(a.records['1']['confirmed'],'')
+        self.assertEqual(a.records['1']['confirmed'],'08-101')
     def test_unscanned_slot_blocks_inference(self):
         a=self.sequence(['08-101',None,'08-101'],**{'1':{'status':'Not scanned'}})
         self.assertEqual(a.records['1']['confirmed'],'')
@@ -143,12 +143,14 @@ class Rules(unittest.TestCase):
     def test_inline_save_preserves_manual_and_learning_label(self):
         a=self.app();a.records={'x':{'path':Path('/synthetic/001.pdf'),'confirmed':'08-111','auto_labeled':True,'manual_approved':True}}
         a._export_in_flight_iids=set();a._completed_thumbnail_path=Mock(return_value=None)
-        a._save_learning_label_for_file=Mock();a.completed_edit_drafts={};a._close_completed_edit=Mock()
+        a._save_learning_label_for_file=Mock();a._save_learning_example=Mock();a.completed_edit_drafts={};a._close_completed_edit=Mock()
         a._insert_completed_row=Mock();a.status=Mock();a.completed_send_status=Mock()
         a._save_completed_case_edit('x',SimpleNamespace(get=lambda:'08-01114'))
         self.assertEqual(a.records['x']['confirmed'],'08-01114')
         self.assertFalse(a.records['x']['auto_labeled'])
-        a._save_learning_label_for_file.assert_called_once_with('001.pdf','08-01114')
+        a._save_learning_example.assert_called_once_with(a.records['x'],'08-01114')
+        a._save_learning_label_for_file.assert_not_called()
+        self.assertEqual(a._workflow_status(a.records['x']),'COMPLETED')
         a._save_state.assert_called()
     def test_unsaved_edit_blocks_send(self):
         a=self.app();a._scan_case_editor=Mock();a.status=Mock();a.export=Mock()
