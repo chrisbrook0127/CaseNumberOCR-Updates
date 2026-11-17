@@ -42,9 +42,9 @@ class Rules(unittest.TestCase):
         self.assertEqual(m.CASE_RE.findall('08-101 INCIDENT NO.'),['08-101'])
     def test_other_year(self):
         self.assertIsNone(m.CASE_RE.fullmatch('09-101'))
-    def test_zeroes_only_removed_for_export(self):
+    def test_zeroes_preserved_for_export(self):
         self.assertEqual(m.normalize_case_number('08-01114'),'08-01114')
-        self.assertEqual(m._mfcase_export_case_name('08-01114'),'08-1114')
+        self.assertEqual(m._mfcase_export_case_name('08-01114'),'08-01114')
         self.assertEqual(m._mfcase_export_case_name('08-101'),'08-101')
     def test_dual_engine_boundaries(self):
         a=self.app()
@@ -152,7 +152,7 @@ class Rules(unittest.TestCase):
         a._save_state.assert_called()
     def test_unsaved_edit_blocks_send(self):
         a=self.app();a._scan_case_editor=Mock();a.status=Mock();a.export=Mock()
-        a._send_all_selected();a.export.assert_not_called()
+        m.App.export(a);a.export.assert_not_called()
 
     def test_two_different_neighbors_require_manual(self):
         a=self.sequence(['08-100','08-101','08-102'])
@@ -164,12 +164,14 @@ class Rules(unittest.TestCase):
         a=self.app()
         with tempfile.TemporaryDirectory() as d:
             a.folder=Path(d)
+            a._sequence_review_pending=True
             a.records={'x':{'path':a.folder/'test.pdf','confirmed':'08-01114',
                 'manual_approved':True,'auto_labeled':False,
                 'engine_scores':{'EasyOCR':100,'TrOCR':80}}}
             self.assertTrue(m.App._save_state(a))
             saved=json.loads((a.folder/'.case_ocr_state.json').read_text())['files']['test.pdf']
             self.assertEqual(saved['confirmed'],'08-01114')
+            self.assertTrue(saved['sequence_review_pending'])
             self.assertFalse(saved['auto_labeled'])
             self.assertEqual(saved['engine_scores'],{'EasyOCR':100,'TrOCR':80})
 

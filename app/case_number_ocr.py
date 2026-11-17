@@ -144,19 +144,19 @@ def _mfcase_header_field_candidates(hits,page_shape):
 
 
 def _mfcase_export_case_name(value):
-    """Remove zeros ONLY before case digits, retaining the original year."""
+    """Validate export names without removing any case-number digits."""
     original=normalize_case_number(value)
     match=re.fullmatch(r"(08)-(\d{1,7})", original)
     if not match:
         raise ValueError(f"Invalid case number for export: {value!r}")
     year,case_digits=match.groups()
-    return f"{year}-{int(case_digits)}"
+    return f"{year}-{case_digits}"
 
 
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.3.2")
+        root.title("M.F. Case Number OCR — V5.3.3")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -230,12 +230,13 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.3.2"
+        self.app_version = "5.3.3"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
         self._diag_lock=threading.RLock()
         self._startup_ready = False
+        self._sequence_review_pending = False
         self._startup_error = None
         self._learning_revision = None
         self._cached_model_dir = None
@@ -356,6 +357,8 @@ class App:
 
     def _apply_folder_load(self, year, saved, pdfs, state_error):
         """Install the folder listing onto Tk controls, preserving saved state."""
+        self._sequence_review_pending=any(
+            bool(old.get("sequence_review_pending")) for old in saved.values())
         self.year_var.set(REQUIRED_CASE_YEAR)
         for tree in (self.tree, self.completed_tree):
             for item in tree.get_children():
@@ -466,7 +469,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.2",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.3",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -544,7 +547,7 @@ class App:
         self.work_log_btn=ttk.Button(action_bar,text="EXPORT WORK LOG",command=self._diag_export)
         self.work_log_btn.pack(side="left",padx=5,ipadx=5,ipady=3)
         self.send_selected_btn=ttk.Button(
-            action_bar,text="SEND ALL SELECTED",command=self._send_all_selected,
+            action_bar,text="EXPORT COMPLETED",command=self.export_completed,
             state="disabled")
         self.send_selected_btn.pack(side="left",padx=5,ipadx=8,ipady=3)
         self.scan_file_count_label = ttk.Label(action_bar, text="0 of 0 selected")
@@ -616,17 +619,17 @@ class App:
         ttk.Label(completed_header, text="Ready for Review / Export",
                   font=("Segoe UI", 12, "bold")).pack(side="left")
         self.export_btn = ttk.Button(
-            completed_header, text="SEND ALL SELECTED", command=self.export, state="disabled")
+            completed_header, text="EXPORT COMPLETED", command=self.export, state="disabled")
         self.export_btn.pack(side="right", padx=(8, 0))
         self.completed_refresh_btn = ttk.Button(
             completed_header, text="REFRESH", command=self.refresh_completed_list)
         self.completed_refresh_btn.pack(side="right", padx=(8, 0))
         ttk.Label(
             self.completed_tab,
-            text="Enter a corrected case number in CHANGE and click Save, then SEND TO KURT. "
+            text="Enter a corrected case number in CHANGE and click Save, then EXPORT COMPLETED. "
                  "Manually approved files remain here for correction and sending. "
-                 "All approved files wait for SEND ALL SELECTED. "
-                 "Use checkboxes to send specific files; without a selection, SEND includes all approved files.",
+                 "All approved files wait for EXPORT COMPLETED. "
+                 "EXPORT COMPLETED exports every approved file; unresolved review files remain.",
             wraplength=1100).pack(anchor="w", pady=(0, 5))
         cpane = ttk.Frame(self.completed_tab)
         cpane.pack(fill="both", expand=True)
@@ -689,12 +692,12 @@ class App:
         # Transfer outcomes must be visible while the user is on COMPLETED;
         # the generic status label lives on a different tab.
         self.completed_send_status = ttk.Label(
-            self.completed_tab, text="Approved files are ready for SEND TO KURT.",
+            self.completed_tab, text="Approved files are ready for EXPORT COMPLETED.",
             wraplength=1100)
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.3.2",
+        ttk.Label(self.settings_tab,text="Application version: V5.3.3",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
                   text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request; PREPARE OFFLINE MODELS downloads public model files only when clicked. Selecting a network PDF folder still uses that network share.",
@@ -1169,27 +1172,17 @@ class App:
         if btn is not None:
             allowed=(not self.busy and not self.export_busy and not self.trocr_training
                      and any(self._eligible_for_kurt(x,self.records[x])
-                             for x in self.tree.selection() if x in self.records))
+                             for x in self.records))
             btn.config(state="normal" if allowed else "disabled")
         self._schedule_scan_preview_refresh()
 
+    def export_completed(self):
+        """Export every approved unsent record; review rows are left in place."""
+        return self.export()
+
     def _send_all_selected(self):
-        """Send only selected, approved, unsent PDFs; no misleading send-all."""
-        if getattr(self,"_scan_case_editor",None) is not None:
-            self.status.config(text="Press Enter to save the edited case, or Esc to cancel, before sending.")
-            self._scan_case_editor.focus_set()
-            return
-        if self.busy or self.trocr_training or self.export_busy:
-            self.status.config(text="Wait until scanning or training finishes before sending.")
-            return
-        chosen=[iid for iid in self.tree.selection()
-                if iid in self.records and
-                self._eligible_for_kurt(iid,self.records[iid],automatic=False)]
-        if not chosen:
-            messagebox.showinfo("Nothing approved",
-                "Select one or more COMPLETED files. REVIEW and SENT files will not be sent.")
-            return
-        self.export(selected_iids=chosen,automatic=False)
+        """Compatibility callback now follows EXPORT COMPLETED semantics."""
+        return self.export_completed()
 
     def _unified_double_click(self,event):
         """Only double-click may reopen COMPLETED / SENT; explicitly confirm."""
@@ -1317,7 +1310,7 @@ class App:
             "even at 100%; multiple conflicts require review. Manual corrections are protected. "
             "Auto-approved and manually reviewed PDFs remain visible "
             "and editable in SCAN. Nothing is moved until you click "
-            "SEND ALL SELECTED with the approved files highlighted.\n\n"
+            "EXPORT COMPLETED. All approved files export, regardless of selection; review files remain.\n\n"
             "5. UPDATE checks GitHub ONLY when clicked; UPDATE LEARNING "
             "trains the local handwriting model ONLY when clicked. "
             "These buttons are separate; neither runs at startup.\n\n"
@@ -1530,14 +1523,14 @@ class App:
                  or str(rec.get("status", "")).startswith("Scan error:"))
             and Path(rec["path"]).is_file()
             for iid, rec in self.records.items())
-        self.scan_btn.config(state="normal" if candidates else "disabled")
+        self.scan_btn.config(state="normal" if candidates or getattr(self,"_sequence_review_pending",False) else "disabled")
         self._refresh_rescan_button()
         button=getattr(self,"send_selected_btn",None)
         if button is not None:
             allowed=(self._startup_ready and not self.busy and
                     not self.export_busy and not self.trocr_training and
                     any(self._eligible_for_kurt(iid,self.records[iid])
-                        for iid in self.tree.selection() if iid in self.records))
+                        for iid in self.records))
             button.config(state="normal" if allowed else "disabled")
 
     def clear_scan_screen(self):
@@ -1641,6 +1634,7 @@ class App:
             if not path:
                 continue
             payload["files"][str(rec.get("original_name") or path.name)] = {
+                "sequence_review_pending": bool(getattr(self,"_sequence_review_pending",False)),
                 "candidate": rec.get("candidate", ""),
                 "confirmed": rec.get("confirmed", ""),
                 "status": rec.get("status", ""),
@@ -2737,6 +2731,15 @@ class App:
             f"Sequential filenames have different verified case numbers "
             f"({left[1]} / {right[1]}). Scan takes precedence; review this PDF manually.")
 
+    def _finish_scan_sequence_review(self):
+        """Only the worker's all-files-done event can release the export barrier."""
+        self._sequence_review_pending=True
+        self._scan_progress_update(len(self.scan_items),"CHECKING BEFORE / AFTER")
+        self._apply_sequence_consensus()
+        self._sequence_review_pending=False
+        self._save_state()
+        self._scan_progress_update(len(self.scan_items),"SCAN AND SEQUENCE CHECK COMPLETE")
+
     def _apply_sequence_consensus(self):
         """One final, frozen before/after pass. Never cascade inferred anchors."""
         if self.busy or not self.auto_label_var.get():
@@ -2824,7 +2827,7 @@ class App:
                          sequence_anchors=[order[left][0],order[right][0]],
                          manual_approved=True,auto_labeled=True,approval_rule_version="5.3.2")
                 self._move_to_completed(iid,batch=True)
-                r["status"]=f"Before/after confirmed {case}; original OCR {prior or 'unreadable'} — awaiting SEND ALL SELECTED"
+                r["status"]=f"Before/after confirmed {case}; original OCR {prior or 'unreadable'} — awaiting EXPORT COMPLETED"
                 self._insert_scan_row(iid,r)
                 self._diag_event("sequence_final_correction",file=str(r["path"]),
                     original=prior,confirmed=case,anchors=r["sequence_anchors"])
@@ -3596,12 +3599,18 @@ class App:
         ]
         self.scan_items.sort(key=lambda pair: self._natural_pdf_sort_key(pair[1]["path"]))
         if not self.scan_items:
+            if getattr(self,"_sequence_review_pending",False):
+                self.busy=True
+                self.queue.put(("done",))
+                return
             self.status.config(text="No checked, unscanned files to scan. Select files or click REFRESH.")
             self.restart_btn.config(text="RESTART", state="normal")
             self._refresh_scan_button()
             return
         self._run_outcomes = {"total_selected": len(self.scan_items)}
         self.busy = True
+        self._sequence_review_pending = True
+        self._save_state()
         self.paused = False
         self.stop_event.clear()
         self.pause_event.set()
@@ -4004,6 +4013,42 @@ class App:
                  "label_context":True,"incident_label_context":True,
                  "case_field_label_context":True,"label_distance":0.0} for v in values]
 
+    def _recognize_case_strip(self, image):
+        """Read a known number line without asking the detector to find it again.
+
+        A narrow 1 may disappear from a detector's word boxes. Both passes
+        recognize the full crop, retaining actual scores and literal digits.
+        No character substitution, padding of case digits, or score boost.
+        """
+        if image is None or not getattr(image,"size",0):
+            return []
+        from PIL import Image, ImageOps
+        pil=Image.fromarray(image).convert("L")
+        if pil.width<8 or pil.height<5:
+            return []
+        variants=[pil,ImageOps.autocontrast(pil).resize(
+            (pil.width*2,pil.height*2),Image.Resampling.LANCZOS),
+            ImageOps.expand(pil,border=10,fill=255)]
+        hits=[]
+        for variant in variants:
+            try:
+                readings=self.reader.recognize(np.asarray(variant),
+                    detail=1,paragraph=False,allowlist="0123456789-",
+                    decoder="beamsearch",beamWidth=5)
+                for _bbox,text,score in readings:
+                    number=re.sub(r"\s+","",normalize_case_number(text))
+                    # The ENTIRE line must be one 08- case, never a partial match.
+                    if not CASE_RE.fullmatch(number):
+                        continue
+                    hits=self._merge_case_hits(hits,[{
+                        "number":number,"score":float(score)*100,
+                        "engines":["EasyOCR-strip"],
+                        "engine_scores":{"EasyOCR":float(score)*100},
+                        "rect":(0,0,pil.width,pil.height)}])
+            except Exception as exc:
+                self._log("Whole-number strip recognition failed: %s",exc)
+        return hits
+
     def _read_incident_to_right(self, page_image, label_rect):
         lx0,ly0,lx1,ly1 = label_rect
         h,w = page_image.shape[:2]
@@ -4046,6 +4091,28 @@ class App:
                     detected,label_rect,(1.0,nx),(1.0,y0),"EasyOCR-digits"))
         except Exception as exc:
             self._log("Number-only incident recovery failed: %s",exc)
+        sx=max(0,int(lx1-label_h*.35))
+        sy=max(0,int(ly0-label_h*.55))
+        ex=min(w,int(lx1+max(300,label_h*12)))
+        ey=min(h,int(ly1+max(3,label_h*.15)))
+        tight_strip=page_image[sy:ey,sx:ex]
+        if tight_strip.size:
+            recovered=self._recognize_case_strip(tight_strip)
+            for hit in recovered:
+                hit.update(rect=(sx,sy,ex,ey),label_type="incident",
+                           label_context=True,incident_label_context=True,label_distance=0.0)
+            hits=self._merge_case_hits(hits,recovered)
+            try:
+                text,score=self._trocr_read_scored(tight_strip)
+                number=re.sub(r"\s+","",normalize_case_number(text))
+                if CASE_RE.fullmatch(number):
+                    hits=self._merge_case_hits(hits,[{
+                        "number":number,"score":score,"engines":["TrOCR-strip"],
+                        "engine_scores":{"TrOCR":score},"rect":(sx,sy,ex,ey),
+                        "label_type":"incident","label_context":True,
+                        "incident_label_context":True,"label_distance":0.0}])
+            except Exception as exc:
+                self._log("Tight case-line TrOCR failed: %s",exc)
         # TrOCR is a supporting read ONLY of the right-hand field, never a
         # search across the printed OFFENSE CODE or other page regions.
         try:
@@ -4410,6 +4477,13 @@ class App:
                 r"\b\d{1,4}\s*/\s*\d{1,4}\b)",
                 text,re.I) and not strict_matches)
             if run_trocr and likely_case_line and not fax_pagination:
+                px=max(4,int((y1-y0)*.3));py=max(3,int((y1-y0)*.15))
+                bx0=max(0,int(x0)-px);by0=max(0,int(y0)-py)
+                bx1=min(image.shape[1],int(x1)+px);by1=min(image.shape[0],int(y1)+py)
+                for hit in self._recognize_case_strip(image[by0:by1,bx0:bx1]):
+                    add_candidate(hit["number"],"EasyOCR-strip",hit["score"],
+                                  (bx0+x_offset,by0+y_offset,bx1+x_offset,by1+y_offset),
+                                  label_kind,label_distance)
                 try:
                     crop_x0 = max(0, int(x0) - 12)
                     crop_y0 = max(0, int(y0) - 12)
@@ -4759,7 +4833,7 @@ class App:
                                   if positioned_header else "3x3 localized fallback")
                             r["status"]=(
                                 f"{score:.1f}% {area} — automatically approved; "
-                                "awaiting SEND ALL SELECTED")
+                                "awaiting EXPORT COMPLETED")
                             self._diag_event("approval_decision",
                                 file=Path(r["path"]).name,outcome="auto_approved",
                                 rule=rule,case=normalized_candidate,
@@ -4802,7 +4876,7 @@ class App:
                     self._apply_export_result(iid, source_name, destination, error)
                 elif kind == "export_done":
                     if not self.busy:
-                        self._scan_progress_update(len(self.scan_items),"SELECTED SEND COMPLETE")
+                        self._scan_progress_update(len(self.scan_items),"COMPLETED EXPORT FINISHED")
                     self.export_busy = False
                     self._export_in_flight_iids.clear()
                     self._update_completed_count()
@@ -4945,8 +5019,7 @@ class App:
                     self._loader_finish("ocr")
                     self._loader_finish("model")
                     self.busy = False
-                    self._scan_progress_update(len(self.scan_items),"SCAN COMPLETE — READY TO SEND")
-                    self._apply_sequence_consensus()
+                    self._finish_scan_sequence_review()
                     self.paused = False
                     self.pause_event.set()
                     self._refresh_scan_button()
@@ -4957,7 +5030,7 @@ class App:
                     self._update_completed_count()
                     self.status.config(
                         text="Scan complete. All PDFs remain in the root folder. "
-                             "Review or edit them, then press SEND ALL SELECTED.")
+                             "Review or edit them, then press EXPORT COMPLETED.")
                     self._refresh_learning_button_state()
                     self._save_state()
                     self._diag_event("run_end",summary=dict(self._run_outcomes))
@@ -5148,7 +5221,7 @@ class App:
         except Exception as exc:
             record["learning_pending"]=True
             self._log("Corrected case retained; learning update pending: %s",exc)
-        record["status"]=f"Manual case {value} saved — awaiting SEND ALL SELECTED"
+        record["status"]=f"Manual case {value} saved — awaiting EXPORT COMPLETED"
         self._insert_scan_row(iid,record)
         self.completed_edit_drafts.pop(iid, None)
         self._close_completed_edit(iid)
@@ -5159,12 +5232,12 @@ class App:
             self.status.config(text="Correction is in memory but could not be saved; check folder access and retry Enter.")
             return False
         message = (f"Case number saved as {value} for {record['path'].name}. "
-                   "It remains in root until SEND ALL SELECTED.")
+                   "It remains in root until EXPORT COMPLETED.")
         self.status.config(text=message)
         self.completed_send_status.config(text=message)
         return True
         # A human correction must remain in COMPLETED until the user presses
-        # SEND TO KURT; it must not race an automatic export callback.
+        # EXPORT COMPLETED; it must not race an automatic export callback.
 
     def _completed_xscroll_command(self, *args):
         self.completed_tree.xview(*args)
@@ -5800,7 +5873,12 @@ class App:
         self.completed_count.config(
             text=f"{approved} approved for export • {needs_review} auto-detected awaiting review"
                  f" • {selected_count} selected")
-        self.export_btn.config(state="normal" if approved and not self.export_busy else "disabled")
+        can_export=(not self.busy and not self.export_busy and not self.trocr_training
+                    and not getattr(self,"_sequence_review_pending",False) and
+                    any(self._eligible_for_kurt(iid,r) for iid,r in self.records.items()))
+        self.export_btn.config(state="normal" if can_export else "disabled")
+        if hasattr(self,"send_selected_btn"):
+            self.send_selected_btn.config(state="normal" if can_export else "disabled")
         can_unverify = not self.export_busy and not self.trocr_training and self._selected_unverify_ids()
         self.unverify_selected_btn.config(state="normal" if can_unverify else "disabled")
         pending_review = any(
@@ -6008,9 +6086,9 @@ class App:
             r["sequence_suggestion"]=""
             r["export_error"]=""
             r["send_after_manual_approval"]=False
-            r["status"]=f"Manual case confirmed as {value} — awaiting SEND ALL SELECTED"
+            r["status"]=f"Manual case confirmed as {value} — awaiting EXPORT COMPLETED"
             self._move_to_completed(iid)
-            r["status"]=f"Manual case confirmed as {value} — awaiting SEND ALL SELECTED"
+            r["status"]=f"Manual case confirmed as {value} — awaiting EXPORT COMPLETED"
             self._insert_scan_row(iid,r)
             if not self._save_state():
                 err.config(text="Could not save your correction to the root-folder "
@@ -6026,10 +6104,10 @@ class App:
             r["learning_pending"]=bool(learning_error)
             if learning_error:
                 r["status"]=(f"Manual case {value} SAVED — learning pending; "
-                             "awaiting SEND ALL SELECTED")
+                             "awaiting EXPORT COMPLETED")
             else:
                 r["status"]=(f"Manual case {value} SAVED and learning updated — "
-                             "awaiting SEND ALL SELECTED")
+                             "awaiting EXPORT COMPLETED")
             self._diag_event("manual_case_confirmation",
                 file=Path(r["path"]).name,ocr_candidate=original_ocr,
                 previous_confirmed=prior_confirmed,confirmed=value,
@@ -6055,7 +6133,7 @@ class App:
         ttk.Label(controls,
                   text="SAVE REVIEW stores the corrected 08- case and learning "
                        "without moving any PDF. You can reopen and revise it "
-                       "until you press SEND ALL SELECTED.",
+                       "until you press EXPORT COMPLETED.",
                   wraplength=280).grid(row=action_row + 2, column=0, sticky="w", pady=(18, 0))
 
         # Full-page preview with optional manual case-number crop selection.
@@ -6469,6 +6547,8 @@ class App:
                 or not rec.get("manual_approved") or rec.get("exported")
                 or not CASE_RE.fullmatch(str(rec.get("confirmed") or ""))):
             return False
+        if getattr(self,"_sequence_review_pending",False):
+            return False
         # Every verified COMPLETED record may be transferred after scanning.
         # Records without confirmed+manual_approved are rejected above.
         if (rec.get("sequence_conflict") or rec.get("scan_ambiguous")) and not human_approved:
@@ -6488,7 +6568,7 @@ class App:
         return True
 
     def _schedule_auto_export(self):
-        """Do not auto-transfer. User must press SEND ALL SELECTED."""
+        """Do not auto-transfer. User must press EXPORT COMPLETED."""
         return None
 
     def _run_scheduled_auto_export(self):
@@ -6519,37 +6599,32 @@ class App:
         return pending
 
     def export(self, selected_iids=None, automatic=False):
-        """Move verified root PDFs ONLY for a user-initiated SEND selection."""
+        """Export all verified root PDFs on explicit EXPORT COMPLETED."""
         if getattr(self,"_scan_case_editor",None) is not None:
             self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
             self._scan_case_editor.focus_set()
             return
         if automatic:
             self._diag_event("automatic_export_blocked",
-                             reason="explicit_send_all_selected_required")
+                             reason="explicit_export_completed_required")
             return
         if self.export_busy:
             self._export_reschedule = True
-            self.status.config(text="PDF transfer in progress. Additional approvals will send afterward.")
+            self.status.config(text="Export is already in progress. Wait for it to finish.")
             return
-        if not self.folder or self.busy or self.trocr_training:
+        if not self.folder or self.busy or self.trocr_training or getattr(self,"_sequence_review_pending",False):
             if not automatic:
                 message = "Sending waits until the scan and sequence review finish."
                 self.status.config(text=message)
                 self.completed_send_status.config(text=message)
             return
-        if automatic:
-            selected_set = None  # never let UI checkboxes suppress approved auto-send
-        elif selected_iids is not None:
-            selected_set = set(selected_iids)
-        else:
-            checked = set(self.completed_tree.get_children("")) & self.completed_checked_iids
-            selected_set = checked if checked else None
+        # Export is intentionally independent of scan/review selection.
+        selected_set = None
         if not automatic:
             drafts = self._unsaved_completed_changes(selected_set)
             if drafts:
                 message = (f"Save or Cancel the CHANGE entry for {len(drafts)} selected "
-                           "file(s) before SEND TO KURT. Nothing was sent.")
+                           "file(s) before EXPORT COMPLETED. Nothing was exported.")
                 self.status.config(text=message)
                 self.completed_send_status.config(text=message)
                 self._start_completed_edit(drafts[0])
@@ -6662,7 +6737,7 @@ class App:
             rec["status"] = f"Transfer failed: {error}"
             self._log("PDF transfer failed for %s: %s", source_name, error)
             message = (f"Transfer failed for {source_name}: {error}. "
-                       "Source retained; select COMPLETED row and click SEND ALL SELECTED.")
+                       "Source retained; click EXPORT COMPLETED to retry.")
             self.status.config(text=message)
             self.completed_send_status.config(text=message)
             if self.completed_tree.exists(iid):

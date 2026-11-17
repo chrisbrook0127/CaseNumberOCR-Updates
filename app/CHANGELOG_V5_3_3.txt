@@ -1,0 +1,9 @@
+MFCase 5.3.3
+- EXPORT COMPLETED exports all approved unsent PDFs, regardless of row selection. Files needing review remain. Exported rows leave the list only after successful transfer.
+- Leading zeros are preserved exactly in export filenames. 08-01114 stays 08-01114. Collision suffixes remain safe.
+- A persisted scan-completion barrier prevents exports before the final before/after pass, including after stopping/reopening a scan. Resume SCAN to complete it. Matching neighbors may correct a conflicting 100% read; multiple conflicts require manual review. Manual corrections remain protected.
+- Added direct full-line EasyOCR recognition on raw, enlarged and padded number crops, avoiding a second text-detection step that can omit narrow digits. No invented 1s, character replacements, confidence inflation or zero stripping.
+- Tightened the vertical crop for an additional case-field read to reduce interference from the OFFENSE CODES row.
+- Existing two-engine approval thresholds remain: matching complete 08- case, both above 75%, one above 95%. Unresolved disagreements still require review.
+
+Validation: 44 automated regression tests, including real temporary-file exports, untouched review files, leading zeros, collision handling, scan-completion gating and updater rollback. Local EasyOCR checks recovered the screenshot's printed 08-0119 and both printed 08-120 crops. This is not a full Windows/two-engine or handwriting-accuracy benchmark; handwriting can still require review. No document images or learning data are part of this release.

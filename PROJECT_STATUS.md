@@ -1,13 +1,11 @@
 # MFCase status
 
-Published production version: V5.3.2 (2026-11-17). Previous production baseline: V5.3.1. No separate development version currently.
+Production baseline: V5.3.2. Release candidate: V5.3.3.
 
-V5.3.2 implements complete-token parsing, number-only crop recovery, separate per-engine scores, strict >75% both / >95% either on matching case values, frozen final before/after correction (including 100% conflicts), manual review for multiple conflicts, inline case editing, and removal of classification choices.
+V5.3.3 adds EXPORT COMPLETED for all eligible approved files independent of selection, exact leading-zero preservation, a persisted final-sequence-check export barrier, and direct whole-line recognition to reduce detector-related missing digits. Earlier human corrections and learning remain intact. Two-engine thresholds and conflict safeguards remain unchanged.
 
-Locked behavior: literal 08- plus 1–7 digits; preserve manual corrections and original PDFs; no automatic transfers; separate manual UPDATE and UPDATE LEARNING; offline OCR and learning after setup; retain existing models/examples and updater rollback. Existing automatic approvals from older rules need rescan.
+Validation: 44 regression tests cover parser, OCR confidence, sequence decisions, inline editing, persistence, all-completed export, preservation of review files and exact digit strings, collision safety, and updater installation/rollback. Local screenshot tests recover the printed 08-0119 and both 08-120 crops. This does not establish full-page/two-engine accuracy or reliable handwriting recognition; uncertain cases remain reviewable. Native Windows GUI testing remains outstanding.
 
-Validation: 37 automated regression tests passed locally and in GitHub Actions. V5.3.1 updater code was tested against the actual published V5.3.2 release: discovery, download validation, byte comparison, and installation all passed; synthetic document and learning files were preserved. Published full installer matches the supplied download exactly. Release workflow 44096885524 succeeded.
+Locked requirements: literal 08- plus 1–7 digits; no automatic transfers; explicit EXPORT COMPLETED after full scan and before/after check; manual corrections protected; separate manual UPDATE and UPDATE LEARNING; offline OCR/learning after setup; retain existing model/examples. Inferred results cannot anchor chained guesses. No confidential input or learning data is included in release assets.
 
-Limitations: Windows GUI and actual failing handwriting samples have not been tested in this environment. No measured handwriting-accuracy improvement is claimed. Existing learning categories remain compatible with the single shared TrOCR model but are no longer selected by users.
-
-Next priority: validate actual handwriting samples and native Windows interaction; investigate any reported failures without changing the established offline/manual-transfer behavior.
+Next: publish V5.3.3, verify the old updater against the actual assets, and validate full-resolution failing PDFs on Windows.
