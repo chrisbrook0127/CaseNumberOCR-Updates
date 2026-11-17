@@ -1,0 +1,13 @@
+MFCase 5.3.5
+- Top BEFORE/AFTER button reruns the check after all scanning finishes.
+- Matching independently confirmed anchors take priority over middle readings,
+  including manual entries. Unconfirmed OCR and inferred cases cannot anchor.
+- Multiple or competing conflicts require manual review.
+- Top confidence slider: 75-100%, default 95%, inclusive in either OCR engine.
+  Applies to new scans; existing confirmations remain until changed/rechecked.
+- Strict 08- plus 1-7 digits, zeros preserved, upper-right 3x3 then 5x5 only
+  when no valid candidate is found. Explicit EXPORT COMPLETED remains required.
+- No existing learning examples, crops, category folders or checkpoints changed.
+  New examples remain handwritten; fine-tuning and learning thresholds unchanged.
+Validation: 59 automated regression tests. Native Windows UI testing outstanding.
+OCR confidence is not a guarantee of real-world correctness.

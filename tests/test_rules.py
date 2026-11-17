@@ -46,9 +46,9 @@ class Rules(unittest.TestCase):
         self.assertEqual(m.normalize_case_number('08-01114'),'08-01114')
         self.assertEqual(m._mfcase_export_case_name('08-01114'),'08-01114')
         self.assertEqual(m._mfcase_export_case_name('08-101'),'08-101')
-    def test_either_engine_100_percent_boundary(self):
+    def test_either_engine_95_percent_boundary(self):
         a=self.app()
-        for easy,trocr,allowed in [(96,76,False),(76,96,False),(100,75,True),(75,100,True),(95,95,False),(99.999,75.01,False),(100,0,True),(0,100,True)]:
+        for easy,trocr,allowed in [(96,76,True),(76,96,True),(100,75,True),(75,100,True),(95,95,True),(94.999,75.01,False),(100,0,True),(0,100,True)]:
             with self.subTest(easy=easy,trocr=trocr):
                 result=a._auto_label_block_reason(max(easy,trocr),True,'08-101',{'EasyOCR':easy,'TrOCR':trocr})
                 self.assertEqual(result is None,allowed)
@@ -98,10 +98,10 @@ class Rules(unittest.TestCase):
     def test_normal_transition_unchanged(self):
         a=self.sequence(['08-101','08-101','08-102','08-102'])
         self.assertTrue(all(r['confirmed']==r['candidate'] and not r.get('sequence_conflict') for r in a.records.values()))
-    def test_manual_correction_wins(self):
+    def test_before_after_overrides_manual_middle(self):
         a=self.sequence(['08-101','08-111','08-101'],**{'1':{'auto_labeled':False}})
-        self.assertEqual(a.records['1']['confirmed'],'08-111')
-        self.assertFalse(a.records['1'].get('sequence_inferred',False))
+        self.assertEqual(a.records['1']['confirmed'],'08-101')
+        self.assertTrue(a.records['1'].get('sequence_inferred',False))
     def test_manual_correction_can_anchor(self):
         a=self.sequence(['08-101',None,'08-101'],**{'0':{'auto_labeled':False,'score':0,'engine_scores':{}}})
         self.assertEqual(a.records['1']['confirmed'],'08-101')

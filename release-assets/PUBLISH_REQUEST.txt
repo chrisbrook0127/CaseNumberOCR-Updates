@@ -1,1 +1,1 @@
-Publish tested V5.3.4 displayed count, inline completion and new-example categorization
+Publish tested V5.3.5 confirmed-anchor priority, BEFORE/AFTER button and adjustable 75-100% threshold

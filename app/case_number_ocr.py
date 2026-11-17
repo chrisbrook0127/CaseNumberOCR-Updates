@@ -156,7 +156,7 @@ def _mfcase_export_case_name(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.3.4")
+        root.title("M.F. Case Number OCR — V5.3.5")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -205,7 +205,7 @@ class App:
         self.training_pause_button = None
         self.training_stop_button = None
         self.auto_label_var = tk.BooleanVar(value=False)
-        self.auto_threshold_var = tk.StringVar(value="99")
+        self.auto_threshold_var = tk.StringVar(value="95")
         self.log_path = None
         self.scan_year_prefix = REQUIRED_CASE_YEAR
         self.update_busy = False
@@ -230,7 +230,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.3.4"
+        self.app_version = "5.3.5"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -252,7 +252,7 @@ class App:
         self.auto_threshold_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
         self.year_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
         self.auto_label_var.set(True)
-        self.auto_threshold_var.set("90")
+        self.auto_threshold_var.set("95")
         self._refresh_auto_eligibility_status()
         root.after(150, self._poll)
         # Production is local-only. Network access is possible only after an
@@ -469,7 +469,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.4",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.5",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -507,7 +507,7 @@ class App:
         # Coworkers only choose the folder and run/review the files.
         self.year_var = tk.StringVar(value="08")
         self.auto_label_var.set(True)
-        self.auto_threshold_var.set("90")
+        self.auto_threshold_var.set("95")
 
         folder_bar = ttk.Frame(self.review_tab)
         folder_bar.pack(fill="x", pady=(0, 8))
@@ -548,6 +548,16 @@ class App:
         self.send_selected_btn.pack(side="left",padx=5,ipadx=8,ipady=3)
         self.scan_file_count_label = ttk.Label(action_bar, text="0 of 0 selected")
         self.scan_file_count_label.pack(side="right", padx=(8, 0))
+
+        rules_bar = ttk.Frame(self.review_tab)
+        rules_bar.pack(fill="x", pady=(0, 8))
+        self.before_after_btn = ttk.Button(
+            rules_bar, text="BEFORE/AFTER", command=self._run_before_after)
+        self.before_after_btn.pack(side="left", padx=(0, 16))
+        ttk.Label(rules_bar, text="Either engine approval threshold:").pack(side="left")
+        tk.Scale(rules_bar, from_=75, to=100, resolution=1, orient="horizontal",
+                 variable=self.auto_threshold_var, length=240,
+                 label="% (applies to new scans)").pack(side="left", padx=8)
 
         scan_progress_row=ttk.Frame(self.review_tab)
         scan_progress_row.pack(fill="x",pady=(0,8))
@@ -696,7 +706,7 @@ class App:
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.3.4",
+        ttk.Label(self.settings_tab,text="Application version: V5.3.5",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
                   text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
@@ -1323,9 +1333,9 @@ class App:
             "Double-click the filename to open review. REVIEW SELECTED opens an editable case entry and crop selection. "
             "The typed correction overrides an OCR crop selection. "
             "SAVE REVIEW retains the corrected file in the root folder.\n\n"
-            "4. Either engine must report 100% for a valid 08- case. "
+            "4. Either engine must meet the selected threshold (default 95%, minimum 75%) for a valid 08- case. "
             "After scanning, matching before/after cases correct a single conflicting OCR read, "
-            "even at 100%; multiple conflicts require review. Manual corrections are protected. "
+            "even over a manual middle entry; multiple conflicts require review. Only independently confirmed files anchor. "
             "Auto-approved and manually reviewed PDFs remain visible "
             "and editable in SCAN. Nothing is moved until you click "
             "EXPORT COMPLETED. All approved files export, regardless of selection; review files remain.\n\n"
@@ -2374,8 +2384,12 @@ class App:
                      f" • {trained} training samples{detail}")
 
     def _get_auto_threshold(self):
-        """Either engine must report 100%; other approval safeguards still apply."""
-        return 100.0
+        """Use the selected confidence, bounded to 75–100 percent."""
+        try:
+            value = float(self.auto_threshold_var.get())
+        except (AttributeError, ValueError, TypeError):
+            value = 95.0
+        return max(75.0, min(100.0, value)) if math.isfinite(value) else 95.0
 
     def _save_learning_example(self, record, confirmed_number):
         confirmed_number=normalize_case_number(confirmed_number)
@@ -2593,13 +2607,13 @@ class App:
         year = getattr(self, "scan_year_prefix", "") or (
             self.year_var.get().strip()[-2:] if hasattr(self, "year_var") else "08")
         if self.auto_label_var.get():
-            message = "Auto-confirm ON: valid 08- case with either engine at 100%; final before/after check."
+            message = f"Auto-confirm ON: valid 08- case with either engine at {threshold:g}%; final before/after check."
         else:
             message = "Auto-confirm OFF: manual review required."
         label.config(text=message)
 
     def _auto_label_block_reason(self, score, engine_agreement, candidate, engine_scores=None):
-        """Require a valid 08- case and a 100% reading from either engine."""
+        """Require a valid 08- case meeting the selected threshold in either engine."""
         if not self.auto_label_var.get():
             return "Auto-confirm is turned off."
         normalized = normalize_case_number(candidate)
@@ -2614,49 +2628,23 @@ class App:
             observed_score = 0.0
         # score is this candidate's maximum OCR confidence across engines.
         if not math.isfinite(observed_score) or observed_score < self._get_auto_threshold():
-            return "At least one OCR engine must report 100%."
+            return f"At least one OCR engine must report {self._get_auto_threshold():g}%."
         return None
 
     def _auto_label_is_calibrated(self, score, engine_agreement, candidate, distinct_count=1):
         return self._auto_label_block_reason(score, engine_agreement, candidate) is None
 
     def _sequence_case_number(self, record):
-        """Return an independent anchored OCR case for sequence comparison.
-
-        Only qualifying 100% localized reads can anchor.
-        Manual approvals can anchor. An inferred value cannot anchor.
-        """
+        """Only independently confirmed cases can anchor; inference never chains."""
         if (not record or record.get("sequence_inferred") or
-                record.get("sequence_excluded") or
-                str(record.get("status") or "").startswith("Unverified") or
-                record.get("scan_ambiguous") or record.get("sequence_conflict")):
+                record.get("sequence_excluded") or record.get("scan_ambiguous") or
+                record.get("sequence_conflict") or
+                str(record.get("status") or "").startswith("Unverified")):
             return None
-        manually_verified=(bool(record.get("manual_approved")) and
-                           not bool(record.get("auto_labeled")))
-        case=normalize_case_number(
-            record.get("confirmed") if manually_verified else record.get("candidate"))
-        if not CASE_RE.fullmatch(case):
+        if not (record.get("auto_labeled") or record.get("manual_approved")):
             return None
-        if not case.startswith(REQUIRED_CASE_YEAR+"-"):
-            return None
-        if manually_verified:
-            return case
-        score=float(record.get("score") or 0)
-        if self._auto_label_block_reason(score,record.get("engine_agreement"),case,
-                                         record.get("engine_scores")) is not None:
-            return None
-        source=record.get("scan_source")
-        if source=="fallback":
-            snip=record.get("snippet")
-            if (score<95.0 or not isinstance(snip,(tuple,list))
-                    or len(snip)<4 or snip[3] is None
-                    or not self._is_corner_case_rect(snip[3],snip[1])):
-                return None
-        elif source not in ("incident","case","header"):
-            return None
-        elif score<95.0:
-            return None
-        return case
+        case = normalize_case_number(record.get("confirmed") or "")
+        return case if CASE_RE.fullmatch(case) else None
 
     @staticmethod
     def _initial_review_reading(record, candidate_values, sequence_values, sequence_message):
@@ -2744,6 +2732,22 @@ class App:
             f"Sequential filenames have different verified case numbers "
             f"({left[1]} / {right[1]}). Scan takes precedence; review this PDF manually.")
 
+    def _run_before_after(self):
+        """Explicit recheck; never release an unfinished scan's export barrier."""
+        if self.busy or self.export_busy or self.trocr_training:
+            messagebox.showinfo("BEFORE/AFTER", "Finish the current operation before checking.")
+            return
+        if not self.folder or not self.records:
+            return
+        if getattr(self, "_sequence_review_pending", False):
+            messagebox.showinfo("BEFORE/AFTER", "Finish scanning all files before checking.")
+            return
+        commit = getattr(self, "_scan_case_commit", None)
+        if commit and commit() is False:
+            return
+        changed = self._apply_sequence_consensus()
+        self._log(f"BEFORE/AFTER complete: {changed} file(s) updated; unresolved conflicts remain for review.")
+
     def _finish_scan_sequence_review(self):
         """Only the worker's all-files-done event can release the export barrier."""
         self._sequence_review_pending=True
@@ -2763,14 +2767,12 @@ class App:
         anchors=[self._sequence_case_number(r) for _,r in order]
         def key(value):
             return int(value.split("-",1)[1]) if value and CASE_RE.fullmatch(value) else None
-        def manual(r):
-            return r.get("manual_approved") and not r.get("auto_labeled")
         def excluded(r):
             return (r.get("exported") or r.get("sequence_excluded") or
                     r.get("status") in ("Not scanned","Scanning","Moved to BLANKS") or
                     str(r.get("status","")).startswith("Scan error:"))
         def original(r):
-            return r.get("sequence_original_candidate","") if r.get("sequence_inferred") else r.get("candidate","")
+            return r.get("sequence_original_candidate", "") if r.get("sequence_inferred") else (r.get("confirmed") or r.get("candidate", ""))
         ranges=[]
         last={}
         for pos,case in enumerate(anchors):
@@ -2782,11 +2784,8 @@ class App:
             if left is None or pos<=left+1:
                 continue
             middle=list(range(left+1,pos))
-            # Never use a range crossing an excluded file or a human decision
-            # for a different case. A protected manual value splits the range.
-            if any(excluded(order[j][1]) or
-                   (manual(order[j][1]) and key(order[j][1].get("confirmed"))!=k)
-                   for j in middle):
+            # Confirmed matching boundaries take priority over middle readings.
+            if any(excluded(order[j][1]) for j in middle):
                 continue
             conflicts=[j for j in middle if
                        (original(order[j][1]) and key(original(order[j][1]))!=k)
@@ -2811,7 +2810,7 @@ class App:
         changed=0
         for pos in sorted(blocked):
             iid,r=order[pos]
-            if manual(r) or excluded(r):
+            if excluded(r):
                 continue
             r.update(confirmed="",manual_approved=False,auto_labeled=False,
                      sequence_conflict=True,sequence_inferred=False,
@@ -2826,7 +2825,7 @@ class App:
                 continue
             for pos in middle:
                 iid,r=order[pos]
-                if manual(r) or excluded(r):
+                if excluded(r):
                     continue
                 prior=original(r)
                 # Do not relabel already matching independent anchors as inferred.
@@ -4338,7 +4337,7 @@ class App:
             elif kind=="case":
                 note="CASE NUMBER field full number — 3x3 labeled printed OCR"
             elif kind=="header":
-                note="Upper-right header 3x3 candidate — two-engine approval and final before/after check"
+                note="Upper-right header 3x3 candidate — either-engine approval and final before/after check"
             else:
                 note=("Upper-right fallback in 3x3 — right-margin case box "
                       "takes priority over fax pagination; 95% required for "
@@ -4818,7 +4817,7 @@ class App:
                     labeled = r["scan_source"] in ("incident","case")
                     positioned_header = r["scan_source"] == "header"
                     strong = float(score or 0) >= self._get_auto_threshold()
-                    # A fallback's 100% score is usable only with a real OCR
+                    # A fallback's qualifying score is usable only with a real OCR
                     # bounding box from _ocr_pdf's 3x3 region, not an unlocated
                     # TrOCR guess or a preview-only crop.
                     fallback_95 = (
@@ -4866,13 +4865,13 @@ class App:
                     elif r["scan_ambiguous"]:
                         r["status"]=note+" — conflicting case-field reads; manual review"
                     elif labeled or positioned_header:
-                        r["status"]=(f"{score:.1f}% case-field OCR; 100% OCR threshold not met "
+                        r["status"]=(f"{score:.1f}% case-field OCR; {self._get_auto_threshold():g}% OCR threshold not met "
                                       "or auto-confirm disabled — manual review")
                     elif r["scan_source"]=="fallback":
                         r["status"]=(f"{float(score or 0):.1f}% 3x3 fallback — "
-                            "requires a localized matching read from either engine at 100%, "
+                            f"requires a localized read from either engine at {self._get_auto_threshold():g}%, "
                             "and auto-confirm enabled; otherwise MANUAL REVIEW")
-                    # A fallback at 100% with one localized case can auto-send;
+                    # A qualifying fallback with one localized case can complete;
                     # unlocated guesses and conflicting year-matched cases cannot.
                     self._diag_event("row_final",file=Path(r["path"]).name,
                          status=r.get("status"),candidate=normalized_candidate,
@@ -5850,7 +5849,7 @@ class App:
         elif r.get("auto_labeled") and r.get("manual_approved"):
             source=r.get("scan_source")
             if source=="fallback":
-                queue_status="100% localized OCR approved — ready for export"
+                queue_status="Localized OCR approved — ready for export"
             else:
                 queue_status=f"{float(r.get('score') or 0):.1f}% OCR approved — ready for export"
         elif r.get("manual_approved"):
