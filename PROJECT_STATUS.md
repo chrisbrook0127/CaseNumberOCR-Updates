@@ -1,11 +1,11 @@
 # MFCase status
 
-Production baseline: V5.3.3. Release candidate: V5.3.4.
+Published production version: V5.3.4 (2026-11-17). Previous production baseline: V5.3.3. No separate development version.
 
-V5.3.4 adds a bottom displayed-file count, focus-loss completion for changed valid inline edits, removal of the model-preparation button, 100%-either-engine confidence approval, and handwritten categorization of new examples only. Old categories/data/checkpoints remain compatible and unmigrated. Inline corrections append new learning instead of rewriting old labels.
+V5.3.4 adds a bottom displayed-file count, focus-loss completion for changed valid inline edits, removal of the model-preparation button, 100%-either-engine confidence approval, and handwritten categorization of new examples only. Historical category support, examples, crops and checkpoints are retained. Inline corrections append learning rather than relabeling old examples.
 
-Validation: 52 regression tests. Local synthetic printed crop recognition recovered all 12 expected strings across one through seven digits, including thousands and leading zeros. No hard-coded case-specific substitutions or three-digit limit. Native Windows GUI and broad real-world handwriting accuracy remain unverified.
+Validation: 52 regression tests passed locally and in GitHub Actions run 44118287939. The V5.3.3 updater discovered, downloaded, validated and installed the actual V5.3.4 asset; synthetic documents and learning remained unchanged. The published full installer matches the supplied package. Local synthetic printed crop recognition recovered all 12 expected strings spanning 1-7 digits, including thousands and leading zeros. This is not a real-document accuracy guarantee. Native Windows GUI testing remains outstanding.
 
-Locked behavior: 08- plus 1-7 digits, leading zeros preserved, explicit EXPORT COMPLETED after final before/after review, manual corrections protected, no inference chains, multiple conflicts to review, separate manual UPDATE/UPDATE LEARNING, local offline models/learning. Fine-tuning loop and example minimums unchanged.
+Locked behavior: 08- plus 1-7 digits; leading zeros preserved; explicit EXPORT COMPLETED after the final before/after check; manual corrections protected; multiple conflicts require review; no inference chains; separate manual UPDATE/UPDATE LEARNING; offline installed models and learning. Fine-tuning loop and learning minimums unchanged. New confidence rules apply on rescanning; prior approvals are not silently recategorized.
 
-Next: publish and verify update using the previous updater. Fresh installations without cached OCR weights require restoring model files; the download button is deliberately removed.
+Next priority: verify native Windows click-away behavior and full-resolution scan accuracy. Fresh installations without local OCR weights require restoring model files; the download button is deliberately removed.
