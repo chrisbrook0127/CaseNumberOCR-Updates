@@ -15,6 +15,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test and build release
+        run: |
+          python -m pip install numpy pillow
+          python -m unittest discover -s tests -v
+          cp release-assets/SHA256.txt /tmp/expected-sha.txt
+          python tools/build_release.py
+          cmp /tmp/expected-sha.txt release-assets/SHA256.txt
+          python app/verify_package.py
       - name: Verify update
         run: |
           python3 - <<'PY'
@@ -40,9 +51,9 @@ jobs:
         run: |
           TAG="$(cat release-assets/RELEASE_TAG.txt)"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase $TAG" --notes "MFCase update. Install using the application's UPDATE button."
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase $TAG" --notes-file app/CHANGELOG_V5_3_2.txt
           fi
-          gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" release-assets/CaseNumberOCR_Update.zip dist/MFCase_Number_OCR_V5.3.2_Full_Online_Install.zip --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           mkdir verify
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify

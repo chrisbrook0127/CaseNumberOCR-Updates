@@ -1,0 +1,10 @@
+MFCase 5.3.2
+- Reject partial case numbers containing I/l/vertical-bar confusion or separated digit continuations. Retry number-only OCR on cropped pixels; do not replace letters blindly.
+- Preserve both EasyOCR and TrOCR confidence scores for the same complete case number. Direct approval requires both strictly above 75%, with at least one strictly above 95%. Both engines run even after a perfect first read.
+- Run a frozen before/after pass at the end of scanning, in natural filename order across the current root list. Matching qualifying boundaries can correct one contradictory file even at 100% OCR. Multiple contradictory files, competing overlapping ranges, or a middle read differing from two different neighbors require manual review. Manual corrections remain protected; inferred results cannot anchor further guesses. Unscanned or excluded files block ranges.
+- Double-click the case-number cell in SCAN to edit in place. Enter saves; Esc cancels. Double-click the filename to open review. Unsaved inline edits block sending and list-rebuilding operations.
+- Remove handwritten/printed/unknown selection. Existing learning examples and their folders remain compatible with the shared model.
+- Previous-version automatic approvals require rescanning under the new rules; saved human corrections are retained.
+- UPDATE, UPDATE LEARNING, offline operation, leading-zero export handling, and SEND ALL SELECTED remain explicit actions.
+
+Validation: automated parser, confidence, sequence, edit-routing, persistence, and updater regression tests. No fresh Windows GUI run or measured handwriting-accuracy benchmark was available in this environment.
