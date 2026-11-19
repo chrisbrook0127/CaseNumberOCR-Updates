@@ -21,7 +21,7 @@ class Changes(unittest.TestCase):
             with self.subTest(number=number):
                 value='08-'+number
                 self.assertIsNotNone(m.CASE_RE.fullmatch(value))
-                self.assertEqual(m._mfcase_export_case_name(value),value)
+                self.assertEqual(m._mfcase_export_case_name(value),"08-"+(number.lstrip("0") or "0"))
                 a=self.app();a.reader=Mock()
                 a.reader.recognize.return_value=[(None,value,1.0)]
                 hits=a._recognize_case_strip(np.zeros((30,300),dtype=np.uint8))

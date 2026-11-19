@@ -144,19 +144,20 @@ def _mfcase_header_field_candidates(hits,page_shape):
 
 
 def _mfcase_export_case_name(value):
-    """Validate export names without removing any case-number digits."""
+    """Format a filename only; never alter OCR, confirmed or training labels."""
     original=normalize_case_number(value)
     match=re.fullmatch(r"(08)-(\d{1,7})", original)
     if not match:
         raise ValueError(f"Invalid case number for export: {value!r}")
     year,case_digits=match.groups()
+    case_digits = case_digits.lstrip("0") or "0"
     return f"{year}-{case_digits}"
 
 
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.3.7")
+        root.title("M.F. Case Number OCR — V5.3.8")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -230,7 +231,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.3.7"
+        self.app_version = "5.3.8"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -406,6 +407,8 @@ class App:
                 "sequence_anchors": list(old.get("sequence_anchors", [])),
                 "sequence_suggestion": old.get("sequence_suggestion", ""),
                 "sequence_original_candidate":old.get("sequence_original_candidate",""),
+                "sequence_original_score":old.get("sequence_original_score",old.get("score",0)),
+                "sequence_original_ambiguous":bool(old.get("sequence_original_ambiguous",False)),
                 "sequence_excluded": bool(old.get("sequence_excluded", False)),
                 "scan_selected": bool(old.get("scan_selected", True)),
                 "learning_pending": bool(old.get("learning_pending", False)),
@@ -453,9 +456,8 @@ class App:
         self._refresh_review_controls()
         self._update_completed_count()
         self._update_scan_file_count()
-        # Restored review queues also get the sequence consistency check; it
-        # must not depend on scanning new PDFs in this application session.
         self._save_state()
+        self._recheck_after_decision()
         self._schedule_auto_export()
 
     def _ui(self):
@@ -468,7 +470,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.7",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.8",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -709,7 +711,7 @@ class App:
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.3.7",
+        ttk.Label(self.settings_tab,text="Application version: V5.3.8",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
                   text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
@@ -1056,7 +1058,7 @@ class App:
                 candidates=snippet[4] if len(snippet)>4 and isinstance(snippet[4],list) else []
                 case=str(record.get("confirmed") or record.get("candidate") or "")
                 def same_case(value):
-                    try:return tuple(map(int,str(value).split("-",1)))==tuple(map(int,case.split("-",1)))
+                    try:return normalize_case_number(value)==case
                     except (ValueError,TypeError):return False
                 chosen=next((h for h in candidates if h.get("rect") and same_case(h.get("number"))),None)
                 rect=(record.get("manual_crop_rect") if record.get("manual_crop_origin")=="drawn"
@@ -1203,7 +1205,10 @@ class App:
         record["completed_iid"]=None
         self._insert_scan_row(iid,record)
         self._update_completed_count()
-        return self._save_state()
+        saved=self._save_state()
+        if saved:
+            self._recheck_after_decision()
+        return saved
 
     def _select_preview_row(self,iid):
         if self.tree.exists(iid):
@@ -1318,6 +1323,7 @@ class App:
             rec["completed_iid"]=None
             self._insert_scan_row(iid,rec)
             self._save_state()
+            self._recheck_after_decision()
         elif state=="NOT SCANNED":
             messagebox.showinfo("Scan required",
                                 "Run SCAN before opening the verification window.")
@@ -1756,6 +1762,8 @@ class App:
                 "sequence_anchors": list(rec.get("sequence_anchors", [])),
                 "sequence_suggestion": rec.get("sequence_suggestion", ""),
                 "sequence_original_candidate":rec.get("sequence_original_candidate",""),
+                "sequence_original_score":rec.get("sequence_original_score",rec.get("score",0)),
+                "sequence_original_ambiguous":bool(rec.get("sequence_original_ambiguous",False)),
                 "sequence_excluded": bool(rec.get("sequence_excluded", False)),
                 "scan_selected": bool(rec.get("scan_selected", True)),
                 "learning_pending": bool(rec.get("learning_pending", False)),
@@ -2772,8 +2780,7 @@ class App:
         if length<3:
             return None
         candidate=str(self.records[iid].get("candidate") or "").strip()
-        match_key=lambda s: tuple(int(x) for x in str(s).split("-",1)) if (
-            s and re.fullmatch(r"\d{1,2}-\d{1,7}",str(s))) else None
+        match_key=lambda s: s if s and CASE_RE.fullmatch(s) else None
         key=match_key(candidate)
         windows=[]
         if index>0 and index+1<length:
@@ -2841,16 +2848,16 @@ class App:
 
     def _apply_sequence_consensus(self):
         """One final, frozen before/after pass. Never cascade inferred anchors."""
-        if self.busy or not self.auto_label_var.get():
+        if self.busy:
             return 0
         order=sorted(((iid,r) for iid,r in self.records.items()
                       if r.get("path") and Path(r["path"]).parent==Path(self.folder)),
                      key=lambda item:self._natural_pdf_sort_key(Path(item[1].get("original_name") or item[1]["path"])))
         anchors=[self._sequence_case_number(r) for _,r in order]
         def key(value):
-            return int(value.split("-",1)[1]) if value and CASE_RE.fullmatch(value) else None
+            return value if value and CASE_RE.fullmatch(value) else None
         def excluded(r):
-            return (r.get("exported") or r.get("case_draft") or r.get("sequence_excluded") or
+            return ((r.get("exported") and not r.get("sequence_inferred")) or r.get("case_draft") or r.get("sequence_excluded") or
                     r.get("status") in ("Not scanned","Scanning","Moved to BLANKS") or
                     str(r.get("status","")).startswith("Scan error:"))
         def original(r):
@@ -2886,47 +2893,81 @@ class App:
                 if key(case)!=key(other) and max(a,c)<min(b,d):
                     blocked.update(middle)
                     blocked.update(other_middle)
-        changed=0
-        for pos in sorted(blocked):
-            iid,r=order[pos]
-            if excluded(r):
-                continue
-            r.update(confirmed="",manual_approved=False,auto_labeled=False,
-                     sequence_conflict=True,sequence_inferred=False,
-                     status="Multiple before/after conflicts — MANUAL REVIEW")
-            if self.completed_tree.exists(iid):
-                self.completed_tree.delete(iid)
-            r["completed_iid"]=None
-            self._insert_scan_row(iid,r)
-            changed+=1
+        # Build a complete plan from independent anchors BEFORE changing records.
+        plan={}
         for left,right,case,middle in ranges:
-            if any(j in blocked for j in middle):
+            if left in blocked or right in blocked or any(j in blocked for j in middle):
                 continue
             for pos in middle:
-                iid,r=order[pos]
-                if excluded(r):
-                    continue
-                prior=original(r)
-                # Do not relabel already matching independent anchors as inferred.
-                if anchors[pos] and key(anchors[pos])==key(case):
-                    continue
-                r.update(sequence_original_candidate=prior,
-                         sequence_original_score=r.get("score",0),
-                         sequence_original_ambiguous=bool(r.get("scan_ambiguous")),
-                         confirmed=case,candidate=case,sequence_inferred=True,
-                         sequence_conflict=False,scan_ambiguous=False,
-                         sequence_anchors=[order[left][0],order[right][0]],
-                         manual_approved=True,auto_labeled=True,approval_rule_version="5.3.2")
-                self._move_to_completed(iid,batch=True)
-                r["status"]=f"Before/after confirmed {case}; original OCR {prior or 'unreadable'} — awaiting RENAME APPROVED"
+                if not excluded(order[pos][1]):
+                    plan[pos]=(case,[order[left][0],order[right][0]])
+        changed=set()
+        for pos,(iid,r) in enumerate(order):
+            if r.get("exported") and not r.get("sequence_inferred"):
+                continue
+            desired=plan.get(pos)
+            stale=r.get("sequence_inferred") and (
+                desired is None or desired[0]!=r.get("confirmed"))
+            if stale:
+                r.update(exported=False,candidate=r.get("sequence_original_candidate", ""),
+                         score=r.get("sequence_original_score",r.get("score",0)),
+                         scan_ambiguous=bool(r.get("sequence_original_ambiguous",False)),
+                         confirmed="",manual_approved=False,auto_labeled=False,
+                         sequence_inferred=False,sequence_conflict=True,sequence_anchors=[],
+                         status="Before/after approval withdrawn: matching confirmed anchors no longer support it — REVIEW")
+                if self.completed_tree.exists(iid):
+                    self.completed_tree.delete(iid)
+                r["completed_iid"]=None
                 self._insert_scan_row(iid,r)
-                self._diag_event("sequence_final_correction",file=str(r["path"]),
-                    original=prior,confirmed=case,anchors=r["sequence_anchors"])
-                changed+=1
+                changed.add(pos)
+            if pos in blocked and not excluded(r):
+                r.update(confirmed="",manual_approved=False,auto_labeled=False,
+                         sequence_conflict=True,sequence_inferred=False,sequence_anchors=[],
+                         status="Competing before/after answers — MANUAL REVIEW")
+                if self.completed_tree.exists(iid):
+                    self.completed_tree.delete(iid)
+                r["completed_iid"]=None
+                self._insert_scan_row(iid,r)
+                changed.add(pos)
+        for pos,(case,anchor_ids) in plan.items():
+            iid,r=order[pos]
+            if anchors[pos]==case:
+                continue
+            if (r.get("sequence_inferred") and r.get("confirmed")==case
+                    and r.get("sequence_anchors")==anchor_ids):
+                continue
+            if not r.get("sequence_inferred"):
+                r["sequence_original_candidate"]=original(r)
+                r["sequence_original_score"]=r.get("score",0)
+                r["sequence_original_ambiguous"]=bool(r.get("scan_ambiguous"))
+            prior=r.get("sequence_original_candidate","")
+            r.update(confirmed=case,candidate=case,sequence_inferred=True,
+                     sequence_conflict=False,scan_ambiguous=False,
+                     sequence_anchors=anchor_ids,manual_approved=True,
+                     auto_labeled=True,approval_rule_version="5.3.2")
+            self._move_to_completed(iid,batch=True)
+            r["status"]=f"Before/after confirmed {case}; original OCR {prior or 'unreadable'} — awaiting RENAME APPROVED"
+            self._insert_scan_row(iid,r)
+            self._diag_event("sequence_final_correction",file=str(r["path"]),
+                original=prior,confirmed=case,anchors=anchor_ids)
+            changed.add(pos)
         self._refresh_review_controls()
         self._update_completed_count()
-        self._save_state()
-        return changed
+        if not self._save_state():
+            raise OSError("Could not save the before/after decisions; no files should be renamed.")
+        return len(changed)
+
+    def _recheck_after_decision(self):
+        """Refresh dependent approvals after a human changes an anchor."""
+        if (self.busy or self.export_busy or self.trocr_training or
+                getattr(self,"_sequence_review_pending",False)):
+            return
+        try:
+            self._apply_sequence_consensus()
+        except Exception as exc:
+            self._sequence_review_pending=True
+            self._log("Before/after recheck failed: %s",exc)
+            self.status.config(text="Before/after check failed; renaming is blocked. Finish SCAN to retry.")
 
     def _configure_trocr_token_ids(self, model, processor):
         """
@@ -4394,7 +4435,7 @@ class App:
                 _best=_select_primary_case_hit(_filtered,kind,_image.shape)
                 across.update(h["number"] for h in
                     self._resolve_ocr_alternates(_filtered,kind,_best))
-            numeric_keys=lambda values:{tuple(map(int, v.split("-",1))) for v in values}
+            numeric_keys=lambda values:set(values)
             ambiguous=(len(numeric_keys(distinct))>1 or len(numeric_keys(across))>1)
             visuals=[]
             for h in hits:
@@ -5294,6 +5335,7 @@ class App:
                 self.status.config(text="Correction is in memory but could not be saved; check folder access and retry Enter.")
                 return False
             self._cancel_completed_case_edit(iid)
+            self._recheck_after_decision()
             return True
         old_cache = self._completed_thumbnail_path(record)
         if old_cache and old_cache.exists():
@@ -5333,6 +5375,7 @@ class App:
                    "It remains in root until RENAME APPROVED.")
         self.status.config(text=message)
         self.completed_send_status.config(text=message)
+        self._recheck_after_decision()
         return True
         # A human correction must remain in COMPLETED until the user presses
         # RENAME APPROVED; it must not race an automatic export callback.
@@ -5868,12 +5911,13 @@ class App:
         record["manual_crop_rect"] = None
         record["status"] = "Unverified — returned to review"
         record["completed_iid"] = None
-        self._remove_learning_data_for_file(record["path"].name)
+        # Unverify changes approval only; preserve all historical learning data.
         self._insert_scan_row(iid, record)
         self._refresh_review_controls()
         self._update_completed_count()
         self._update_scan_file_count()
         self._save_state()
+        self._recheck_after_decision()
         self.status.config(text=f"Unverified {record['path'].name}; returned to the review list.")
 
     def review_selected(self):
@@ -6215,6 +6259,7 @@ class App:
             self._insert_scan_row(iid,r)
             self._save_state()
             self.status.config(text=r["status"])
+            self._recheck_after_decision()
             win.destroy()
             if learning_error:
                 messagebox.showwarning("Case number saved",
@@ -6732,6 +6777,13 @@ class App:
                 self.completed_send_status.config(text=message)
                 self._start_completed_edit(drafts[0])
                 return
+        # Always refresh sequence evidence immediately before selecting rename jobs.
+        try:
+            self._apply_sequence_consensus()
+        except Exception as exc:
+            self._sequence_review_pending=True
+            self.status.config(text=f"Before/after check failed; nothing renamed: {exc}")
+            return
         approved = [
             (iid, Path(r["path"]), str(r["confirmed"]))
             for iid, r in self.records.items()

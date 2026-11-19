@@ -5,7 +5,7 @@ title M.F. Case Number OCR - Full Installer
 
 echo ============================================================
 echo M.F. CASE NUMBER OCR - FULL INSTALLER
-echo Python 3.11 + OCR libraries + verified application V5.3.7
+echo Python 3.11 + OCR libraries + verified application V5.3.8
 echo ============================================================
 echo.
 echo This setup installs and verifies Python 3.11 directly.
@@ -47,7 +47,7 @@ if errorlevel 1 goto python_install_failed
 if errorlevel 1 goto python_install_failed
 
 echo.
-echo Verifying bundled V5.3.7 application files...
+echo Verifying bundled V5.3.8 application files...
 "%PYTHON_EXE%" "%~dp0verify_package.py"
 if errorlevel 1 goto release_failed
 
@@ -71,7 +71,7 @@ if errorlevel 1 goto dependency_failed
 
 echo.
 echo.
-echo Exact V5.3.7 application files are included in this package.
+echo Exact V5.3.8 application files are included in this package.
 echo No older application fallback is included.
 echo.
 echo.
@@ -86,7 +86,7 @@ if errorlevel 1 echo WARNING: Shortcut creation failed. You can still use RUN_CA
 
 echo.
 echo ============================================================
-echo INSTALLATION COMPLETE - M.F. CASE NUMBER OCR V5.3.7
+echo INSTALLATION COMPLETE - M.F. CASE NUMBER OCR V5.3.8
 echo ============================================================
 echo Python 3.11 is verified and the application update is installed.
 echo Existing local OCR models are reused; restore missing model files before starting.
@@ -100,7 +100,7 @@ exit /b 0
 
 :release_failed
 echo.
-echo ERROR: Bundled V5.3.7 files failed integrity verification.
+echo ERROR: Bundled V5.3.8 files failed integrity verification.
 echo No older application version will be launched.
 echo Extract a fresh copy of this ZIP and run SETUP.bat again.
 goto failed

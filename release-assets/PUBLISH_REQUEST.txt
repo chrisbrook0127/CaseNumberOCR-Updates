@@ -1,1 +1,1 @@
-Publish tested V5.3.7 single 4x4 scan, green approval checks and in-place renaming
+Publish tested V5.3.8 mandatory anchor revalidation and filename-only leading-zero removal

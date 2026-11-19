@@ -42,9 +42,9 @@ class Rules(unittest.TestCase):
         self.assertEqual(m.CASE_RE.findall('08-101 INCIDENT NO.'),['08-101'])
     def test_other_year(self):
         self.assertIsNone(m.CASE_RE.fullmatch('09-101'))
-    def test_zeroes_preserved_for_export(self):
+    def test_zeroes_preserved_in_reading_but_not_filename(self):
         self.assertEqual(m.normalize_case_number('08-01114'),'08-01114')
-        self.assertEqual(m._mfcase_export_case_name('08-01114'),'08-01114')
+        self.assertEqual(m._mfcase_export_case_name('08-01114'),'08-1114')
         self.assertEqual(m._mfcase_export_case_name('08-101'),'08-101')
     def test_either_engine_95_percent_boundary(self):
         a=self.app()

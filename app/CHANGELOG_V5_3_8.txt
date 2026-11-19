@@ -1,0 +1,17 @@
+MFCase 5.3.8
+- Strip leading zeros only from final filename case digits. Keep a single zero
+  for an all-zero suffix. OCR, confirmed values and training labels unchanged.
+- Exact string comparison for anchors and OCR ambiguities. Differently padded
+  readings no longer silently count as identical evidence.
+- Rebuild before/after inference from frozen independent anchors on every check.
+  Withdraw stale approvals when boundaries change, disappear or conflict.
+- Automatically recheck after green approval, SAVE REVIEW, edits, unverify and
+  restoring the queue. Inferred results never become new anchors.
+- Mandatory fresh sequence check immediately before selecting rename jobs.
+  Check or persistence failure blocks renaming.
+- Persist original inference evidence for reliable revalidation after restart.
+- Existing filenames are not silently rewritten when an inference is withdrawn;
+  the next explicit rename handles corrected approved names, with collision safety.
+- UNVERIFY no longer deletes historical learning examples or crops.
+Validation: 91 regression tests. No recognition-model or training-loop changes.
+Native Windows GUI and real-document OCR accuracy remain unverified.
