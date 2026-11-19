@@ -1,1 +1,1 @@
-Publish tested V5.3.6 multi-file before-after correction and corrected-label learning crops
+Publish tested V5.3.7 single 4x4 scan, green approval checks and in-place renaming

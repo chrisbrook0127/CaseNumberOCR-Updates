@@ -20,7 +20,7 @@ class CompletedExport(unittest.TestCase):
             a.records[name]={'path':path,'candidate':case,'confirmed':case if approved else '',
                  'manual_approved':approved,'auto_labeled':False,'exported':False}
         return a
-    def test_export_moves_all_completed_and_leaves_review(self):
+    def test_rename_all_approved_in_place_and_leave_review(self):
         with tempfile.TemporaryDirectory() as d:
             a=self.export_app(Path(d))
             class ImmediateThread:
@@ -28,10 +28,10 @@ class CompletedExport(unittest.TestCase):
                 def start(self):self.target(*self.args)
             with patch.object(m.threading,'Thread',ImmediateThread):
                 a.export_completed()
-            self.assertTrue((a.folder/'COMPLETED/08-01114.pdf').exists())
-            self.assertTrue((a.folder/'COMPLETED/08-00101.pdf').exists())
+            self.assertTrue((a.folder/'08-01114.pdf').exists())
+            self.assertTrue((a.folder/'08-00101.pdf').exists())
             self.assertEqual((a.folder/'review.pdf').read_bytes(),b'review')
-            self.assertFalse((a.folder/'COMPLETED/08-19.pdf').exists())
+            self.assertFalse((a.folder/'08-19.pdf').exists())
             self.assertFalse((a.folder/'approved1.pdf').exists())
             self.assertFalse((a.folder/'approved2.pdf').exists())
     def test_export_waits_for_final_sequence_check(self):
@@ -56,7 +56,7 @@ class CompletedExport(unittest.TestCase):
         self.assertTrue(a._sequence_review_pending)
     def test_zeroes_and_collision_suffix(self):
         with tempfile.TemporaryDirectory() as d:
-            a=self.export_app(Path(d));dest=a.folder/'COMPLETED';dest.mkdir()
+            a=self.export_app(Path(d));dest=a.folder
             (dest/'08-01114.pdf').write_bytes(b'prior')
             a._export_worker(dest,[('approved1',a.records['approved1']['path'],'08-01114')])
             self.assertEqual((dest/'08-01114.pdf').read_bytes(),b'prior')

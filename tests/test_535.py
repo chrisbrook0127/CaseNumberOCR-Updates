@@ -47,11 +47,14 @@ class AdjustableRules(unittest.TestCase):
 
     def test_button_commits_edit_then_checks(self):
         a=self.app();a.folder=Path('/synthetic');a.records={'x':{}}
+        a.status=Mock()
+        self.enterContext(patch.object(m.messagebox,'showinfo'))
         calls=[]
         a._scan_case_commit=lambda: calls.append('save')
         a._apply_sequence_consensus=lambda: calls.append('check') or 1
         a._run_before_after()
         self.assertEqual(calls,['save','check'])
+        a._scan_case_editor=object()
         a._scan_case_commit=lambda:False
         a._run_before_after()
         self.assertEqual(calls,['save','check'])

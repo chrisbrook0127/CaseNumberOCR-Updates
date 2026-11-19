@@ -1,0 +1,18 @@
+MFCase 5.3.7
+- One upper-right 4x4 scan region; removed 5x5 fallback. Existing crop-level
+  enhancement retained instead of repeating an identical whole-document pass.
+- Deduplicate identical overlapping numeric detections before joining fragments;
+  retain legitimate case numbers such as 08-848484 without shortening.
+- Green accept check beside each case number. Double-click edits now save a draft;
+  green check approves/completes it, including below-threshold OCR suggestions.
+- Main scan controls simplified. Updates, learning and logs live in Settings.
+- RENAME APPROVED renames files in place, protects existing names with unique
+  suffixes, keeps renamed rows visible, and restores their status after reopening.
+- Before/after retains original scan order after renaming and reports its outcome.
+  Matching independently accepted boundaries required; unaccepted drafts excluded.
+- Historical learning/model data unchanged. Training loop and thresholds unchanged.
+Validation: 76 regression tests including single-region behavior, overlapping
+boxes, quick approval, draft gating, rename collisions/failure, restart state,
+button placement and original-order sequence correction. Native Windows GUI
+and real-document OCR accuracy remain unverified. No claim that all repeated
+model outputs or handwriting errors are eliminated.

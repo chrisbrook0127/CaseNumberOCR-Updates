@@ -1,40 +1,42 @@
-MFCASE NUMBER OCR V5.3.6 - APPLICATION AND ONLINE DEPENDENCY INSTALLER
+MFCASE NUMBER OCR V5.3.7 - APPLICATION AND ONLINE DEPENDENCY INSTALLER
 
-Existing users: use UPDATE in the app. Existing OCR model files are reused.
-This ZIP contains application code, launchers and dependency setup. It does
-not contain Python, third-party packages, OCR weights or learning examples.
-The PREPARE OFFLINE MODELS button has been removed. A fresh installation
-requires previously installed/restored local OCR model files before scanning.
+Existing users: SETTINGS > UPDATE. Existing OCR models and learning are reused.
+This ZIP contains application code, launchers and dependency setup, not Python,
+third-party packages, OCR weights or learning examples. Fresh installations
+require installed/restored local OCR models. No model-preparation button.
 
 INSTALL/RESTORE
-1. Extract all files to a permanent local application folder, separate from PDFs.
-2. Run SETUP.bat only if Python or dependencies need installation (internet needed).
-3. Keep your existing local OCR model files and learning directory in place.
-4. Launch RUN_CASE_OCR.bat or the desktop shortcut and select your document root.
+1. Extract into a permanent application folder, separate from your PDFs.
+2. Run SETUP.bat if Python or dependencies need installation (internet needed).
+3. Keep existing model files and the learning directory in place.
+4. Launch RUN_CASE_OCR.bat or your shortcut.
 
-SCAN has a bottom count: ## files displayed.
-Double-click the case-number cell to edit. Enter or clicking away saves a valid
-change and marks the file COMPLETED. Esc cancels. EXPORT COMPLETED moves all
-approved files after the scan's final before/after check; review files remain.
-Leading zeros are preserved. Cases use 08- followed by one to seven digits.
-The recognition path applies to that entire range, including thousands.
+SCAN WORKFLOW
+1. SELECT FILES, then SCAN. One upper-right 4x4-inch region is searched on each
+   page. Existing crop enhancements retry difficult text; no 5x5 expansion and
+   no identical second whole-document scan.
+2. Either engine can meet the slider threshold (75-100%, default 95%). Only
+   complete 08- plus 1-7 digits qualifies; leading zeros remain.
+3. Click the green check beside a case number to accept it, even below threshold.
+   Double-click the case-number cell to change it. Enter/click-away saves a
+   draft; click the green check to approve and complete. Escape cancels editing.
+   Double-click the thumbnail or filename to inspect the document.
+4. BEFORE/AFTER runs after scanning and can be rerun with the button. Matching
+   independently confirmed cases on BOTH sides can correct multiple middle
+   files. Inferred results cannot anchor. Unaccepted drafts must be approved
+   first. Competing boundary answers remain REVIEW. The button reports its result.
+5. RENAME APPROVED renames all approved PDFs IN THEIR CURRENT FOLDER. No copy
+   and no move into COMPLETED. Existing names are protected; same-case files get
+   unique (1), (2), ... suffixes. Already matching case filenames are retained.
+   Renamed files remain displayed; unapproved files keep their original names.
 
-Use the top slider to choose 75-100% (default 95%) for new scans. Either engine
-meeting it passes the confidence gate; location, ambiguity, required
-08- format and final before/after safeguards remain. All NEW saved examples are
-categorized handwritten. Existing examples, crops and checkpoints are not
-migrated or recategorized. Inline corrections append new examples instead of
-relabeling historical ones. UPDATE LEARNING remains a separate manual action.
+Settings contains UPDATE, UPDATE LEARNING, logs, refresh/rescan and other
+secondary controls. The bottom of SCAN shows the number of files displayed.
 
-See CHANGELOG_V5_3_6.txt for validation and limitations.
+Learning saves a NEW handwritten example when a user accepts/corrects a number.
+UPDATE LEARNING trains separately once enough usable examples exist. Existing
+examples, categories and checkpoints are untouched. Confidence is not measured
+accuracy. The repeated-digit fix removes overlapping identical OCR detections;
+it does not shorten legitimate case numbers or guarantee model correctness.
 
-BEFORE/AFTER reruns the final check after scanning. Only independently auto-
-confirmed or manually confirmed files anchor. Matching anchors override a
-conflicting middle entry, including manual entries. Two or more middle files can be corrected. Competing boundary answers require
-review. Inferred results cannot anchor further corrections. Search starts in
-the upper-right 3x3 and expands to 5x5 only if no valid 08- candidate is found.
-
-Correcting a misread label retains its original number box for the NEW learning
-example. Drawn fields are trimmed after the caption when detectable. Saving an
-example does not retrain the model: press UPDATE LEARNING when enough examples
-are ready. Missing crops report learning failure rather than successful saving.
+See CHANGELOG_V5_3_7.txt for validation and limitations.
