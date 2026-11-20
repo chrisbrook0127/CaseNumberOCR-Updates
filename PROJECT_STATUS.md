@@ -1,9 +1,9 @@
 # MFCase status
 
-Published production version: V5.3.8. Previous working baseline: V5.3.7. No separate development version.
+Production and last verified baseline: V5.3.8. Development release: V5.3.9.
 
-Changes: exact-string anchors and OCR conflict comparisons; fresh inference plan on every check; stale approvals withdrawn; automatic recheck after human decisions and loading; mandatory pre-rename revalidation with failure barrier; original inference evidence persisted. Filename-only leading-zero removal; all OCR/confirmed/training digits preserved. UNVERIFY preserves historical learning data.
+Changes: validated numeric identity ignores leading padding for OCR ambiguity checks and confirmed before/after anchors. 08-0084 and 08-84 match in either direction and can resolve multiple middle files as 08-84. Original OCR/confirmed/training labels remain intact. No OCR rescan is added; filenames already strip leading padding safely.
 
-Locked: single upper-right 4x4; 08- plus 1-7 digits; 75-100 slider default 95; confirmed independent anchors; inference never chains; explicit in-place collision-safe renaming; green-check acceptance of drafts; unchanged training loop/minimums and checkpoints.
+Locked: single upper-right 4x4; 08- plus 1-7 digits; 75-100 slider default 95; independently confirmed anchors; inference never chains; fresh revalidation before rename and after decisions; explicit in-place collision-safe renaming; green-check acceptance of drafts; unchanged learning examples, training loop/minimums and checkpoint behavior.
 
-Validation: 91 tests passed locally and in GitHub Actions run 44435114785. Live V5.3.7 updater discovered, downloaded, validated and installed V5.3.8; synthetic documents and historical learning preserved. Published full installer matches the supplied package. Windows GUI and real OCR accuracy unverified. Existing filenames change only through explicit rename, even when a previous inference is withdrawn. Next priority: real-document accuracy and Windows usage feedback.
+Validation: 96 tests passed locally; package integrity passed. Live release/updater verification pending. Native Windows GUI and real-document OCR accuracy unverified.

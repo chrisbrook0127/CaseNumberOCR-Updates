@@ -15,11 +15,11 @@ class AnchorRevalidation(unittest.TestCase):
             self.assertEqual(m.normalize_case_number(source),source)
             self.assertEqual(m._mfcase_export_case_name(source),expected)
 
-    def test_differently_padded_anchors_do_not_match(self):
+    def test_differently_padded_anchors_match(self):
         a=self.sequence(['08-0084',None,'08-84'])
-        self.assertFalse(a.records['1'].get('manual_approved'))
+        self.assertEqual(a.records['1']['confirmed'],'08-84')
         a=self.sequence(['08-0084',None,None,'08-0084'])
-        for i in ('1','2'):self.assertEqual(a.records[i]['confirmed'],'08-0084')
+        for i in ('1','2'):self.assertEqual(a.records[i]['confirmed'],'08-84')
 
     def test_changed_anchor_withdraws_old_inference(self):
         a=self.sequence(['08-84','08-44','08-84'])

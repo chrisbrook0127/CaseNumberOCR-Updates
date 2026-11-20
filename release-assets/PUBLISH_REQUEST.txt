@@ -1,1 +1,1 @@
-Publish tested V5.3.8 mandatory anchor revalidation and filename-only leading-zero removal
+Publish tested V5.3.9 equivalent leading-zero anchors without rescanning

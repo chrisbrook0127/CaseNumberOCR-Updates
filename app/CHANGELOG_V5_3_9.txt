@@ -1,0 +1,3 @@
+V5.3.9 - Equivalent leading-zero case anchors
+
+08-84 and 08-0084 now identify the same case for OCR conflict checks and confirmed before/after anchors. Matching anchors can resolve multiple middle files as 08-84 without rescanning. Raw OCR and manually saved training labels retain their original digits. Only final filenames remove leading padding; internal zeros and repeated digits are preserved. Threshold 75-100%, single 4x4 scanning, inference revalidation, explicit collision-safe rename and learning storage remain unchanged.

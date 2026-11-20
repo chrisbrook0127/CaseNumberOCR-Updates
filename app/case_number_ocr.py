@@ -50,6 +50,14 @@ def normalize_case_number(value):
     text = re.sub(r"\s*-\s*", "-", text)
     return text
 
+def _case_identity(value):
+    """Compare valid case readings without leading padding; retain raw labels."""
+    case = normalize_case_number(value)
+    if not CASE_RE.fullmatch(case):
+        return None
+    return "08-" + (case[3:].lstrip("0") or "0")
+
+
 LABEL_RE = re.compile(r"(?:Case\s+Number|INCIDENT\s+N[O0]\s*\.?)", re.IGNORECASE)
 INCIDENT_LABEL_RE = re.compile(r"\bINCIDENT\s*(?:N[O0]|NUM(?:BER)?|#)\s*[.:#]?", re.IGNORECASE)
 CASE_FIELD_LABEL_RE = re.compile(
@@ -157,7 +165,7 @@ def _mfcase_export_case_name(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.3.8")
+        root.title("M.F. Case Number OCR — V5.3.9")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -231,7 +239,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.3.8"
+        self.app_version = "5.3.9"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -470,7 +478,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.8",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.9",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -711,7 +719,7 @@ class App:
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.3.8",
+        ttk.Label(self.settings_tab,text="Application version: V5.3.9",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
                   text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
@@ -2726,7 +2734,7 @@ class App:
         if not (record.get("auto_labeled") or record.get("manual_approved")):
             return None
         case = normalize_case_number(record.get("confirmed") or "")
-        return case if CASE_RE.fullmatch(case) else None
+        return _case_identity(case)
 
     @staticmethod
     def _initial_review_reading(record, candidate_values, sequence_values, sequence_message):
@@ -2780,7 +2788,7 @@ class App:
         if length<3:
             return None
         candidate=str(self.records[iid].get("candidate") or "").strip()
-        match_key=lambda s: s if s and CASE_RE.fullmatch(s) else None
+        match_key=_case_identity
         key=match_key(candidate)
         windows=[]
         if index>0 and index+1<length:
@@ -2855,7 +2863,7 @@ class App:
                      key=lambda item:self._natural_pdf_sort_key(Path(item[1].get("original_name") or item[1]["path"])))
         anchors=[self._sequence_case_number(r) for _,r in order]
         def key(value):
-            return value if value and CASE_RE.fullmatch(value) else None
+            return _case_identity(value)
         def excluded(r):
             return ((r.get("exported") and not r.get("sequence_inferred")) or r.get("case_draft") or r.get("sequence_excluded") or
                     r.get("status") in ("Not scanned","Scanning","Moved to BLANKS") or
@@ -2907,7 +2915,7 @@ class App:
                 continue
             desired=plan.get(pos)
             stale=r.get("sequence_inferred") and (
-                desired is None or desired[0]!=r.get("confirmed"))
+                desired is None or desired[0]!=_case_identity(r.get("confirmed")))
             if stale:
                 r.update(exported=False,candidate=r.get("sequence_original_candidate", ""),
                          score=r.get("sequence_original_score",r.get("score",0)),
@@ -2933,7 +2941,7 @@ class App:
             iid,r=order[pos]
             if anchors[pos]==case:
                 continue
-            if (r.get("sequence_inferred") and r.get("confirmed")==case
+            if (r.get("sequence_inferred") and _case_identity(r.get("confirmed"))==case
                     and r.get("sequence_anchors")==anchor_ids):
                 continue
             if not r.get("sequence_inferred"):
@@ -4435,7 +4443,7 @@ class App:
                 _best=_select_primary_case_hit(_filtered,kind,_image.shape)
                 across.update(h["number"] for h in
                     self._resolve_ocr_alternates(_filtered,kind,_best))
-            numeric_keys=lambda values:set(values)
+            numeric_keys=lambda values: {_case_identity(value) for value in values}
             ambiguous=(len(numeric_keys(distinct))>1 or len(numeric_keys(across))>1)
             visuals=[]
             for h in hits:
