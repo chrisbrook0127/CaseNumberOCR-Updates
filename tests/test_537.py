@@ -67,21 +67,24 @@ class SinglePassAndApproval(unittest.TestCase):
         a.records['x']['candidate']='08-84';a.busy=True;a._quick_approve('x')
         a._save_completed_case_edit.assert_not_called()
 
-    def test_rename_already_named_no_suffix_added(self):
+    def test_send_already_renamed_preserves_original_prefix(self):
         with tempfile.TemporaryDirectory() as d:
-            a=self.app();a.queue=queue.Queue();p=Path(d)/'08-84 (1).pdf';p.write_bytes(b'original')
-            a._export_worker(Path(d),[('x',p,'08-84')])
-            event=a.queue.get_nowait();self.assertEqual(event[3],str(p));self.assertEqual(event[4],'')
-            self.assertEqual(list(Path(d).glob('*.pdf')),[p]);self.assertEqual(p.read_bytes(),b'original')
+            a=self.app();a.queue=queue.Queue();p=Path(d)/'Image1_08-84.pdf';p.write_bytes(b'original')
+            a.records={'x':{'original_name':'Image1.pdf'}}
+            dest=Path(d)/'COMPLETED'
+            a._export_worker(dest,[('x',p,'08-84')])
+            event=a.queue.get_nowait();self.assertEqual(event[3],str(dest/p.name));self.assertEqual(event[4],'')
+            self.assertFalse(p.exists());self.assertEqual((dest/p.name).read_bytes(),b'original')
 
     def test_rename_failure_retains_source_and_existing_destination(self):
         with tempfile.TemporaryDirectory() as d:
             a=self.app();a.queue=queue.Queue();source=Path(d)/'Image1.pdf';source.write_bytes(b'original')
-            target=Path(d)/'08-84.pdf';target.write_bytes(b'prior')
+            dest=Path(d)/'COMPLETED';dest.mkdir()
+            target=dest/'Image1_08-84.pdf';target.write_bytes(b'prior')
             with patch.object(m.os,'replace',side_effect=OSError('locked')):
-                a._export_worker(Path(d),[('x',source,'08-84')])
+                a._export_worker(dest,[('x',source,'08-84')])
             self.assertEqual(source.read_bytes(),b'original');self.assertEqual(target.read_bytes(),b'prior')
-            self.assertFalse((Path(d)/'08-84 (1).pdf').exists())
+            self.assertFalse((dest/'Image1_08-84 (1).pdf').exists())
             self.assertTrue(a.queue.get_nowait()[4])
 
     def test_renamed_state_saved_by_current_filename_and_restored(self):
@@ -96,9 +99,10 @@ class SinglePassAndApproval(unittest.TestCase):
             a.completed_checked_iids=set();a.scan_checked_iids=set();a.completed_photo_refs={};a.status=Mock()
             for name in ('_refresh_scan_button','_refresh_learning_button_state','_update_scan_file_count','_schedule_auto_export'):
                 setattr(a,name,Mock())
+            a._insert_completed_row=Mock();a._ensure_preview=Mock()
             a._apply_folder_load('08',saved,[p],False)
-            r=next(iter(a.records.values()));self.assertTrue(r['exported']);self.assertEqual(r['original_name'],'Image1.pdf')
-            self.assertFalse(a._eligible_for_kurt('x',r))
+            r=next(iter(a.records.values()));self.assertFalse(r['exported']);self.assertEqual(r['original_name'],'Image1.pdf')
+            self.assertTrue(a._eligible_for_kurt('x',r))
 
     def test_before_after_uses_original_order_after_rename(self):
         a=self.app();a.folder=Path('/synthetic');a.records={}

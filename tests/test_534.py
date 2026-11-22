@@ -51,7 +51,7 @@ class Changes(unittest.TestCase):
     def editor(self):
         a=self.app();a.status=Mock();a.records={'x':{'path':Path('/sample.pdf'),'candidate':'08-19'}}
         a.tree=Mock();a.tree.bbox.return_value=(10,10,100,30)
-        a._save_scan_draft=Mock(return_value=True)
+        a._save_completed_case_edit=Mock(return_value=True)
         class Entry:
             def __init__(self,*args,**kwargs):self.value='';self.bindings={}
             def insert(self,index,value):self.value=value
@@ -65,18 +65,18 @@ class Changes(unittest.TestCase):
         return a,a._scan_case_editor
     def test_changed_valid_inline_value_saves_on_focus_out(self):
         a,e=self.editor();e.value='08-1001';e.bindings['<FocusOut>'](SimpleNamespace(type='10'))
-        a._save_scan_draft.assert_called_once_with('x',e)
+        a._save_completed_case_edit.assert_called_once_with('x',e)
         self.assertIsNone(a._scan_case_editor)
     def test_opening_cell_does_not_approve_unchanged_read(self):
         a,e=self.editor();e.bindings['<FocusOut>'](SimpleNamespace(type='10'))
-        a._save_scan_draft.assert_not_called()
+        a._save_completed_case_edit.assert_not_called()
     def test_invalid_inline_value_never_completes_file(self):
         a,e=self.editor();e.value='08-100I';e.bindings['<FocusOut>'](SimpleNamespace(type='10'))
-        a._save_scan_draft.assert_not_called();self.assertIs(a._scan_case_editor,e)
+        a._save_completed_case_edit.assert_not_called();self.assertIs(a._scan_case_editor,e)
     def test_escape_cancels_then_focus_out_does_not_save(self):
         a,e=self.editor();e.value='08-1001';e.bindings['<Escape>'](None)
         e.bindings['<FocusOut>'](SimpleNamespace(type='10'))
-        a._save_scan_draft.assert_not_called()
+        a._save_completed_case_edit.assert_not_called()
     def test_offline_button_is_not_constructed(self):
         import inspect
         self.assertNotIn('prepare_offline_btn',inspect.getsource(m.App._ui))

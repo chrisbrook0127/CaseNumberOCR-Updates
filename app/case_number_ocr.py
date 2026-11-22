@@ -165,7 +165,7 @@ def _mfcase_export_case_name(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.3.9")
+        root.title("M.F. Case Number OCR — V5.4.0")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -239,7 +239,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.3.9"
+        self.app_version = "5.4.0"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -385,7 +385,7 @@ class App:
                 "The saved queue file could not be read. The PDFs are still intact; the queue will be rebuilt.")
         for pdf in pdfs:
             old=saved.get(pdf.name,{})
-            sent=bool(old.get("exported"))
+            sent=False  # A PDF still in the selected root has not been sent to COMPLETED.
             item = {
                 "path": pdf, "candidate": old.get("candidate", ""),
                 "confirmed": old.get("confirmed", ""), "status": old.get("status", "Not scanned"),
@@ -478,7 +478,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.3.9",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.4.0",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -539,19 +539,21 @@ class App:
             self.settings_tab, text="REVIEW SELECTED", command=self.review_selected, state="disabled")
         self.review_btn.pack(anchor="w", pady=5)
         self.review_all_btn = self.review_btn
+        scan_tools = ttk.Frame(self.review_tab)
+        scan_tools.pack(fill="x", pady=(0, 5))
         self.rescan_btn = ttk.Button(
-            self.settings_tab, text="RESCAN SELECTED", command=self.rescan_selected, state="disabled")
-        self.rescan_btn.pack(anchor="w", pady=5)
+            scan_tools, text="RESCAN SELECTED", command=self.rescan_selected, state="disabled")
+        self.rescan_btn.pack(side="left", padx=(0, 6))
         self.refresh_root_btn = ttk.Button(
-            self.settings_tab, text="REFRESH", command=self.refresh_root_folder)
-        self.refresh_root_btn.pack(anchor="w", pady=5)
+            scan_tools, text="REFRESH", command=self.refresh_root_folder)
+        self.refresh_root_btn.pack(side="left", padx=(0, 6))
         self.clear_root_btn = ttk.Button(
-            self.settings_tab, text="CLEAR", command=self.clear_scan_screen)
-        self.clear_root_btn.pack(anchor="w", pady=5)
+            scan_tools, text="CLEAR", command=self.clear_scan_screen)
+        self.clear_root_btn.pack(side="left", padx=(0, 6))
         self.work_log_btn=ttk.Button(self.settings_tab,text="EXPORT WORK LOG",command=self._diag_export)
 
         self.send_selected_btn=ttk.Button(
-            action_bar,text="RENAME APPROVED",command=self.export_completed,
+            action_bar,text="SEND FILES",command=self.export_completed,
             state="disabled")
         self.send_selected_btn.pack(side="left",padx=5,ipadx=8,ipady=3)
         self.scan_file_count_label = ttk.Label(action_bar, text="0 of 0 selected")
@@ -600,7 +602,7 @@ class App:
         self.tree.column("preview",width=230,minwidth=210,stretch=False,anchor="center")
         self.tree.heading("candidate", text="CASE NUMBER")
         self.tree.column("candidate", width=135, minwidth=110, stretch=False, anchor="center")
-        self.tree.heading("approve", text="ACCEPT")
+        self.tree.heading("approve", text="APPROVE")
         self.tree.column("approve", width=60, minwidth=60, stretch=False, anchor="center")
         self.tree.heading("score", text="EASY / TrOCR")
         self.tree.column("score", width=135, minwidth=120, stretch=False, anchor="center")
@@ -622,6 +624,8 @@ class App:
         self.tree.bind("<KeyRelease>",lambda e:self._schedule_scan_preview_refresh(),add="+")
         # Ctrl+A works from the list or its surrounding controls in SELECT FILES.
         self.root.bind("<Control-a>", self._select_all_for_rescan, add="+")
+        self.tree.bind("<Control-a>", self._select_all_for_rescan)
+        self.tree.bind("<Control-A>", self._select_all_for_rescan)
 
         # The scan progressbar is always visible above the list.
         self.status = ttk.Label(self.review_tab, text="Choose a folder, then click SCAN.")
@@ -641,17 +645,17 @@ class App:
         ttk.Label(completed_header, text="Ready for Review / Export",
                   font=("Segoe UI", 12, "bold")).pack(side="left")
         self.export_btn = ttk.Button(
-            completed_header, text="RENAME APPROVED", command=self.export, state="disabled")
+            completed_header, text="SEND FILES", command=self.export, state="disabled")
         self.export_btn.pack(side="right", padx=(8, 0))
         self.completed_refresh_btn = ttk.Button(
             completed_header, text="REFRESH", command=self.refresh_completed_list)
         self.completed_refresh_btn.pack(side="right", padx=(8, 0))
         ttk.Label(
             self.completed_tab,
-            text="Enter a corrected case number in CHANGE and click Save, then RENAME APPROVED. "
+            text="Enter a corrected case number in CHANGE and click Save, then SEND FILES. "
                  "Manually approved files remain here for correction and sending. "
-                 "All approved files wait for RENAME APPROVED. "
-                 "RENAME APPROVED exports every approved file; unresolved review files remain.",
+                 "Approved files are renamed automatically as original_case.pdf. "
+                 "SEND FILES moves them to COMPLETED; review files remain.",
             wraplength=1100).pack(anchor="w", pady=(0, 5))
         cpane = ttk.Frame(self.completed_tab)
         cpane.pack(fill="both", expand=True)
@@ -702,7 +706,7 @@ class App:
         self.completed_xscrollbar.pack(fill="x")
         cbar = ttk.Frame(self.completed_tab)
         cbar.pack(fill="x", pady=(10, 0))
-        self.completed_count = ttk.Label(cbar, text="0 files ready to rename")
+        self.completed_count = ttk.Label(cbar, text="0 files ready to send")
         self.completed_count.pack(side="left")
         self.review_completed_btn = ttk.Button(
             cbar, text="Review / Approve Selected", command=self.review_completed_selected, state="disabled")
@@ -714,12 +718,12 @@ class App:
         # Transfer outcomes must be visible while the user is on COMPLETED;
         # the generic status label lives on a different tab.
         self.completed_send_status = ttk.Label(
-            self.completed_tab, text="Approved files are ready for RENAME APPROVED.",
+            self.completed_tab, text="Approved files are ready for SEND FILES.",
             wraplength=1100)
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.3.9",
+        ttk.Label(self.settings_tab,text="Application version: V5.4.0",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
                   text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
@@ -1056,7 +1060,7 @@ class App:
         cache_path=self._scan_preview_cache_file(record)
         snippet=record.get("snippet")
         existing=self._scan_preview_keys.get(iid)
-        key=(str(cache_path),id(snippet))
+        key=(str(cache_path),id(snippet),record.get("confirmed"),record.get("candidate"),str(record.get("manual_crop_rect")),record.get("sequence_inferred"))
         if existing==key and iid in self._scan_preview_photos:
             return self._scan_preview_photos[iid]
         tile=None
@@ -1066,30 +1070,29 @@ class App:
                 candidates=snippet[4] if len(snippet)>4 and isinstance(snippet[4],list) else []
                 case=str(record.get("confirmed") or record.get("candidate") or "")
                 def same_case(value):
-                    try:return normalize_case_number(value)==case
+                    try:return _case_identity(value)==_case_identity(case) and _case_identity(case) is not None
                     except (ValueError,TypeError):return False
                 chosen=next((h for h in candidates if h.get("rect") and same_case(h.get("number"))),None)
                 rect=(record.get("manual_crop_rect") if record.get("manual_crop_origin")=="drawn"
                       else chosen.get("rect") if chosen else None)
-                rect=rect or snippet[3] or next((h.get("rect") for h in candidates if h.get("rect")),None)
+                rect=rect or (snippet[3] if CASE_RE.fullmatch(case) and not record.get("sequence_inferred") else None)
                 if rect:
                     x0,y0,x1,y1=map(int,map(float,rect))
                     w=max(10,x1-x0);h=max(10,y1-y0)
                     # Include the label to the LEFT of the number.
-                    left=min(210,max(35,int(w*1.7)))
+                    left=max(3,int(w*.03))
                     box=(max(0,x0-left),max(0,y0-max(11,int(h*.4))),
                          min(page.width,x1+max(12,int(w*.14))),
                          min(page.height,y1+max(11,int(h*.4))))
                 else:
-                    side=int(round(4*72*2.2))
-                    box=(max(0,page.width-side),0,page.width,min(page.height,side))
+                    raise ValueError("No verified 08- number crop; manual review required")
                 crop=page.crop(box)
                 crop.thumbnail((216,64),Image.Resampling.LANCZOS)
                 tile=Image.new("RGB",(222,68),"white")
                 tile.paste(crop,((222-crop.width)//2,(68-crop.height)//2))
             except Exception as exc:
                 self._log("Case preview crop failed: %s",exc)
-        if tile is None and cache_path.is_file():
+        if tile is None and cache_path.is_file() and not snippet and CASE_RE.fullmatch(str(record.get("candidate") or "")):
             try:
                 tile=Image.open(cache_path).convert("RGB")
                 tile.thumbnail((222,68),Image.Resampling.LANCZOS)
@@ -1098,7 +1101,7 @@ class App:
         if tile is None:
             tile=Image.new("RGB",(222,68),"white")
             draw=ImageDraw.Draw(tile)
-            msg="Scan for preview" if not record.get("candidate") else "Crop unavailable"
+            msg="No 08- crop — review" if not record.get("candidate") else "08- crop unavailable"
             draw.text((9,25),msg,fill="#555555")
         ImageDraw.Draw(tile).rectangle((0,0,221,67),outline="#999999",width=1)
         if snippet and snippet[1] is not None:
@@ -1151,7 +1154,7 @@ class App:
                 if widget is None:
                     widget=tk.Label(self.tree,borderwidth=0,highlightthickness=0,
                                     cursor="hand2")
-                    widget.bind("<Button-1>",lambda e,key=iid:self._select_preview_row(key))
+                    widget.bind("<Button-1>",lambda e,key=iid:self._select_preview_row(key,e))
                     widget.bind("<Double-1>",lambda e,key=iid:self._open_preview_review(key))
                     self._scan_preview_widgets[iid]=widget
                 widget.configure(image=photo)
@@ -1218,10 +1221,23 @@ class App:
             self._recheck_after_decision()
         return saved
 
-    def _select_preview_row(self,iid):
+    def _select_preview_row(self,iid,event=None):
         if self.tree.exists(iid):
-            self.tree.selection_set(iid)
+            rows=list(self.tree.get_children(""))
+            anchor=getattr(self,"_scan_selection_anchor",self.tree.focus())
+            state=getattr(event,"state",0)
+            if state & 0x0001 and anchor in rows and iid in rows:
+                lo,hi=sorted((rows.index(anchor),rows.index(iid)))
+                self.tree.selection_set(rows[lo:hi+1])
+            elif state & 0x0004:
+                if iid in self.tree.selection(): self.tree.selection_remove(iid)
+                else: self.tree.selection_add(iid)
+                self._scan_selection_anchor=iid
+            else:
+                self.tree.selection_set(iid)
+                self._scan_selection_anchor=iid
             self.tree.focus(iid)
+            self.tree.focus_set()
             self._refresh_review_controls()
 
     def _open_preview_review(self,iid):
@@ -1269,7 +1285,7 @@ class App:
         return self.export()
 
     def _send_all_selected(self):
-        """Compatibility callback now follows RENAME APPROVED semantics."""
+        """Compatibility callback now follows SEND FILES semantics."""
         return self.export_completed()
 
     def _unified_double_click(self,event):
@@ -1282,7 +1298,7 @@ class App:
         rec=self.records[iid]
         state=self._workflow_status(rec)
         if state=="RENAMED":
-            self.status.config(text="This file has already been renamed in place.")
+            self.status.config(text="This file has already been sent.")
             return
         if state in ("COMPLETED","SENT"):
             if not messagebox.askyesno(
@@ -1374,7 +1390,7 @@ class App:
                 return "break"
             editing["saving"]=True
             try:
-                if self._save_scan_draft(iid,editor) is False:
+                if self._save_completed_case_edit(iid,editor) is not True:
                     return "break"
                 close()
             finally:
@@ -1386,7 +1402,7 @@ class App:
         editor.bind("<Escape>",lambda _event:(close(),"break")[1])
         editor.focus_set()
         editor.selection_range(0,"end")
-        self.status.config(text="Edit case number: Enter or clicking away saves the draft. Click the green check to approve; Esc cancels.")
+        self.status.config(text="Edit case number: Enter or clicking away saves and approves. Esc cancels.")
 
     def _open_instructions(self):
         win=tk.Toplevel(self.root)
@@ -1404,7 +1420,7 @@ class App:
             "2. SCAN recognizes only case numbers beginning with 08-. "
             "It examines the top-right 4 by 4 inches. "
             "Existing image enhancements retry difficult crops without expanding the search. Other years are ignored.\n\n"
-            "3. Double-click a case-number cell to edit; Enter or clicking away saves a draft. Click its green check to approve and complete. Esc cancels. "
+            "3. Double-click a case-number cell to edit; Enter or clicking away saves, approves and renames. Use the green check to approve an unchanged guess. Esc cancels. "
             "Double-click the filename to open review. REVIEW SELECTED opens an editable case entry and crop selection. "
             "The typed correction overrides an OCR crop selection. "
             "SAVE REVIEW retains the corrected file in the root folder.\n\n"
@@ -1413,7 +1429,7 @@ class App:
             "even over a manual middle entry; competing boundary answers require review. Only independently confirmed files anchor. "
             "Auto-approved and manually reviewed PDFs remain visible "
             "and editable in SCAN. Click "
-            "RENAME APPROVED to rename all approved files in their current folder. Existing names are never overwritten; collisions receive a unique suffix.\n\n"
+            "SEND FILES to move all approved files into the COMPLETED subfolder. Existing names are never overwritten; collisions receive a unique suffix.\n\n"
             "5. UPDATE checks GitHub ONLY when clicked; UPDATE LEARNING "
             "trains the local handwriting model ONLY when clicked. "
             "These buttons are separate; neither runs at startup.\n\n"
@@ -1507,23 +1523,17 @@ class App:
         self._save_state()
 
     def _on_scan_checkbox_click(self, event):
-        if (self.tree.identify_region(event.x, event.y) == "cell"
-                and self.tree.identify_column(event.x) == "#1"):
-            if not self.busy and not self.trocr_training:
-                iid = self.tree.identify_row(event.y)
-                if iid in self.records and self.tree.exists(iid):
-                    self._set_scan_checkbox(iid, iid not in self.scan_checked_iids)
-                    self._refresh_scan_checkbox_heading()
-                    self._update_scan_file_count()
-                    self._refresh_scan_button()
-                    self._save_state()
-            return "break"
+        if self.tree.identify_region(event.x,event.y)=="cell":
+            iid=self.tree.identify_row(event.y)
+            if iid in self.records:
+                self._select_preview_row(iid,event)
+                return "break"
 
     def _select_all_for_rescan(self, event=None):
-        """Ctrl+A highlights all eligible root-level PDF rows for RESCAN SELECTED.
+        """Ctrl+A highlights every displayed root-level PDF row.
 
         Do not override Ctrl+A in text-entry widgets or the COMPLETED view.
-        Highlighting does not alter scan checkboxes, original files, or records.
+        Selection is synchronized with scan checkboxes; documents are unchanged.
         """
         if getattr(self, "_active_main_view", "select") != "select":
             return None
@@ -1532,12 +1542,12 @@ class App:
             return None
         if not self._startup_ready or self.busy or self.trocr_training or self.export_busy:
             return "break"
-        selected = tuple(iid for iid in self.tree.get_children("") if self._rescan_eligible(iid))
+        selected = tuple(self.tree.get_children(""))
         if selected:
             self.tree.selection_set(selected)
             self.tree.focus(selected[0])
             self._refresh_rescan_button()
-            self.status.config(text=f"{len(selected):,} unresolved PDF(s) highlighted. Click RESCAN SELECTED to rescan.")
+            self.status.config(text=f"{len(selected):,} PDF(s) selected.")
         else:
             self.tree.selection_remove(self.tree.selection())
             self._refresh_rescan_button()
@@ -2507,32 +2517,7 @@ class App:
         elif selected_candidate:
             training_rect=selected_candidate.get("rect")
         if field_rect and not selected_candidate:
-            # If the reviewer drew around the label plus the number, locate the
-            # label inside the selected field and trim it from the character crop.
-            # Keep field_rect intact below for spatial learning.
             training_rect = tuple(field_rect)
-            if self.reader is not None and snippet and snippet[1] is not None:
-                try:
-                    page_array = snippet[1]
-                    ph, pw = page_array.shape[:2]
-                    # Learn from the literal INCIDENT NO. field wherever it
-                    # appears, rather than restricting crops to the top-right.
-                    field_labels = self._find_case_field_label_regions(page_array)
-                    for lx0, ly0, lx1, ly1, _field_kind in sorted(
-                            field_labels, key=lambda v: v[4] != "incident"):
-                        abs_label = (lx0, ly0, lx1, ly1)
-                        fx0, fy0, fx1, fy1 = [float(v) for v in field_rect]
-                        intersects = (abs_label[0] < fx1 and abs_label[2] > fx0 and
-                                      abs_label[1] < fy1 and abs_label[3] > fy0)
-                        if intersects:
-                            number_x0 = max(fx0, abs_label[2] + 2)
-                            number_y0 = max(fy0, abs_label[1] - 10)
-                            number_y1 = min(fy1, abs_label[3] + 15)
-                            if fx1 - number_x0 >= 35 and number_y1 - number_y0 >= 10:
-                                training_rect = (number_x0, number_y0, fx1, number_y1)
-                                break
-                except Exception as exc:
-                    self._log("Could not trim case-field label from training crop: %s", exc)
         elif not training_rect:
             training_rect = snippet[3] if snippet else None
         crop_origin=("manual-field" if record.get("manual_crop_rect") and
@@ -2954,7 +2939,7 @@ class App:
                      sequence_anchors=anchor_ids,manual_approved=True,
                      auto_labeled=True,approval_rule_version="5.3.2")
             self._move_to_completed(iid,batch=True)
-            r["status"]=f"Before/after confirmed {case}; original OCR {prior or 'unreadable'} — awaiting RENAME APPROVED"
+            r["status"]=f"Before/after confirmed {case}; original OCR {prior or 'unreadable'} — awaiting SEND FILES"
             self._insert_scan_row(iid,r)
             self._diag_event("sequence_final_correction",file=str(r["path"]),
                 original=prior,confirmed=case,anchors=anchor_ids)
@@ -2963,7 +2948,51 @@ class App:
         self._update_completed_count()
         if not self._save_state():
             raise OSError("Could not save the before/after decisions; no files should be renamed.")
+        self._rename_completed_in_place()
         return len(changed)
+
+    def _rename_completed_in_place(self):
+        """Rename only confirmed decisions after sequence review; never send here."""
+        if self.busy or self.export_busy or not self.folder:
+            return
+        for iid,r in self.records.items():
+            source=Path(r["path"]) if r.get("path") else None
+            case=_case_identity(r.get("confirmed"))
+            if (not source or source.parent!=Path(self.folder) or not source.is_file()
+                    or r.get("exported") or not r.get("manual_approved") or not case
+                    or r.get("case_draft") or r.get("sequence_conflict") or r.get("scan_ambiguous")):
+                continue
+            original=r.get("original_name") or source.name
+            base=f"{Path(original).stem}_{case}"
+            if re.fullmatch(re.escape(base)+r"(?: \([1-9][0-9]*\))?\.pdf",source.name,re.I):
+                continue
+            target=None
+            reserved=False
+            try:
+                counter=0
+                while True:
+                    target=source.parent/(base+(f" ({counter})" if counter else "")+".pdf")
+                    try:
+                        fd=os.open(str(target),os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+                        os.close(fd);reserved=True;break
+                    except FileExistsError:
+                        counter+=1
+                os.replace(source,target);reserved=False
+                r["original_name"]=original
+                r["original_path"]=r.get("original_path") or str(source)
+                r["path"]=target
+                r["status"]=f"Completed: {target.name} — ready for SEND FILES"
+                r["export_error"]=""
+                self._insert_scan_row(iid,r)
+            except OSError as exc:
+                if reserved and target is not None:
+                    try: target.unlink()
+                    except OSError: pass
+                r["export_error"]=str(exc)
+                r["status"]=f"Approved; rename failed: {exc} — retry SEND FILES"
+                self._insert_scan_row(iid,r)
+        if not self._save_state():
+            raise OSError("Could not persist renamed file paths; check folder access.")
 
     def _recheck_after_decision(self):
         """Refresh dependent approvals after a human changes an anchor."""
@@ -4275,10 +4304,11 @@ class App:
                                     num_x0:min(w,int(lx1+max(300,label_h*10)))]
             if number_strip.size:
                 trocr,trocr_score=self._trocr_read_scored(number_strip)
-                for match in INCIDENT_NUMBER_RE.finditer(trocr.replace("—","-").replace("–","-")):
+                number=normalize_case_number(trocr)
+                if CASE_RE.fullmatch(number):
                     hits=self._merge_case_hits(hits,[{
-                        "number":normalize_case_number(match.group(1)),"score":trocr_score,
-                        "rect":None,"engines":["TrOCR-incident"],
+                        "number":number,"score":trocr_score,
+                        "rect":(num_x0,y0,min(w,int(lx1+max(300,label_h*10))),y1),"engines":["TrOCR-incident"],
                         "engine_scores":{"TrOCR":trocr_score},
                         "label_type":"incident","label_context":True,
                         "incident_label_context":True,"label_distance":0.0}])
@@ -4332,6 +4362,8 @@ class App:
                         hits=self._read_incident_to_right(region,label[:4])
                         absolute=[]
                         for h in hits:
+                            if not CASE_RE.fullmatch(normalize_case_number(h.get("number"))) or not h.get("rect"):
+                                continue
                             candidate=dict(h)
                             rect=candidate.get("rect")
                             if rect:
@@ -4343,7 +4375,7 @@ class App:
                              hits=self._diag_hits(absolute))
                         if absolute:
                             results.append((page_index,image,absolute,label[4]))
-                else:
+                if not any(item[0]==page_index for item in results):
                     try:
                         hits=self._find_case_candidates(
                             region,x_offset=offset_x,y_offset=0,run_trocr=True,
@@ -4354,6 +4386,8 @@ class App:
                         hits=[]
                     inside=[]
                     for h in hits:
+                        if not CASE_RE.fullmatch(normalize_case_number(h.get("number"))):
+                            continue
                         rect=h.get("rect")
                         if not rect:
                             # A TrOCR-only, unlocalized guess must never
@@ -4380,6 +4414,8 @@ class App:
                                     r"(?<![A-Za-z0-9|])(08\s*-\s*[0-9]{1,7})(?![A-Za-z0-9|]|\s+(?!08\s*-)[0-9]|\s+[Il|](?![A-Za-z]))"))
                             focused_valid=[]
                             for h in focused_hits:
+                                if not CASE_RE.fullmatch(normalize_case_number(h.get("number"))):
+                                    continue
                                 rect=h.get("rect")
                                 if rect and float(rect[0])>=offset_x+margin_x-4:
                                     focused_valid.append(h)
@@ -4407,6 +4443,12 @@ class App:
                      "No valid 08- case in the 4x4 search — MANUAL REVIEW")
                 return ("",(index,pages[-1],"4x4 case field not read",None,[]),
                         why,False,0.0,[],False)
+            results=[(idx,img,self._diag_field_filter(hits,kind),kind)
+                     for idx,img,hits,kind in results]
+            results=[item for item in results if item[2]]
+            if not results:
+                return ("",(0,pages[0],"No valid 08- crop",None,[]),
+                        "No valid 08- case in 4x4 — MANUAL REVIEW",False,0.0,[],False)
             def rank(entry):
                 index,image,hits,kind=entry
                 return ({"incident":3,"case":2,"header":1,"fallback":0}[kind],
@@ -4976,7 +5018,7 @@ class App:
                                   if positioned_header else "4x4 localized fallback")
                             r["status"]=(
                                 f"{score:.1f}% {area} — automatically approved; "
-                                "awaiting RENAME APPROVED")
+                                "awaiting SEND FILES")
                             self._diag_event("approval_decision",
                                 file=Path(r["path"]).name,outcome="auto_approved",
                                 rule=rule,case=normalized_candidate,
@@ -5019,7 +5061,7 @@ class App:
                     self._apply_export_result(iid, source_name, destination, error)
                 elif kind == "export_done":
                     if not self.busy:
-                        self._scan_progress_update(len(self.scan_items),"RENAMING FINISHED")
+                        self._scan_progress_update(len(self.scan_items),"SENDING FINISHED")
                     self.export_busy = False
                     self._export_in_flight_iids.clear()
                     self._update_completed_count()
@@ -5173,7 +5215,7 @@ class App:
                     self._update_completed_count()
                     self.status.config(
                         text="Scan complete. All PDFs remain in the root folder. "
-                             "Review or edit them, then press RENAME APPROVED.")
+                             "Review or edit them, then press SEND FILES.")
                     self._refresh_learning_button_state()
                     self._save_state()
                     self._diag_event("run_end",summary=dict(self._run_outcomes))
@@ -5368,7 +5410,7 @@ class App:
         except Exception as exc:
             record["learning_pending"]=True
             self._log("Corrected case retained; learning update pending: %s",exc)
-        record["status"]=f"Manual case {value} saved — awaiting RENAME APPROVED"
+        record["status"]=f"Manual case {value} saved — awaiting SEND FILES"
         self._insert_scan_row(iid,record)
         self.completed_edit_drafts.pop(iid, None)
         self._close_completed_edit(iid)
@@ -5380,13 +5422,13 @@ class App:
             self.status.config(text="Correction is in memory but could not be saved; check folder access and retry Enter.")
             return False
         message = (f"Case number saved as {value} for {record['path'].name}. "
-                   "It remains in root until RENAME APPROVED.")
+                   "It remains in root until SEND FILES.")
         self.status.config(text=message)
         self.completed_send_status.config(text=message)
         self._recheck_after_decision()
         return True
         # A human correction must remain in COMPLETED until the user presses
-        # RENAME APPROVED; it must not race an automatic export callback.
+        # SEND FILES; it must not race an automatic export callback.
 
     def _completed_xscroll_command(self, *args):
         self.completed_tree.xview(*args)
@@ -5981,19 +6023,19 @@ class App:
     def _move_to_completed(self, iid, batch=False):
         r = self.records[iid]
         if r.get("sequence_inferred"):
-            queue_status = "Confirmed by matching neighbors, OCR score retained — ready to rename"
+            queue_status = "Confirmed by matching neighbors, OCR score retained — ready to send"
         elif r.get("auto_labeled") and r.get("manual_approved"):
             source=r.get("scan_source")
             if source=="fallback":
-                queue_status="Localized OCR approved — ready to rename"
+                queue_status="Localized OCR approved — ready to send"
             else:
-                queue_status=f"{float(r.get('score') or 0):.1f}% OCR approved — ready to rename"
+                queue_status=f"{float(r.get('score') or 0):.1f}% OCR approved — ready to send"
         elif r.get("manual_approved"):
-            queue_status = "Approved — ready to rename"
+            queue_status = "Approved — ready to send"
         elif r.get("auto_labeled"):
             queue_status = "Auto-detected — review required"
         else:
-            queue_status = "Confirmed — ready to rename"
+            queue_status = "Confirmed — ready to send"
         r["status"] = queue_status
         r["export_error"] = ""
         self._insert_completed_row(iid, r)
@@ -6021,7 +6063,7 @@ class App:
         self._refresh_completed_checkbox_heading()
         selected_count = len(self.completed_checked_iids)
         self.completed_count.config(
-            text=f"{approved} approved to rename • {needs_review} auto-detected awaiting review"
+            text=f"{approved} approved to send • {needs_review} auto-detected awaiting review"
                  f" • {selected_count} selected")
         can_export=(not self.busy and not self.export_busy and not self.trocr_training
                     and not getattr(self,"_sequence_review_pending",False) and
@@ -6217,11 +6259,16 @@ class App:
                        row=0, column=1, sticky="ew", padx=(4, 0))
 
         send_after_approval=False
+        selection={"enabled":False,"drag":None,"preview_rect":None}
         def confirm():
             value=normalize_case_number(entry.get().strip())
             if not CASE_RE.fullmatch(value):
                 err.config(text="Case number must start with 08- followed by 1–7 digits.")
                 return
+            pending_rect=selection.get("preview_rect")
+            if pending_rect:
+                r["manual_crop_rect"]=tuple(pending_rect)
+                r["manual_crop_origin"]="drawn"
             original_ocr=str(r.get("candidate") or "")
             prior_confirmed=str(r.get("confirmed") or "")
             r["training_type"]="unsure"
@@ -6237,9 +6284,9 @@ class App:
             r["sequence_suggestion"]=""
             r["export_error"]=""
             r["send_after_manual_approval"]=False
-            r["status"]=f"Manual case confirmed as {value} — awaiting RENAME APPROVED"
+            r["status"]=f"Manual case confirmed as {value} — awaiting SEND FILES"
             self._move_to_completed(iid)
-            r["status"]=f"Manual case confirmed as {value} — awaiting RENAME APPROVED"
+            r["status"]=f"Manual case confirmed as {value} — awaiting SEND FILES"
             self._insert_scan_row(iid,r)
             if not self._save_state():
                 err.config(text="Could not save your correction to the root-folder "
@@ -6255,10 +6302,10 @@ class App:
             r["learning_pending"]=bool(learning_error)
             if learning_error:
                 r["status"]=(f"Manual case {value} SAVED — learning pending; "
-                             "awaiting RENAME APPROVED")
+                             "awaiting SEND FILES")
             else:
                 r["status"]=(f"Manual case {value} SAVED; example saved (UPDATE LEARNING to train) — "
-                             "awaiting RENAME APPROVED")
+                             "awaiting SEND FILES")
             self._diag_event("manual_case_confirmation",
                 file=Path(r["path"]).name,ocr_candidate=original_ocr,
                 previous_confirmed=prior_confirmed,confirmed=value,
@@ -6285,7 +6332,7 @@ class App:
         ttk.Label(controls,
                   text="SAVE REVIEW stores the corrected 08- case and learning "
                        "without moving any PDF. You can reopen and revise it "
-                       "until you press RENAME APPROVED.",
+                       "until you press SEND FILES.",
                   wraplength=280).grid(row=action_row + 2, column=0, sticky="w", pady=(18, 0))
 
         # Full-page preview with optional manual case-number crop selection.
@@ -6720,7 +6767,7 @@ class App:
         return True
 
     def _schedule_auto_export(self):
-        """Do not auto-transfer. User must press RENAME APPROVED."""
+        """Do not auto-transfer. User must press SEND FILES."""
         return None
 
     def _run_scheduled_auto_export(self):
@@ -6751,7 +6798,7 @@ class App:
         return pending
 
     def export(self, selected_iids=None, automatic=False):
-        """Export all verified root PDFs on explicit RENAME APPROVED."""
+        """Move all verified root PDFs to COMPLETED on explicit SEND FILES."""
         if getattr(self,"_scan_case_editor",None) is not None:
             commit=getattr(self,"_scan_case_commit",None)
             if commit is not None:
@@ -6780,7 +6827,7 @@ class App:
             drafts = self._unsaved_completed_changes(selected_set)
             if drafts:
                 message = (f"Save or Cancel the CHANGE entry for {len(drafts)} selected "
-                           "file(s) before RENAME APPROVED. Nothing was exported.")
+                           "file(s) before SEND FILES. Nothing was exported.")
                 self.status.config(text=message)
                 self.completed_send_status.config(text=message)
                 self._start_completed_edit(drafts[0])
@@ -6803,7 +6850,7 @@ class App:
         approved.sort(key=lambda item: self._natural_pdf_sort_key(item[1]))
         if not approved:
             if not automatic:
-                message = "No approved files waiting to be renamed."
+                message = "No approved files waiting to be sent."
                 self.status.config(text=message)
                 self.completed_send_status.config(text=message)
             return
@@ -6814,10 +6861,10 @@ class App:
         self.export_busy = True
         self._export_in_flight_iids = {iid for iid, _, _ in approved}
         self._update_completed_count()
-        message = f"Renaming {len(approved)} approved PDF(s) in place…"
+        message = f"Sending {len(approved)} approved PDF(s) to COMPLETED…"
         self.status.config(text=message)
         self.completed_send_status.config(text=message)
-        target = self.folder
+        target = Path(self.folder) / "COMPLETED"
         threading.Thread(
             target=self._export_worker, args=(target, approved),
             name="MFCase-PDFTransfer", daemon=True).start()
@@ -6829,23 +6876,25 @@ class App:
             reserved = {p.name.casefold() for p in destination_folder.iterdir() if p.is_file()}
             for iid, source, case in approved:
                 case = _mfcase_export_case_name(case)
-                filename = f"{case}.pdf"
+                original = getattr(self,"records",{}).get(iid,{}).get("original_name") or source.name
+                base = f"{Path(original).stem}_{case}"
+                filename = f"{base}.pdf"
                 counter = 1
                 destination = None
                 reserved_by_us = False
                 try:
                     if not source.is_file():
                         raise FileNotFoundError(f"Original PDF is missing: {source.name}")
-                    if source.parent.resolve()!=destination_folder.resolve():
-                        raise ValueError("Rename destination must be the original folder.")
-                    if re.fullmatch(re.escape(case)+r"(?: \([1-9][0-9]*\))?\.pdf",source.name,re.I):
+                    if destination_folder.resolve() != (source.parent / "COMPLETED").resolve():
+                        raise ValueError("Send destination must be the source folder's COMPLETED folder.")
+                    if source.resolve() == (destination_folder / filename).resolve():
                         self.queue.put(("export_result",iid,source.name,str(source),""))
                         continue
                     # O_EXCL reserves a unique filename atomically, including
                     # when coworkers export the same case to the same share.
                     while True:
                         if filename.casefold() in reserved:
-                            filename = f"{case} ({counter}).pdf"
+                            filename = f"{base} ({counter}).pdf"
                             counter += 1
                             continue
                         destination = destination_folder / filename
@@ -6856,7 +6905,7 @@ class App:
                             break
                         except FileExistsError:
                             reserved.add(filename.casefold())
-                            filename = f"{case} ({counter}).pdf"
+                            filename = f"{base} ({counter}).pdf"
                             counter += 1
                     # The source and COMPLETED are on the same volume, so an
                     # atomic rename replaces only our own zero-byte reservation.
@@ -6905,7 +6954,7 @@ class App:
             rec["status"] = f"Transfer failed: {error}"
             self._log("PDF transfer failed for %s: %s", source_name, error)
             message = (f"Transfer failed for {source_name}: {error}. "
-                       "Source retained; click RENAME APPROVED to retry.")
+                       "Source retained; click SEND FILES to retry.")
             self.status.config(text=message)
             self.completed_send_status.config(text=message)
             if self.completed_tree.exists(iid):
@@ -6920,7 +6969,7 @@ class App:
             rec["send_after_manual_approval"] = False
             rec["export_error"] = ""
             rec["export_name"] = target.name
-            rec["status"] = f"Renamed in place: {target.name}"
+            rec["status"] = f"Sent to COMPLETED: {target.name}"
             if self.completed_tree.exists(iid):
                 self.completed_tree.delete(iid)
             # Keep the renamed PDF visible in its original folder.
@@ -6936,7 +6985,7 @@ class App:
             rec["scan_selected"] = False
             self.tree.selection_remove(iid)
             self._insert_scan_row(iid,rec)
-            message = f"Renamed in place: {target.name} (from {source_name})"
+            message = f"Sent to COMPLETED: {target.name} (from {source_name})"
             self.status.config(text=message)
             self.completed_send_status.config(text=message)
         self._save_state()

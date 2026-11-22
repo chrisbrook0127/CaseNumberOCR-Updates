@@ -51,7 +51,7 @@ class SpanAndLearning(unittest.TestCase):
             self.assertEqual(ex['crop_origin'],'candidate-number-box')
             with Image.open(a.learning_dir/ex['image']) as im:self.assertEqual(im.size,(116,40))
 
-    def test_drawn_field_trims_caption_and_keeps_user_region(self):
+    def test_drawn_field_saved_without_rerunning_ocr(self):
         with tempfile.TemporaryDirectory() as d:
             a=self.learning_app(d);a.reader=Mock()
             a._find_case_field_label_regions=Mock(return_value=[(100,40,250,70,'incident')])
@@ -62,7 +62,8 @@ class SpanAndLearning(unittest.TestCase):
             a._save_learning_example(r,'08-84')
             ex=a.learning_data['examples'][0]
             self.assertEqual(ex['crop_origin'],'manual-field')
-            with Image.open(a.learning_dir/ex['image']) as im:self.assertEqual(im.size,(214,67))
+            with Image.open(a.learning_dir/ex['image']) as im:self.assertEqual(im.size,(388,98))
+            a._find_case_field_label_regions.assert_not_called()
 
     def test_missing_crop_reports_failure_without_example(self):
         with tempfile.TemporaryDirectory() as d:

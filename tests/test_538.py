@@ -79,7 +79,7 @@ class AnchorRevalidation(unittest.TestCase):
             with patch.object(m.threading,'Thread',ImmediateThread):a.export_completed()
             self.assertEqual(seen,['check'])
             self.assertTrue((a.folder/'approved1.pdf').exists())
-            self.assertTrue((a.folder/'08-101.pdf').exists())
+            self.assertTrue((a.folder/'COMPLETED'/'approved2_08-101.pdf').exists())
 
     def test_rename_aborts_on_sequence_failure(self):
         with tempfile.TemporaryDirectory() as d:
@@ -95,9 +95,9 @@ class AnchorRevalidation(unittest.TestCase):
             a=self.app();a.queue=queue.Queue();folder=Path(d)
             one=folder/'Image1.pdf';two=folder/'Image2.pdf'
             one.write_bytes(b'one');two.write_bytes(b'two')
-            a._export_worker(folder,[('1',one,'08-0084'),('2',two,'08-84')])
-            self.assertEqual((folder/'08-84.pdf').read_bytes(),b'one')
-            self.assertEqual((folder/'08-84 (1).pdf').read_bytes(),b'two')
+            a._export_worker(folder/'COMPLETED',[('1',one,'08-0084'),('2',two,'08-84')])
+            self.assertEqual((folder/'COMPLETED'/'Image1_08-84.pdf').read_bytes(),b'one')
+            self.assertEqual((folder/'COMPLETED'/'Image2_08-84.pdf').read_bytes(),b'two')
 
     def test_revalidation_even_when_ocr_auto_confirm_off(self):
         a=self.sequence(['08-84',None,'08-84'])

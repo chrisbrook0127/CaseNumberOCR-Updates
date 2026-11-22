@@ -1,0 +1,12 @@
+V5.4.0 - Approval, original filenames and explicit COMPLETED transfer
+
+SCAN includes RESCAN SELECTED, REFRESH and CLEAR. ACCEPT is now APPROVE.
+Ctrl+A selects all displayed rows; Shift-click selects a range, including thumbnails.
+Valid inline edits save and approve on Enter or focus loss. Existing in-place renamed root files from V5.3.9 are editable/sendable again.
+After the final before/after check, approved files rename automatically to original_filename_08-number.pdf. Original scan ordering is retained separately. Only leading padding is removed from the filename.
+SEND FILES moves all approved files to the selected folder's COMPLETED subfolder; review files stay in root. Existing destinations are never overwritten.
+Strict literal 08- validation gates OCR candidates, manual approvals, sequence case identity and file naming. Matching independently confirmed anchors remain required for inference.
+When labels are detected but yield no valid number, search the same 4x4 region for a localized complete case. No 5x5 or second whole-PDF scan.
+Unrelated fallback thumbnail crops are replaced with an explicit no-08-crop message. Number previews no longer add wide left-side label text.
+Saving a manually drawn crop no longer runs full-page OCR. The rectangle is retained at mouse release and SAVE REVIEW does not require Finish Box Selection.
+Historical examples/models and existing training thresholds remain unchanged. Real-document OCR accuracy and native Windows UI require field validation; source images for the reported examples were not attached.

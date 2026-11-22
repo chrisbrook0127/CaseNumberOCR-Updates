@@ -1,1 +1,1 @@
-Publish tested V5.3.9 equivalent leading-zero anchors without rescanning
+Publish V5.4.0 original-name workflow, approval fixes and explicit COMPLETED transfer
