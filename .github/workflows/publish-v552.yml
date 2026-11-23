@@ -54,7 +54,7 @@ jobs:
           cat /tmp/mfcase552patch.log
           if [ "$STATUS" -ne 0 ]; then
             grep -q '3 out of 18 hunks FAILED' /tmp/mfcase552patch.log
-            grep -q 'Hunk #2 FAILED' /tmp/mfcase552patch.log
+            grep -q 'Hunk #5 FAILED' /tmp/mfcase552patch.log
             grep -q 'Hunk #6 FAILED' /tmp/mfcase552patch.log
             grep -q 'Hunk #14 FAILED' /tmp/mfcase552patch.log
           fi
@@ -68,6 +68,15 @@ jobs:
               marker='        self.records = {}'
               assert marker in app, 'Cannot locate safe sent-history initialization'
               source=source.replace(marker,marker+'\n        self.sent_history = {}',1)
+          folder_start=source.index('    def _apply_folder_load(')
+          folder_end=source.index('    def _ui(',folder_start)
+          folder_section=source[folder_start:folder_end]
+          if 'self._load_sent_history(saved)' not in folder_section:
+              found_line=folder_section.index('Found {len(pdfs)} PDF(s)')
+              before=folder_section.rfind('        self.status.config(',0,found_line)
+              assert before>=0, 'Could not find safe history-load insertion'
+              folder_section=folder_section[:before]+'        self._load_sent_history(saved)\n'+folder_section[before:]
+              source=source[:folder_start]+folder_section+source[folder_end:]
           start=source.index('    def _valid_ocr_box_candidates(')
           end=source.index('    def _sort_table_column(',start)
           fragment=source[start:end]
