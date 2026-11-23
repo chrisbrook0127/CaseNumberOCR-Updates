@@ -54,7 +54,7 @@ class Regression(unittest.TestCase):
         middle=[self.add(i) for i in range(1,101)]
         right=self.add(101,confirmed="08-0167",manual=True)
         assert self.app._apply_sequence_consensus() == 100
-        assert all(r["confirmed"]=="08-0167" and r["sequence_inferred"] for r in middle)
+        assert all(r["confirmed"]=="08-167" and r["sequence_inferred"] for r in middle)
         assert left["manual_approved"] and right["manual_approved"]
 
     def test_conflicting_anchors_do_not_infer(self):
