@@ -1,1 +1,1 @@
-Publish V5.4.2: prefix evidence, manual anchors, sorting, approve and send.
+Publish V5.4.3: complete prefix gate coverage in evidence and review previews.

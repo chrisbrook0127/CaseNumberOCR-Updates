@@ -239,7 +239,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.4.2"
+        self.app_version = "5.4.3"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -5917,6 +5917,8 @@ class App:
                     draw.text((x0, max(0, y0-18)), confirmed or "SELECTED", fill="#00e85a", stroke_width=2, stroke_fill="#111111")
                 chosen_used = False
                 for candidate in candidates:
+                    if not candidate.get("prefix_verified") or not CASE_RE.fullmatch(str(candidate.get("number") or "")):
+                        continue
                     rect = candidate.get("rect")
                     if not rect:
                         continue
@@ -6460,6 +6462,8 @@ class App:
             if r.get("snippet") is None:
                 raise FileNotFoundError("The original PDF is missing or its preview could not be rebuilt.")
             page_num, full_arr, label, auto_rect = r.get("snippet")[:4]
+            if not any(tuple(h.get("rect") or ())==tuple(auto_rect or ()) for h in visual_candidates):
+                auto_rect=None
             original = Image.fromarray(full_arr).convert("RGB")
 
             zoom = {"value": 1.0, "fit": True}
