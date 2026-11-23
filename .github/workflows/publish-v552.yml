@@ -77,18 +77,19 @@ jobs:
               assert before>=0, 'Could not find safe history-load insertion'
               folder_section=folder_section[:before]+'        self._load_sent_history(saved)\n'+folder_section[before:]
               source=source[:folder_start]+folder_section+source[folder_end:]
-          start=source.index('    def _valid_ocr_box_candidates(')
-          end=source.index('    def _sort_table_column(',start)
-          fragment=source[start:end]
-          if 'if x1>w+4 or y1>h+4:' not in fragment:
-              old='            valid.append(hit)'
-              new='''            if snippet[1] is not None and hasattr(snippet[1], "shape"):
+          if 'if x1>w+4 or y1>h+4:' not in source:
+              box_anchor='# Multiple OCR passes may report overlapping versions'
+              assert box_anchor in source, 'OCR box deduplication anchor missing'
+              upto=source.index(box_anchor)
+              item='            valid.append(hit)'
+              pos=source.rfind(item,0,upto)
+              assert pos>=0 and upto-pos<650, 'Cannot localize the verified OCR box append'
+              replacement='''            if snippet[1] is not None and hasattr(snippet[1], "shape"):
                 h,w=snippet[1].shape[:2]
                 if x1>w+4 or y1>h+4:
                     continue
             valid.append(hit)'''
-              assert fragment.count(old)==1,'Cannot identify localized box list'
-              source=source[:start]+fragment.replace(old,new)+source[end:]
+              source=source[:pos]+replacement+source[pos+len(item):]
           old='self._is_corner_case_rect(snip[3],snip[1])'
           assert old in source or 'self._is_in_4x4_rect(snip[3],snip[1])' in source,'ROI eligibility expression not found'
           source=source.replace(old,'self._is_in_4x4_rect(snip[3],snip[1])')
