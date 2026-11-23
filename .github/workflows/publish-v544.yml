@@ -44,8 +44,8 @@ jobs:
       - name: Test application and updater
         run: |
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
-          cd "$APP"
-          xvfb-run -a python -m unittest discover -s tests -v
+          if [ -d "$APP/tests" ]; then (cd "$APP" && xvfb-run -a python -m unittest discover -s tests -v); fi
+          xvfb-run -a python tools/test_release_544.py "$APP"
       - name: Create tested full and updater ZIPs
         run: |
           python - <<'PY'
