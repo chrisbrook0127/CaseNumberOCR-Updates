@@ -4,6 +4,9 @@ from unittest.mock import Mock,patch
 import test_rules
 m=test_rules.m
 class ScanStart(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(m,"pymupdf",object()))
+
     def app(self,folder):
         a=test_rules.Rules().app();a.folder=folder;a.root=Mock();a.status=Mock()
         a._startup_ready=True;a.learning_dir=folder;a.reader=object();a.trocr_model=object()
