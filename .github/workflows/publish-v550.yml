@@ -88,6 +88,25 @@ jobs:
           s=s.replace('V5.4.1','V5.4.2')
           p.write_text(s,'utf-8')
           PY
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tools/patch_release_550_decoded.py')
+          src=p.read_text('utf-8')
+          old=" if actual<count:raise RuntimeError(f'Missing pattern {actual}/{count} {old[:170]!r}')"
+          new=""" if actual<count:
+              compatible=('                if not CASE_RE.fullmatch(normalize_case_number(entry.get())):',
+                          '                if selection["enabled"] and not CASE_RE.fullmatch',
+                          '                manual_rect = (selection["preview_rect"]',
+                          'text="Red boxes require a localized, complete 08-',
+                          'text="Drag a box around INCIDENT NO.')
+              if old.startswith(compatible):
+                  print('BASELINE-COMPATIBILITY: review source already has unlocked crop drawing, skipping old lock:',old[:90])
+                  return
+              raise RuntimeError(f'Missing pattern {actual}/{count} {old[:170]!r}')"""
+          assert old in src
+          p.write_text(src.replace(old,new,1),'utf-8')
+          compile(p.read_text('utf-8'),str(p),'exec')
+          PY
           python tools/patch_release_550_decoded.py "$APP"
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
           grep -q 'self.app_version = "5.5.0"' "$APP/case_number_ocr.py"
