@@ -32,73 +32,25 @@ jobs:
           gh release download v5.5.1 --repo "$GITHUB_REPOSITORY" --pattern 'MFCase_Number_OCR_V5.5.1_Full_Online_Install.zip' --dir previous
           unzip -q previous/MFCase_Number_OCR_V5.5.1_Full_Online_Install.zip -d stage
           find stage -name case_number_ocr.py -print
-      - name: Decode audited source-only patch and apply
+      - name: Restore checksum-verified canonical v5.5.2 Python source
         run: |
           python - <<'PY'
           import base64,zlib,hashlib
           from pathlib import Path
-          blob=Path('tools/patch_v552.b64').read_text().strip()
-          assert len(blob)==8384, 'Patch transfer length differs from tested source'
-          assert hashlib.sha256(blob.encode()).hexdigest()=='afee2c65827b0485410eb4b737b6b2dba53e57f56039bc6102a22621b6931075', 'Patch transfer digest differs'
-          patch=zlib.decompress(base64.b64decode(blob,validate=True))
-          assert hashlib.sha256(patch).hexdigest()=='37317b60dd0643e9702a6bac33c4ed2ba45487ff5f983378977c8928cd74daed', 'Patch contents differ'
-          Path('v552.patch').write_bytes(patch)
-          print('Verified sanitized v5.5.2 source patch')
+          packed=Path('tools/canonical_v552_source.b64').read_text('utf-8').strip()
+          assert len(packed)==122836
+          assert hashlib.sha256(packed.encode()).hexdigest()=='b1ceef02011a96023284371e57a56b35cca259ef3fd7c1a5eeec371999cadd1f'
+          source=zlib.decompress(base64.b64decode(packed,validate=True))
+          assert hashlib.sha256(source).hexdigest()=='10198e62aa782f00e88593e5f584ba4c8f9865f5ade4272e87f14bccb5ceab07'
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          (app/'case_number_ocr.py').write_bytes(source)
+          compile(source,str(app/'case_number_ocr.py'),'exec')
+          assert b'self.app_version = "5.5.2"' in source
+          assert b'.case_ocr_sent_history.json' in source
+          print('PASS canonical source checksum and Python compilation')
           PY
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
-          sha256sum "$APP/case_number_ocr.py"
-          set +e
-          (cd "$APP" && patch --batch -p0 --fuzz=2 < "$GITHUB_WORKSPACE/v552.patch") > /tmp/mfcase552patch.log 2>&1
-          STATUS="$?"
-          set -e
-          cat /tmp/mfcase552patch.log
-          if [ "$STATUS" -ne 0 ]; then
-            grep -q '3 out of 18 hunks FAILED' /tmp/mfcase552patch.log
-            grep -q 'Hunk #5 FAILED' /tmp/mfcase552patch.log
-            grep -q 'Hunk #6 FAILED' /tmp/mfcase552patch.log
-            grep -q 'Hunk #14 FAILED' /tmp/mfcase552patch.log
-          fi
-          python - "$APP" <<'PY'
-          import re,sys
-          from pathlib import Path
-          p=Path(sys.argv[1])/'case_number_ocr.py'
-          source=p.read_text(encoding='utf-8')
-          app=source[source.index('class App:'):source.index('    def _loader_start(',source.index('class App:'))]
-          if 'self.sent_history = {}' not in app:
-              marker='        self.records = {}'
-              assert marker in app, 'Cannot locate safe sent-history initialization'
-              source=source.replace(marker,marker+'\n        self.sent_history = {}',1)
-          folder_start=source.index('    def _apply_folder_load(')
-          folder_end=source.index('    def _ui(',folder_start)
-          folder_section=source[folder_start:folder_end]
-          if 'self._load_sent_history(saved)' not in folder_section:
-              found_line=folder_section.index('Found {len(pdfs)} PDF(s)')
-              before=folder_section.rfind('        self.status.config(',0,found_line)
-              assert before>=0, 'Could not find safe history-load insertion'
-              folder_section=folder_section[:before]+'        self._load_sent_history(saved)\n'+folder_section[before:]
-              source=source[:folder_start]+folder_section+source[folder_end:]
-          if 'if x1>w+4 or y1>h+4:' not in source:
-              box_anchor='# Multiple OCR passes may report overlapping versions'
-              assert box_anchor in source, 'OCR box deduplication anchor missing'
-              upto=source.index(box_anchor)
-              item='            valid.append(hit)'
-              pos=source.rfind(item,0,upto)
-              assert pos>=0 and upto-pos<650, 'Cannot localize the verified OCR box append'
-              replacement='''            if snippet[1] is not None and hasattr(snippet[1], "shape"):
-                h,w=snippet[1].shape[:2]
-                if x1>w+4 or y1>h+4:
-                    continue
-            valid.append(hit)'''
-              source=source[:pos]+replacement+source[pos+len(item):]
-          old='self._is_corner_case_rect(snip[3],snip[1])'
-          assert old in source or 'self._is_in_4x4_rect(snip[3],snip[1])' in source,'ROI eligibility expression not found'
-          source=source.replace(old,'self._is_in_4x4_rect(snip[3],snip[1])')
-          p.write_text(source,encoding='utf-8')
-          print('Verified v5.5.1 production compatibility fixes')
-          PY
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
-          grep -q 'self.app_version = "5.5.2"' "$APP/case_number_ocr.py"
-          grep -q '.case_ocr_sent_history.json' "$APP/case_number_ocr.py"
       - name: Build app and stamp integrity
         run: |
           python - <<'PY'
