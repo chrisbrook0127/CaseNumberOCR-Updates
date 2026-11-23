@@ -50,6 +50,30 @@ jobs:
         run: |
           set -eu
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          source=(app/'case_number_ocr.py').read_text('utf-8')
+          patch=Path('tools/patch_release_550_decoded.py').read_text('utf-8')
+          calls=[]
+          for n in ast.walk(ast.parse(patch)):
+              if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id in ('rep','replace','method') and n.args:
+                  v=n.args[0]
+                  if isinstance(v,ast.Constant) and isinstance(v.value,str):
+                      old=v.value
+                      if n.func.id=='method':
+                          found='    def '+old+'(' in source
+                      else:
+                          found=old in source
+                      if not found:
+                          calls.append((n.lineno,n.func.id,old[:105]))
+          print('BASELINE-DIAGNOSTIC source bytes:',len(source))
+          for match in ('root.title(', 'self.app_version =','Case Number OCR & Renamer','Application version:'):
+              print('BASELINE',match, [(i+1,line.strip()[:160]) for i,line in enumerate(source.splitlines()) if match in line][:4])
+          print('BASELINE-MISSING-OLD-PATTERNS',len(calls))
+          for line in sorted(calls):print('MISSING',repr(line))
+          PY
           python tools/patch_release_550_decoded.py "$APP"
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
           grep -q 'self.app_version = "5.5.0"' "$APP/case_number_ocr.py"
