@@ -47,7 +47,45 @@ jobs:
           PY
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
           sha256sum "$APP/case_number_ocr.py"
-          (cd "$APP" && patch --batch -p0 --fuzz=2 < "$GITHUB_WORKSPACE/v552.patch")
+          set +e
+          (cd "$APP" && patch --batch -p0 --fuzz=2 < "$GITHUB_WORKSPACE/v552.patch") > /tmp/mfcase552patch.log 2>&1
+          STATUS="$?"
+          set -e
+          cat /tmp/mfcase552patch.log
+          if [ "$STATUS" -ne 0 ]; then
+            grep -q '3 out of 18 hunks FAILED' /tmp/mfcase552patch.log
+            grep -q 'Hunk #2 FAILED' /tmp/mfcase552patch.log
+            grep -q 'Hunk #6 FAILED' /tmp/mfcase552patch.log
+            grep -q 'Hunk #14 FAILED' /tmp/mfcase552patch.log
+          fi
+          python - "$APP" <<'PY'
+          import re,sys
+          from pathlib import Path
+          p=Path(sys.argv[1])/'case_number_ocr.py'
+          source=p.read_text(encoding='utf-8')
+          app=source[source.index('class App:'):source.index('    def _loader_start(',source.index('class App:'))]
+          if 'self.sent_history = {}' not in app:
+              marker='        self.records = {}'
+              assert marker in app, 'Cannot locate safe sent-history initialization'
+              source=source.replace(marker,marker+'\n        self.sent_history = {}',1)
+          start=source.index('    def _valid_ocr_box_candidates(')
+          end=source.index('    def _sort_table_column(',start)
+          fragment=source[start:end]
+          if 'if x1>w+4 or y1>h+4:' not in fragment:
+              old='            valid.append(hit)'
+              new='''            if snippet[1] is not None and hasattr(snippet[1], "shape"):
+                h,w=snippet[1].shape[:2]
+                if x1>w+4 or y1>h+4:
+                    continue
+            valid.append(hit)'''
+              assert fragment.count(old)==1,'Cannot identify localized box list'
+              source=source[:start]+fragment.replace(old,new)+source[end:]
+          old='self._is_corner_case_rect(snip[3],snip[1])'
+          assert old in source or 'self._is_in_4x4_rect(snip[3],snip[1])' in source,'ROI eligibility expression not found'
+          source=source.replace(old,'self._is_in_4x4_rect(snip[3],snip[1])')
+          p.write_text(source,encoding='utf-8')
+          print('Verified v5.5.1 production compatibility fixes')
+          PY
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
           grep -q 'self.app_version = "5.5.2"' "$APP/case_number_ocr.py"
           grep -q '.case_ocr_sent_history.json' "$APP/case_number_ocr.py"
