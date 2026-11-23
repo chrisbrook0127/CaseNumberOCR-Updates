@@ -1,0 +1,156 @@
+name: Publish MFCase v5.5.2
+on:
+  push:
+    branches:
+      - publish/v5.5.2
+    paths:
+      - .github/workflows/publish-v552.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v552
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install headless GUI test tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'PyMuPDF<2.0'
+      - name: Download published v5.5.1 source installer
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          mkdir -p previous stage dist
+          gh release download v5.5.1 --repo "$GITHUB_REPOSITORY" --pattern 'MFCase_Number_OCR_V5.5.1_Full_Online_Install.zip' --dir previous
+          unzip -q previous/MFCase_Number_OCR_V5.5.1_Full_Online_Install.zip -d stage
+          find stage -name case_number_ocr.py -print
+      - name: Decode audited source-only patch and apply
+        run: |
+          python - <<'PY'
+          import base64,zlib,hashlib
+          from pathlib import Path
+          blob=Path('tools/patch_v552.b64').read_text().strip()
+          assert len(blob)==8384, 'Patch transfer length differs from tested source'
+          assert hashlib.sha256(blob.encode()).hexdigest()=='afee2c65827b0485410eb4b737b6b2dba53e57f56039bc6102a22621b6931075', 'Patch transfer digest differs'
+          patch=zlib.decompress(base64.b64decode(blob,validate=True))
+          assert hashlib.sha256(patch).hexdigest()=='37317b60dd0643e9702a6bac33c4ed2ba45487ff5f983378977c8928cd74daed', 'Patch contents differ'
+          Path('v552.patch').write_bytes(patch)
+          print('Verified sanitized v5.5.2 source patch')
+          PY
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          sha256sum "$APP/case_number_ocr.py"
+          (cd "$APP" && patch --batch -p0 --fuzz=2 < "$GITHUB_WORKSPACE/v552.patch")
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+          grep -q 'self.app_version = "5.5.2"' "$APP/case_number_ocr.py"
+          grep -q '.case_ocr_sent_history.json' "$APP/case_number_ocr.py"
+      - name: Build app and stamp integrity
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          source=app/'case_number_ocr.py'
+          assert '5.5.2' in source.read_text()
+          readme=app/'README_FIRST.txt'
+          readme.write_text(readme.read_text(encoding='utf-8').replace('5.5.1','5.5.2'),encoding='utf-8')
+          changelog=app/'CHANGELOG_V5_5_2.txt'
+          changelog.write_text("""MFCase v5.5.2
+          - Real 4x4 upper-right ROI replaces false 82% width rejection.
+          - A valid, unambiguous, physically located 08- case with >=95% OCR can complete without review.
+          - Correct x-offset for red boxes around INCIDENT NO. case numbers.
+          - Single-click editable CASE NUMBER column; confirmation remains manual-authoritative.
+          - Durable original filename, destination and confirmation history for successful sends.
+          - COMPLETED anchors can bracket unsent REVIEW files after send and across restarts.
+          - Inferred values remain audit records and cannot become independent anchors.
+          - No private PDFs, OCR logs, or learning records in release assets.
+          """.replace('          ',''),encoding='utf-8')
+          manifest={name:hashlib.sha256((app/name).read_bytes()).hexdigest()
+                    for name in ('case_number_ocr.py','updater_apply.py','SETUP.bat','README_FIRST.txt')}
+          (app/'verify_package.py').write_text(
+              'from pathlib import Path\nimport hashlib\nROOT=Path(__file__).resolve().parent\nEXPECTED='+
+              repr(manifest)+'\nfor name,digest in EXPECTED.items():\n'
+              '    assert hashlib.sha256((ROOT/name).read_bytes()).hexdigest()==digest,name\n'
+              'print("PASS MFCase v5.5.2 integrity")\n',encoding='utf-8')
+          PY
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python "$APP/verify_package.py"
+      - name: Regression test GUI and history
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          xvfb-run -a python tools/test_release_552.py "$APP"
+      - name: Build sanitized release files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile,ZIP_DEFLATED
+          import hashlib
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          names={'case_number_ocr.py','updater_apply.py','RUN_CASE_OCR.bat',
+                 'Launch_Case_OCR.vbs','MF.ico','README_FIRST.txt','SETUP.bat',
+                 'verify_package.py','update_config.json','CHANGELOG_V5_5_2.txt'}
+          update=Path('dist/CaseNumberOCR_Update.zip')
+          full=Path('dist/MFCase_Number_OCR_V5.5.2_Full_Online_Install.zip')
+          with ZipFile(update,'w',ZIP_DEFLATED,compresslevel=9) as z:
+              for name in sorted(names):
+                  if (app/name).is_file():z.write(app/name,name)
+          with ZipFile(full,'w',ZIP_DEFLATED,compresslevel=9) as z:
+              for f in sorted(app.iterdir()):
+                  if f.is_file() and (f.name in names or f.name.startswith('CHANGELOG_V5_') or f.name in
+                      ('CREATE_DESKTOP_SHORTCUT.bat','Create_Desktop_Shortcut.vbs')):
+                      z.write(f,'MFCase_Number_OCR_V5.5.2_Full_Online_Install/'+f.name)
+              z.write('tools/test_release_552.py','MFCase_Number_OCR_V5.5.2_Full_Online_Install/tests/test_release_552.py')
+          for path in (full,update):
+              with ZipFile(path) as z:
+                  assert z.testzip() is None
+                  assert not any(name.lower().endswith(('.pdf','.log','.jsonl','.pth','.pt')) or
+                                 '.case_ocr_' in name for name in z.namelist())
+              print(path,path.stat().st_size,hashlib.sha256(path.read_bytes()).hexdigest())
+          PY
+      - name: Verify automatic updater accepts package
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python - "$APP" <<'PY'
+          import sys,tempfile,shutil
+          from pathlib import Path
+          app=Path(sys.argv[1]).resolve()
+          sys.path.insert(0,str(app))
+          from updater_apply import validate_update,apply_update
+          source=Path('dist/CaseNumberOCR_Update.zip').resolve()
+          with tempfile.TemporaryDirectory() as tmp:
+              stage=Path(tmp)/'stage';stage.mkdir()
+              validate_update(source,stage)
+              installed=Path(tmp)/'installed';installed.mkdir()
+              (installed/'case_number_ocr.py').write_text('old version')
+              (installed/'.case_ocr_state.json').write_text('PRIVATE STATE')
+              (installed/'.case_ocr_sent_history.json').write_text('PRIVATE HISTORY')
+              archive=Path(tmp)/'update.zip';shutil.copy2(source,archive)
+              apply_update(installed,archive)
+              assert '5.5.2' in (installed/'case_number_ocr.py').read_text()
+              assert (installed/'.case_ocr_state.json').read_text()=='PRIVATE STATE'
+              assert (installed/'.case_ocr_sent_history.json').read_text()=='PRIVATE HISTORY'
+          print('PASS in-place update and private state preservation')
+          PY
+      - name: Publish public GitHub release and verify exact updater download
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.5.2
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.5.2" --notes-file "$APP/CHANGELOG_V5_5_2.txt"
+          fi
+          gh release upload "$TAG" dist/CaseNumberOCR_Update.zip dist/MFCase_Number_OCR_V5.5.2_Full_Online_Install.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
