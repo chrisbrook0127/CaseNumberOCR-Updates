@@ -74,6 +74,20 @@ jobs:
           print('BASELINE-MISSING-OLD-PATTERNS',len(calls))
           for line in sorted(calls):print('MISSING',repr(line))
           PY
+          python - <<'PY'
+          from pathlib import Path
+          p=next(Path('stage').rglob('case_number_ocr.py'))
+          s=p.read_text('utf-8')
+          lines=s.splitlines()
+          for i,line in enumerate(lines):
+              if any(token in line for token in ('selection["enabled"]','manual_rect =','Red boxes require','Drag a box around','crop_preview')):
+                  if 5500<=i<=7000:
+                      print('REVIEW-SOURCE',i+1,repr('\n'.join(lines[max(0,i-2):min(len(lines),i+5)])))
+          # Normalize only historical visual version labels so the local
+          # regression-tested patch can apply to GitHub's v5.4.4 release.
+          s=s.replace('V5.4.1','V5.4.2')
+          p.write_text(s,'utf-8')
+          PY
           python tools/patch_release_550_decoded.py "$APP"
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
           grep -q 'self.app_version = "5.5.0"' "$APP/case_number_ocr.py"
