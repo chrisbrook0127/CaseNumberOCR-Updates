@@ -44,14 +44,14 @@ class Workflow540(unittest.TestCase):
             self.assertEqual((Path(d)/'approved1_08-1114 (1).pdf').read_bytes(),b'approved1')
 
     def test_ctrl_a_includes_completed_and_review(self):
-        a=self.app();a._startup_ready=True;a.tree=Mock();a.status=Mock()
+        a=self.app();a._startup_ready=True;a.tree=Mock();a.status=Mock();a._sync_scan_selection=Mock()
         a.tree.get_children.return_value=('approved','review','unscanned')
         a._refresh_rescan_button=Mock();a._rescan_eligible=Mock(return_value=False)
         self.assertEqual(a._select_all_for_rescan(),'break')
         a.tree.selection_set.assert_called_once_with(('approved','review','unscanned'))
 
     def test_shift_image_click_selects_range(self):
-        a=self.app();a.tree=Mock();a.tree.exists.return_value=True
+        a=self.app();a.tree=Mock();a.tree.exists.return_value=True;a._sync_scan_selection=Mock()
         a.tree.get_children.return_value=('a','b','c','d');a._scan_selection_anchor='a'
         a._select_preview_row('c',SimpleNamespace(state=1))
         a.tree.selection_set.assert_called_once_with(['a','b','c'])

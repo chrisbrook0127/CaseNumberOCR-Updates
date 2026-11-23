@@ -165,7 +165,7 @@ def _mfcase_export_case_name(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.4.0")
+        root.title("M.F. Case Number OCR — V5.4.1")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -239,7 +239,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.4.0"
+        self.app_version = "5.4.1"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -478,7 +478,7 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.4.0",
+        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.4.1",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
         # Coworker-facing navigation and learning action.
@@ -723,7 +723,7 @@ class App:
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         ttk.Label(self.settings_tab,text="SETTINGS",
                   font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.4.0",
+        ttk.Label(self.settings_tab,text="Application version: V5.4.1",
                   font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
         ttk.Label(self.settings_tab,
                   text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
@@ -1238,6 +1238,7 @@ class App:
                 self._scan_selection_anchor=iid
             self.tree.focus(iid)
             self.tree.focus_set()
+            self._sync_scan_selection()
             self._refresh_review_controls()
 
     def _open_preview_review(self,iid):
@@ -1546,6 +1547,7 @@ class App:
         if selected:
             self.tree.selection_set(selected)
             self.tree.focus(selected[0])
+            self._sync_scan_selection()
             self._refresh_rescan_button()
             self.status.config(text=f"{len(selected):,} PDF(s) selected.")
         else:
@@ -1622,7 +1624,10 @@ class App:
         self.scan(only_iids=set(selected))
 
     def _refresh_scan_button(self):
-        if not hasattr(self, "scan_btn") or self.busy or self.trocr_training:
+        if not hasattr(self, "scan_btn"):
+            return
+        if self.busy or self.trocr_training or self.export_busy:
+            self.scan_btn.config(state="disabled")
             return
         if not self._startup_ready:
             self.scan_btn.config(state="disabled")
@@ -1635,7 +1640,7 @@ class App:
                  or str(rec.get("status", "")).startswith("Scan error:"))
             and Path(rec["path"]).is_file()
             for iid, rec in self.records.items())
-        self.scan_btn.config(state="normal" if candidates or getattr(self,"_sequence_review_pending",False) else "disabled")
+        self.scan_btn.config(state="normal" if candidates or any(self._rescan_eligible(iid) for iid in self.tree.selection()) or getattr(self,"_sequence_review_pending",False) else "disabled")
         self._refresh_rescan_button()
         button=getattr(self,"send_selected_btn",None)
         if button is not None:
@@ -1843,8 +1848,8 @@ class App:
                  selected_files=[Path(x[1]["path"]).name for x in self.scan_items],
                  scan_folder=str(self.folder),
                  year_prefix=self.scan_year_prefix,
-                 scan_region_inches=[3,3],
-                 either_engine_min_inclusive=100.0,
+                 scan_region_inches=[4,4],
+                 either_engine_min_inclusive=self._get_auto_threshold(),
                  auto_label_enabled=bool(self.auto_label_var.get()),
                  application_version=self.app_version)
             # Keep a bounded history on the workstation (not on the shared share).
@@ -3732,15 +3737,48 @@ class App:
                 shutil.rmtree(candidate_dir, ignore_errors=True)
 
     def scan(self, only_iids=None):
+        """Start from current selection and report every blocked/failed request."""
+        was_busy=self.busy
+        try:
+            return self._start_scan(only_iids)
+        except Exception as exc:
+            logging.exception("SCAN could not start")
+            if not was_busy:
+                self.busy=False
+                self.paused=False
+                self.stop_event.clear()
+                self.pause_event.set()
+                self.pause_btn.config(state="disabled",text="PAUSE")
+                self._refresh_scan_button()
+            self._diag_event("scan_start_error",error=repr(exc))
+            self._scan_blocked(f"SCAN could not start: {exc}. Your PDFs and learning data are unchanged by this failed start.")
+
+    def _scan_blocked(self, message):
+        self.status.config(text=message)
+        messagebox.showinfo("SCAN",message,parent=self.root)
+
+    def _start_scan(self, only_iids=None):
         if getattr(self,"_scan_case_editor",None) is not None:
-            self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
+            self._scan_blocked("Save the edited case with Enter or cancel with Esc first.")
             self._scan_case_editor.focus_set()
             return
-        if not self._startup_ready or not self.learning_dir or self.reader is None or self.trocr_model is None:
-            self.status.config(text="Scanning is locked until shared learning and all OCR models are ready.")
+        if not self._startup_ready or self.reader is None or self.trocr_model is None:
+            self._scan_blocked("OCR models are not ready. Wait for startup to finish or check the startup error before scanning.")
             return
-        if self.busy or self.trocr_training or self.export_busy or not self.records:
+        if not self.learning_dir:
+            self._scan_blocked("Learning storage is unavailable. Restore access before scanning.")
             return
+        if self.busy or self.trocr_training or self.export_busy:
+            self._scan_blocked("An operation is already running. Finish scanning, learning or sending before starting another scan.")
+            return
+        if not self.folder or not self.records:
+            self._scan_blocked("Click SELECT FILES and choose a folder containing PDFs first.")
+            return
+        # Read the selection now; do not depend on a queued TreeviewSelect event.
+        selected=set(self.tree.selection())
+        self.scan_checked_iids=selected
+        for iid,rec in self.records.items():
+            rec["scan_selected"]=iid in selected
         self.scan_year_prefix = self._year_prefix()
         if pymupdf is None or easyocr is None or np is None:
             messagebox.showerror(
@@ -3773,7 +3811,10 @@ class App:
                 self.busy=True
                 self.queue.put(("done",))
                 return
-            self.status.config(text="No checked, unscanned files to scan. Select files or click REFRESH.")
+            if any(self._rescan_eligible(iid) for iid in selected):
+                self.rescan_selected()
+                return
+            self._scan_blocked("No unscanned PDFs selected. Select rows or press Ctrl+A. Approved files are protected; use UNVERIFY before rescanning them.")
             self.restart_btn.config(text="RESTART", state="normal")
             self._refresh_scan_button()
             return

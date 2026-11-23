@@ -1,0 +1,3 @@
+V5.4.1 - Scan start and selection reliability
+
+SCAN reads current highlighted rows directly, without waiting for a queued selection event. Click, Shift-click and Ctrl+A synchronize selection immediately. SCAN on unresolved previously scanned rows offers the existing explicit rescan confirmation; approved files remain protected. Busy, missing-model, missing-storage and empty-selection blocks show visible explanations. Scan-start exceptions are logged and displayed, and failed starts restore idle controls. Busy or sending operations disable SCAN. Diagnostic headers now record the actual 4x4 region and selected threshold. No changes to OCR approval rules, learning data or file transfer naming.

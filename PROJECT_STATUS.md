@@ -1,9 +1,9 @@
 # MFCase status
 
-Published production version: V5.4.0. Previous verified baseline: V5.3.9. No separate development version.
+Production baseline: V5.4.0. Development: V5.4.1.
 
-Implemented: scan controls restored, APPROVE label, Ctrl+A all rows and Shift-click ranges; valid inline edits approve and persist; legacy root exported flags reopened for sending. After sequence review approved PDFs automatically rename as original_case.pdf, preserving original order. Explicit SEND FILES moves approved PDFs into COMPLETED with collision protection; review remains in root. Literal 08- gates, same-4x4 fallback when label-only recognition fails, no arbitrary fallback thumbnails, drawn-crop saving without full-page OCR or finish-toggle requirement.
+Fixes: immediate selection synchronization; SCAN uses visible selection, offers explicit rescan for unresolved prior scans, reports all blocked starts, catches startup exceptions and restores idle controls. Busy/sending disables SCAN. Diagnostic header reflects 4x4 and actual threshold.
 
-Locked: original PDF contents unchanged; no historical learning migration or deletion; manual UPDATE LEARNING; thresholds 75-100 default95; padded case identities match; inference never chains and competing ranges require review. No second whole-PDF scan and no 5x5.
+Preserved: literal08 prefix, padded anchors, original-name automatic renaming, explicit SEND FILES to COMPLETED, all historical learning/model data and training behavior.
 
-Validation: 104 automated tests and package integrity passed locally. GitHub Actions run 45028894554 passed. Live V5.3.9 updater downloaded, validated and installed V5.4.0 with synthetic documents and historical learning unchanged. Published full installer matches the tested package. Native Windows UI and real OCR examples remain unverified; user images arrived as literal image text. Next priority: validate reported handwriting samples and Windows interaction.
+Validation: 109 tests passed including actual scan-start worker dispatch, stale checkbox selection, thread failure recovery and visible block reasons. User-specific click failure not reproduced on native Windows; visible errors now expose its cause if it persists. Release/updater verification pending.
