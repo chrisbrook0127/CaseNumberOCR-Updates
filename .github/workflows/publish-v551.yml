@@ -62,9 +62,9 @@ jobs:
           from pathlib import Path
           p=Path('tools/patch_release_551.py')
           s=p.read_text('utf-8')
-          old='    def _quick_approve(self, iid):\\n        if'
-          new='    def _quick_approve(self, iid):\\n        """Green check completes a single file; SEND FILES moves it."""\\n        if'
-          assert s.count(old)==2, 'Unexpected patch layout'
+          old='    def _quick_approve(self, iid):'+chr(10)+'        if'
+          new='    def _quick_approve(self, iid):'+chr(10)+'        """Green check completes a single file; SEND FILES moves it."""'+chr(10)+'        if'
+          assert s.count(old)==2, ('Unexpected patch layout',s.count(old))
           p.write_text(s.replace(old,new),'utf-8')
           compile(p.read_text('utf-8'),str(p),'exec')
           PY
