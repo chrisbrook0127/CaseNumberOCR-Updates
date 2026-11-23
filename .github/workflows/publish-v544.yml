@@ -1,4 +1,5 @@
 name: Publish MFCase v5.4.4
+# Regression runner checks canonical 08- case identity.
 on:
   push:
     branches:
