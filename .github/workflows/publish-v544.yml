@@ -1,0 +1,96 @@
+name: Publish MFCase v5.4.4
+on:
+  push:
+    branches:
+      - publish/v5.4.4
+    paths:
+      - .github/workflows/publish-v544.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v544
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install offline test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install --upgrade pip
+          python -m pip install numpy pillow PyMuPDF
+      - name: Download latest existing full source release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p previous stage dist
+          gh release download v5.4.3 --repo "$GITHUB_REPOSITORY" --pattern 'MFCase_Number_OCR_V5.4.3_Full_Online_Install.zip' --dir previous
+          unzip -q previous/MFCase_Number_OCR_V5.4.3_Full_Online_Install.zip -d stage
+          find stage -maxdepth 2 -name case_number_ocr.py -print
+      - name: Apply verified v5.4.4 code changes
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          test -f "$APP/updater_apply.py"
+          python tools/patch_release_544.py "$APP"
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+          python "$APP/verify_package.py"
+      - name: Test application and updater
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          cd "$APP"
+          xvfb-run -a python -m unittest discover -s tests -v
+      - name: Create tested full and updater ZIPs
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          import shutil
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          package=Path('stage/MFCase_Number_OCR_V5.4.4_Full_Online_Install')
+          if app!=package:
+              app.rename(package)
+          app=package
+          # Never include PDFs, cached learning, temp files or model data.
+          allowed={'case_number_ocr.py','updater_apply.py','SETUP.bat',
+                   'verify_package.py','README_FIRST.txt','RUN_CASE_OCR.bat',
+                   'Launch_Case_OCR.vbs','MF.ico','update_config.json',
+                   'CHANGELOG_V5_4_4.txt'}
+          update=Path('dist/CaseNumberOCR_Update.zip')
+          full=Path('dist/MFCase_Number_OCR_V5.4.4_Full_Online_Install.zip')
+          with ZipFile(update,'w',ZIP_DEFLATED,compresslevel=9) as z:
+              for name in sorted(allowed):
+                  if (app/name).is_file():
+                      z.write(app/name,name)
+          with ZipFile(full,'w',ZIP_DEFLATED,compresslevel=9) as z:
+              for file in sorted(app.rglob('*')):
+                  if (file.is_file() and '__pycache__' not in file.parts
+                      and not file.suffix.lower() in ('.pdf','.pt','.pth','.log','.jsonl')):
+                      z.write(file,str(Path(app.name)/file.relative_to(app)))
+          for path in (update,full):
+              with ZipFile(path) as z:
+                  assert z.testzip() is None
+                  assert z.namelist()
+          print('Created',update,full)
+          PY
+      - name: Publish public release and verify actual download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.4.4
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.4.4" --notes-file "$(find stage -name CHANGELOG_V5_4_4.txt -print -quit)"
+          fi
+          gh release upload "$TAG" dist/CaseNumberOCR_Update.zip dist/MFCase_Number_OCR_V5.4.4_Full_Online_Install.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'CaseNumberOCR_Update.zip' --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,isLatest,assets
