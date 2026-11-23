@@ -26,7 +26,7 @@ jobs:
           python -m pip install numpy pillow 'PyMuPDF<2.0'
       - name: Download published v5.5.1 source installer
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p previous stage dist
           gh release download v5.5.1 --repo "$GITHUB_REPOSITORY" --pattern 'MFCase_Number_OCR_V5.5.1_Full_Online_Install.zip' --dir previous
@@ -140,7 +140,7 @@ jobs:
           PY
       - name: Publish public GitHub release and verify exact updater download
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           TAG=v5.5.2
