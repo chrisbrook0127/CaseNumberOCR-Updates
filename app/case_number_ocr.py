@@ -239,7 +239,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.4.1"
+        self.app_version = "5.4.2"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -453,6 +453,15 @@ class App:
             else:
                 item["completed_iid"]=None
             self._insert_scan_row(iid,item)
+        for name,old in saved.items():
+            if not old.get("exported"):
+                continue
+            sent_path=Path(self.folder)/"COMPLETED"/Path(name).name
+            if not sent_path.is_file() or not CASE_RE.fullmatch(str(old.get("confirmed") or "")):
+                continue
+            iid=f"sent::{name}"
+            self.records[iid]=dict(old,path=sent_path,snippet=None,
+                                   scan_selected=False,completed_iid=None)
         self.status.config(
             text=f"Found {len(pdfs)} PDF(s) in this folder. Saved review/export progress restored where available.")
         pending_files = any(
@@ -596,19 +605,19 @@ class App:
                                  style="MFCase.Scan.Treeview",selectmode="extended")
         self.tree.heading("scan_select", text="☑ ALL", command=self._toggle_scan_select_all)
         self.tree.column("scan_select", width=76, minwidth=65, stretch=False, anchor="center")
-        self.tree.heading("file", text="PDF FILE")
+        self.tree.heading("file", command=lambda c="file": self._sort_file_column(self.tree,c), text="PDF FILE")
         self.tree.column("file",width=210,minwidth=140,stretch=True)
-        self.tree.heading("preview",text="CASE NUMBER THUMBNAIL")
+        self.tree.heading("preview",command=lambda c="preview": self._sort_file_column(self.tree,c),text="CASE NUMBER THUMBNAIL")
         self.tree.column("preview",width=230,minwidth=210,stretch=False,anchor="center")
-        self.tree.heading("candidate", text="CASE NUMBER")
+        self.tree.heading("candidate", command=lambda c="candidate": self._sort_file_column(self.tree,c), text="CASE NUMBER")
         self.tree.column("candidate", width=135, minwidth=110, stretch=False, anchor="center")
-        self.tree.heading("approve", text="APPROVE")
+        self.tree.heading("approve", command=lambda c="approve": self._sort_file_column(self.tree,c), text="APPROVE")
         self.tree.column("approve", width=60, minwidth=60, stretch=False, anchor="center")
-        self.tree.heading("score", text="EASY / TrOCR")
+        self.tree.heading("score", command=lambda c="score": self._sort_file_column(self.tree,c), text="EASY / TrOCR")
         self.tree.column("score", width=135, minwidth=120, stretch=False, anchor="center")
-        self.tree.heading("workflow",text="STATUS")
+        self.tree.heading("workflow",command=lambda c="workflow": self._sort_file_column(self.tree,c),text="STATUS")
         self.tree.column("workflow",width=114,minwidth=98,stretch=False,anchor="center")
-        self.tree.heading("status", text="OCR DETAILS")
+        self.tree.heading("status", command=lambda c="status": self._sort_file_column(self.tree,c), text="OCR DETAILS")
         self.tree.column("status", width=220, minwidth=120, stretch=True)
         # Make OCR-generated case-number suggestions visible in the main queue.
         self.tree["displaycolumns"] = ("scan_select", "file", "preview", "candidate", "approve", "score", "workflow", "status")
@@ -683,7 +692,7 @@ class App:
             ("status", "QUEUE STATUS", 185, 140),
             ("unverify", "UNVERIFY", 94, 82),
             ("select", "☐ SELECT ALL", 112, 96)]:
-            self.completed_tree.heading(col, text=title)
+            self.completed_tree.heading(col, text=title, command=lambda c=col: self._sort_file_column(self.completed_tree,c))
             self.completed_tree.column(col, width=width, minwidth=min_width,
                                        anchor="center", stretch=col in ("file", "original_path", "status"))
         self.completed_tree.heading("select", command=self._toggle_completed_select_all)
@@ -1015,6 +1024,29 @@ class App:
             except tk.TclError:
                 pass
 
+    def _sort_file_column(self, tree, column):
+        commit=getattr(self,"_scan_case_commit",None)
+        if commit:
+            commit()
+            if getattr(self,"_scan_case_editor",None) is not None:
+                return
+        state=getattr(self,"_column_sort_state",{})
+        key=(str(tree),column)
+        reverse=not state.get(key,True)
+        def value(iid):
+            text=str(tree.set(iid,column))
+            if column in ("score","confidence"):
+                nums=re.findall(r"[0-9]+(?:\.[0-9]+)?",text)
+                return max(map(float,nums),default=-1)
+            return tuple((0,int(x)) if x.isdigit() else (1,x.casefold())
+                         for x in re.split(r"(\d+)",text))
+        for index,iid in enumerate(sorted(tree.get_children(""),key=value,reverse=reverse)):
+            tree.move(iid,"",index)
+        state[key]=reverse
+        self._column_sort_state=state
+        if tree is self.tree:
+            self._schedule_scan_preview_refresh()
+
     def _update_scan_file_count(self):
         label = getattr(self, "scan_file_count_label", None)
         tree = getattr(self, "tree", None)
@@ -1072,10 +1104,10 @@ class App:
                 def same_case(value):
                     try:return _case_identity(value)==_case_identity(case) and _case_identity(case) is not None
                     except (ValueError,TypeError):return False
-                chosen=next((h for h in candidates if h.get("rect") and same_case(h.get("number"))),None)
+                chosen=next((h for h in candidates if h.get("prefix_verified") and h.get("rect") and same_case(h.get("number"))),None)
                 rect=(record.get("manual_crop_rect") if record.get("manual_crop_origin")=="drawn"
                       else chosen.get("rect") if chosen else None)
-                rect=rect or (snippet[3] if CASE_RE.fullmatch(case) and not record.get("sequence_inferred") else None)
+
                 if rect:
                     x0,y0,x1,y1=map(int,map(float,rect))
                     w=max(10,x1-x0);h=max(10,y1-y0)
@@ -1092,7 +1124,7 @@ class App:
                 tile.paste(crop,((222-crop.width)//2,(68-crop.height)//2))
             except Exception as exc:
                 self._log("Case preview crop failed: %s",exc)
-        if tile is None and cache_path.is_file() and not snippet and CASE_RE.fullmatch(str(record.get("candidate") or "")):
+        if tile is None and cache_path.is_file() and not snippet and record.get("manual_crop_origin")=="drawn":
             try:
                 tile=Image.open(cache_path).convert("RGB")
                 tile.thumbnail((222,68),Image.Resampling.LANCZOS)
@@ -1202,6 +1234,7 @@ class App:
             record.pop("case_draft",None)
             self._save_state()
             self._insert_scan_row(iid,record)
+            self.export(selected_iids=[iid])
 
     def _save_scan_draft(self, iid, entry):
         record=self.records[iid]
@@ -2839,23 +2872,25 @@ class App:
         """Only the worker's all-files-done event can release the export barrier."""
         self._sequence_review_pending=True
         self._scan_progress_update(len(self.scan_items),"CHECKING BEFORE / AFTER")
-        self._apply_sequence_consensus()
+        changed=self._apply_sequence_consensus()
         self._sequence_review_pending=False
         self._save_state()
         self._scan_progress_update(len(self.scan_items),"SCAN AND SEQUENCE CHECK COMPLETE")
+        return changed
 
     def _apply_sequence_consensus(self):
         """One final, frozen before/after pass. Never cascade inferred anchors."""
         if self.busy:
             return 0
         order=sorted(((iid,r) for iid,r in self.records.items()
-                      if r.get("path") and Path(r["path"]).parent==Path(self.folder)),
+                      if r.get("path") and Path(r["path"]).parent in
+                      (Path(self.folder), Path(self.folder)/"COMPLETED")),
                      key=lambda item:self._natural_pdf_sort_key(Path(item[1].get("original_name") or item[1]["path"])))
         anchors=[self._sequence_case_number(r) for _,r in order]
         def key(value):
             return _case_identity(value)
         def excluded(r):
-            return ((r.get("exported") and not r.get("sequence_inferred")) or r.get("case_draft") or r.get("sequence_excluded") or
+            return ((r.get("exported") and (not r.get("sequence_inferred") or Path(r["path"]).parent==Path(self.folder)/"COMPLETED")) or r.get("case_draft") or r.get("sequence_excluded") or
                     r.get("status") in ("Not scanned","Scanning","Moved to BLANKS") or
                     str(r.get("status","")).startswith("Scan error:"))
         def original(r):
@@ -2901,7 +2936,7 @@ class App:
                     plan[pos]=(case,[order[left][0],order[right][0]])
         changed=set()
         for pos,(iid,r) in enumerate(order):
-            if r.get("exported") and not r.get("sequence_inferred"):
+            if r.get("exported") and (not r.get("sequence_inferred") or Path(r["path"]).parent==Path(self.folder)/"COMPLETED"):
                 continue
             desired=plan.get(pos)
             stale=r.get("sequence_inferred") and (
@@ -4358,6 +4393,37 @@ class App:
         return hits
 
 
+    def _prefix_verified_hits(self, image, hits):
+        """No automatic box without an independently detected literal 08- prefix.
+
+        TrOCR or digit-only recognition may invent a prefix on bare digits.
+        Verify the actual candidate crop using unrestricted detection. This is
+        a crop check, not another PDF/4x4 scan. Missing evidence means review.
+        """
+        verified=[]
+        cache={}
+        for hit in hits:
+            rect=hit.get("rect")
+            if not rect or not CASE_RE.fullmatch(normalize_case_number(hit.get("number"))):
+                continue
+            x0,y0,x1,y1=map(int,rect)
+            x0,y0=max(0,x0),max(0,y0)
+            x1,y1=min(image.shape[1],x1),min(image.shape[0],y1)
+            if x1<=x0 or y1<=y0:
+                continue
+            key=(x0,y0,x1,y1)
+            if key not in cache:
+                try:
+                    reads=self.reader.readtext(image[y0:y1,x0:x1],detail=1,paragraph=False)
+                    cache[key]=any(re.match(r"^08\s*-", CASE_FIELD_LABEL_RE.sub("", str(text)).strip())
+                                   for _box,text,_score in reads)
+                except Exception as exc:
+                    self._log("Literal-prefix crop verification failed: %s",exc)
+                    cache[key]=False
+            if cache[key]:
+                verified.append(dict(hit,prefix_verified=True))
+        return verified
+
     def _ocr_pdf(self,path):
         """Search one upper-right 4x4 region with the existing crop enhancements."""
         _search_inches=4
@@ -4401,6 +4467,7 @@ class App:
                     any_label=True
                     for label in valid_labels:
                         hits=self._read_incident_to_right(region,label[:4])
+                        hits=self._prefix_verified_hits(region,hits)
                         absolute=[]
                         for h in hits:
                             if not CASE_RE.fullmatch(normalize_case_number(h.get("number"))) or not h.get("rect"):
@@ -4467,6 +4534,7 @@ class App:
                             inside=self._merge_case_hits(inside,focused_valid)
                         except Exception as exc:
                             self._log("Top-right margin OCR pass failed: %s",exc)
+                    inside=self._prefix_verified_hits(image,inside)
                     if inside:
                         upper=_mfcase_header_field_candidates(inside,image.shape)
                         if upper and max(float(h.get("score") or 0) for h in upper)>=95.0:
@@ -4533,6 +4601,7 @@ class App:
                 rect=h.get("rect")
                 visuals.append({
                     "number":h["number"],
+                    "prefix_verified":bool(h.get("prefix_verified")),
                     "rect":[int(v) for v in rect] if rect else None,
                     "score":float(h.get("score") or 0),
                     "engines":list(h.get("engines") or []),
@@ -4695,7 +4764,7 @@ class App:
                     float(confidence) * 100.0, rect, label_kind, label_distance)
 
             digit_count = sum(ch.isdigit() for ch in text)
-            likely_case_line = digit_count >= 2 or "-" in text
+            likely_case_line = bool(re.search(r"(?<![A-Za-z0-9])08\s*-", text))
             # Fax pagination, e.g. "122 P.005/015", is not a case number.
             # Never let TrOCR hallucinations turn a slash into an 08- prefix.
             fax_pagination=bool(re.search(
@@ -4744,7 +4813,7 @@ class App:
                     not case_pattern.search(str(raw_text))):
                     # Skip fax counters in the enhanced OCR pass too.
                     continue
-                if sum(ch.isdigit() for ch in raw_text) < 2 and "-" not in raw_text:
+                if not re.search(r"(?<![A-Za-z0-9])08\s*-", str(raw_text)):
                     continue
                 cx0 = max(0, int(bx0) - 14); cy0 = max(0, int(by0) - 10)
                 cx1 = min(image.shape[1], int(bx1) + 14); cy1 = min(image.shape[0], int(by1) + 10)
@@ -5245,7 +5314,13 @@ class App:
                     self._loader_finish("ocr")
                     self._loader_finish("model")
                     self.busy = False
-                    self._finish_scan_sequence_review()
+                    try:
+                        sequence_changes=self._finish_scan_sequence_review()
+                    except Exception as exc:
+                        self._log("Final before/after check failed: %s",exc)
+                        self.status.config(text=f"Before/after check failed; sending blocked: {exc}")
+                        messagebox.showerror("BEFORE/AFTER",str(exc),parent=self.root)
+                        continue
                     self.paused = False
                     self.pause_event.set()
                     self._refresh_scan_button()
@@ -5255,7 +5330,7 @@ class App:
                     self._refresh_learning_button_state()
                     self._update_completed_count()
                     self.status.config(
-                        text="Scan complete. All PDFs remain in the root folder. "
+                        text=f"Scan and BEFORE/AFTER complete ({sequence_changes} updated). PDFs remain in the root folder. "
                              "Review or edit them, then press SEND FILES.")
                     self._refresh_learning_button_state()
                     self._save_state()
@@ -5421,7 +5496,8 @@ class App:
 
         record.pop("case_draft",None)
         old_case = str(record.get("confirmed", ""))
-        if value == old_case and record.get("manual_approved") and not record.get("auto_labeled"):
+        if (value == old_case and record.get("manual_approved") and not record.get("auto_labeled")
+                and not any(record.get(k) for k in ("sequence_inferred", "sequence_excluded", "sequence_conflict", "scan_ambiguous"))):
             if not self._save_state():
                 self.status.config(text="Correction is in memory but could not be saved; check folder access and retry Enter.")
                 return False
@@ -5592,7 +5668,7 @@ class App:
         """Build a small, cached image of the exact OCR field used for the filename."""
         from PIL import Image, ImageDraw, ImageFont, ImageTk
         cache_path = self._completed_thumbnail_path(record)
-        if cache_path and cache_path.exists():
+        if cache_path and cache_path.exists() and record.get("manual_crop_origin")=="drawn":
             try:
                 cached = Image.open(cache_path).convert("RGB")
                 cached.thumbnail((190, 58), Image.Resampling.LANCZOS)
@@ -5608,15 +5684,15 @@ class App:
             candidates = snippet[4] if len(snippet) > 4 and isinstance(snippet[4], list) else []
             confirmed = str(record.get("confirmed") or "").strip()
             chosen = next((c for c in candidates
-                           if str(c.get("number") or "").strip() == confirmed and c.get("rect")), None)
+                           if c.get("prefix_verified") and str(c.get("number") or "").strip() == confirmed and c.get("rect")), None)
             rect = chosen.get("rect") if chosen else None
             # Prefer the reviewer's green box when the final confirmed value was
             # manually corrected and has no matching red OCR candidate.
             if not rect:
-                rect = record.get("manual_crop_rect") or snippet[3]
+                rect = record.get("manual_crop_rect")
             # Last resort: any recognized number box, then the corner OCR region.
             if not rect:
-                fallback = next((c for c in candidates if c.get("rect")), None)
+                fallback = next((c for c in candidates if c.get("prefix_verified") and c.get("rect")), None)
                 rect = fallback.get("rect") if fallback else None
             if rect:
                 x0, y0, x1, y1 = [int(round(float(v))) for v in rect]
@@ -5626,7 +5702,7 @@ class App:
                 x1 = min(page.width, x1 + pad_x); y1 = min(page.height, y1 + pad_y)
                 if x1 > x0 and y1 > y0:
                     crop = page.crop((x0, y0, x1, y1))
-            if crop is None:
+        if crop is None:
                 # Fallback: display the complete upper-right OCR search zone rather than
                 # showing an unrelated full-page region or a blank thumbnail.
                 w = min(page.width, int(5 * 72 * 2.2))
@@ -5783,8 +5859,8 @@ class App:
             candidates = snippet[4] if len(snippet) > 4 and isinstance(snippet[4], list) else []
             confirmed = str(record.get("confirmed") or "").strip()
             selected = next((c for c in candidates
-                             if str(c.get("number") or "").strip() == confirmed and c.get("rect")), None)
-            green_rect = record.get("manual_crop_rect") or (selected.get("rect") if selected else None) or snippet[3]
+                             if c.get("prefix_verified") and str(c.get("number") or "").strip() == confirmed and c.get("rect")), None)
+            green_rect = record.get("manual_crop_rect") or (selected.get("rect") if selected else None)
 
             win = tk.Toplevel(self.root)
             win.title(f"M.F. Case Evidence — {record['path'].name}")
@@ -6162,6 +6238,8 @@ class App:
         self._ensure_preview(r)
         visual_candidates = (r.get("snippet")[4]
                              if r.get("snippet") and len(r.get("snippet")) > 4 else [])
+        visual_candidates = [item for item in visual_candidates
+                             if item.get("prefix_verified") and CASE_RE.fullmatch(str(item.get("number") or ""))]
         candidate_values = []
         for item in visual_candidates:
             number = item.get("number")
@@ -6410,7 +6488,7 @@ class App:
             def set_selection_mode():
                 selection["enabled"] = not selection["enabled"]
                 if selection["enabled"]:
-                    selection_button.config(text="Finish Box Selection")
+                    selection_button.config(text="Pause Drawing")
                     selection_status.config(
                         text="Draw a green box around the field label (Case Number or INCIDENT NO.) AND the complete case number. The confirmed number is the training answer. Drag inside to move; drag an edge to resize.")
                 else:
@@ -6481,7 +6559,7 @@ class App:
                                 ax0*scale, max(2, ay0*scale-8), anchor="sw",
                                 text=label_text, fill="#ff3333",
                                 font=("Segoe UI", max(8, int(9*scale)), "bold"))
-                elif auto_rect:
+                elif auto_rect and any(h.get("prefix_verified") for h in visual_candidates):
                     ax0, ay0, ax1, ay1 = auto_rect
                     canvas.create_rectangle(
                         ax0*scale, ay0*scale, ax1*scale, ay1*scale,
@@ -6674,6 +6752,7 @@ class App:
             def finish_box(event):
                 if not selection["enabled"] or not selection.get("drag"):
                     return
+                drag_box(event)  # Capture the release position even without a final motion event.
                 drag=selection["drag"]
                 selection["drag"]=None
                 selected=selection.get("preview_rect")
@@ -6682,7 +6761,9 @@ class App:
                     if x1-x0 >= 35 and y1-y0 >= 10:
                         r["manual_crop_rect"]=selected
                         r["manual_crop_origin"]="drawn"
-                        r["training_type"]="unsure"
+                        r["training_type"]="handwritten"
+                        selection["enabled"]=False
+                        selection_button.config(text="Draw / Redraw Crop Box")
                         selection_status.config(
                             text=f"Manual crop selected: {x1-x0} × {y1-y0} pixels. Include the field label and complete case number in this box.")
                         self._save_state()
@@ -6863,7 +6944,7 @@ class App:
                 self.completed_send_status.config(text=message)
             return
         # Export is intentionally independent of scan/review selection.
-        selected_set = None
+        selected_set = set(selected_iids) if selected_iids is not None else None
         if not automatic:
             drafts = self._unsaved_completed_changes(selected_set)
             if drafts:

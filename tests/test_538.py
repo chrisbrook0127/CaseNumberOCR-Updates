@@ -63,7 +63,7 @@ class AnchorRevalidation(unittest.TestCase):
         a._save_state.return_value=True;a._completed_thumbnail_path=Mock(return_value=None)
         a._save_learning_example=Mock();a._ensure_preview=Mock();a.completed_edit_drafts={}
         a._close_completed_edit=Mock();a._insert_completed_row=Mock();a.completed_send_status=Mock()
-        a.records['2']['case_draft']='08-84';a._quick_approve('2')
+        a.records['2']['case_draft']='08-84';a.export=Mock();a._quick_approve('2')
         self.assertEqual(a.records['1']['confirmed'],'08-84')
 
     def test_rename_always_checks_before_selecting_jobs(self):

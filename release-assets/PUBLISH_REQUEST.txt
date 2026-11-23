@@ -1,1 +1,1 @@
-Publish V5.4.1 scan-start fix; isolate scan dispatch tests from optional PDF installation
+Publish V5.4.2: prefix evidence, manual anchors, sorting, approve and send.

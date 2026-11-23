@@ -19,7 +19,7 @@ class SinglePassAndApproval(unittest.TestCase):
         self.assertEqual([h['number'] for h in hits],['08-848484'])
 
     def scan(self,found):
-        a=self.app();a._find_case_field_label_regions=Mock(return_value=[(20,20,100,40,'incident')] if found else [])
+        a=self.app();a._prefix_verified_hits=lambda image,hits:hits;a._find_case_field_label_regions=Mock(return_value=[(20,20,100,40,'incident')] if found else [])
         a._read_incident_to_right=Mock(return_value=[{'number':'08-84','score':96,'rect':(700,20,800,40),'engines':['EasyOCR'],'engine_scores':{'EasyOCR':96}}])
         a._find_case_candidates=Mock(return_value=[])
         pix=SimpleNamespace(height=900,width=1100,n=3,samples=np.full((900,1100,3),255,dtype=np.uint8).tobytes())
@@ -50,21 +50,21 @@ class SinglePassAndApproval(unittest.TestCase):
         self.assertIsNone(a._sequence_case_number(r));a._save_learning_example.assert_not_called()
         a._completed_thumbnail_path=Mock(return_value=None);a.completed_edit_drafts={}
         a._close_completed_edit=Mock();a._insert_completed_row=Mock();a.completed_send_status=Mock();a._ensure_preview=Mock()
-        a._quick_approve('x')
+        a.export=Mock();a._quick_approve('x')
         self.assertEqual(r['confirmed'],'08-84');self.assertTrue(r['manual_approved'])
         self.assertNotIn('case_draft',r);a._save_learning_example.assert_called_once_with(r,'08-84')
 
     def test_low_confidence_guess_can_be_quick_approved(self):
         a=self.app();a.records={'x':{'candidate':'08-84','score':12}}
         a._save_completed_case_edit=Mock(return_value=True)
-        a._quick_approve('x')
+        a.export=Mock();a._quick_approve('x')
         self.assertEqual(a._save_completed_case_edit.call_args.args[1].get(),'08-84')
 
     def test_invalid_or_busy_quick_approval_blocked(self):
         a=self.app();a.status=Mock();a.records={'x':{'candidate':'09-84'}}
         a._start_scan_case_edit=Mock();a._save_completed_case_edit=Mock()
-        a._quick_approve('x');a._save_completed_case_edit.assert_not_called()
-        a.records['x']['candidate']='08-84';a.busy=True;a._quick_approve('x')
+        a.export=Mock();a._quick_approve('x');a._save_completed_case_edit.assert_not_called()
+        a.records['x']['candidate']='08-84';a.busy=True;a.export=Mock();a._quick_approve('x')
         a._save_completed_case_edit.assert_not_called()
 
     def test_send_already_renamed_preserves_original_prefix(self):
