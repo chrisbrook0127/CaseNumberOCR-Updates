@@ -50,6 +50,14 @@ jobs:
         run: |
           set -eu
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python - <<'PY'
+          from pathlib import Path
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          s=(app/'case_number_ocr.py').read_text('utf-8')
+          for method in ('_quick_approve','_start_scan_case_edit','_unified_double_click','_open_review_queue','_recheck_after_decision','_finish_import_batch','_launch_update_installer'):
+              idx=s.find('    def '+method+'(')
+              print('PRODUCTION SOURCE',method,repr(s[idx:idx+360]) if idx>=0 else 'MISSING')
+          PY
           python tools/patch_release_551.py "$APP"
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
           grep -q 'self.app_version = "5.5.1"' "$APP/case_number_ocr.py"
