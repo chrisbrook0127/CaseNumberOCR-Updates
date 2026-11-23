@@ -94,4 +94,4 @@ jobs:
           mkdir -p verify
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'CaseNumberOCR_Update.zip' --dir verify
           cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,isLatest,assets
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
