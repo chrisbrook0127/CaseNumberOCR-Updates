@@ -99,8 +99,11 @@ jobs:
           update=Path('dist/CaseNumberOCR_Update.zip')
           full=Path('dist/MFCase_Number_OCR_V5.5.2_Full_Online_Install.zip')
           with ZipFile(update,'w',ZIP_DEFLATED,compresslevel=9) as z:
-              for name in sorted(names):
-                  if (app/name).is_file():z.write(app/name,name)
+              # Old installed updater accepts only its required Python members.
+              # Keep new documentation and integrity manifest in full installer.
+              for name in ('case_number_ocr.py','updater_apply.py'):
+                  assert (app/name).is_file()
+                  z.write(app/name,name)
           with ZipFile(full,'w',ZIP_DEFLATED,compresslevel=9) as z:
               for f in sorted(app.iterdir()):
                   if f.is_file() and (f.name in names or f.name.startswith('CHANGELOG_V5_') or f.name in
