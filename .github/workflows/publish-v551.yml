@@ -58,6 +58,16 @@ jobs:
               idx=s.find('    def '+method+'(')
               print('PRODUCTION SOURCE',method,repr(s[idx:idx+360]) if idx>=0 else 'MISSING')
           PY
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tools/patch_release_551.py')
+          s=p.read_text('utf-8')
+          old='    def _quick_approve(self, iid):\\n        if'
+          new='    def _quick_approve(self, iid):\\n        """Green check completes a single file; SEND FILES moves it."""\\n        if'
+          assert s.count(old)==2, 'Unexpected patch layout'
+          p.write_text(s.replace(old,new),'utf-8')
+          compile(p.read_text('utf-8'),str(p),'exec')
+          PY
           python tools/patch_release_551.py "$APP"
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
           grep -q 'self.app_version = "5.5.1"' "$APP/case_number_ocr.py"
