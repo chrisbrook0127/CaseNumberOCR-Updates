@@ -157,7 +157,35 @@ jobs:
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.5.7" --notes-file "$APP/CHANGELOG_V5_5_7.txt"
           fi
-          gh release upload "$TAG" dist/CaseNumberOCR_Update.zip dist/MFCase_Number_OCR_V5.5.7_Full_Online_Install.zip --repo "$GITHUB_REPOSITORY" --clobber
+          # Some runners do not retain untracked dist outputs between steps.
+          # Recreate ONLY if missing; the prior tests and source hash already passed.
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile,ZIP_DEFLATED
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          out=Path('dist');out.mkdir(exist_ok=True)
+          basic=['case_number_ocr.py','updater_apply.py','SETUP.bat',
+                 'RUN_CASE_OCR.bat','RUN_CASE_OCR_DEBUG.bat',
+                 'Launch_Case_OCR.vbs','MF.ico','CREATE_DESKTOP_SHORTCUT.bat',
+                 'Create_Desktop_Shortcut.vbs','README_FIRST.txt',
+                 'verify_package.py','update_config.json','CHANGELOG_V5_5_7.txt']
+          files=basic+[f.name for f in sorted(app.glob('CHANGELOG_V5_*.txt')) if f.name not in basic]
+          files += [str(f.relative_to(app)) for f in sorted((app/'tests').glob('test_*.py'))]
+          for name,names,prefix in [
+              ('CaseNumberOCR_Update.zip',basic,''),
+              ('MFCase_Number_OCR_V5.5.7_Full_Online_Install.zip',files,
+               'MFCase_Number_OCR_V5.5.7_Full_Online_Install/')]:
+              path=out/name
+              if not path.is_file():
+                  with ZipFile(path,'w',ZIP_DEFLATED,compresslevel=9) as z:
+                      for item in names:z.write(app/item,prefix+item)
+              assert path.is_file() and path.stat().st_size>10000,path
+              with ZipFile(path) as z:assert z.testzip() is None
+              print('Release asset ready:',path.resolve(),path.stat().st_size,flush=True)
+          PY
+          pwd
+          ls -lah dist
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.5.7_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           mkdir -p verify
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
