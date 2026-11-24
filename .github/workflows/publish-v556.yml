@@ -1,0 +1,128 @@
+name: Publish MFCase v5.5.6 handwritten OCR fix
+on:
+  push:
+    branches:
+      - publish/v5.5.6
+    paths:
+      - .github/workflows/publish-v556.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v556
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install headless OCR test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb python3-tk
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Download official production v5.5.5 installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p baseline stage dist transfer
+          gh release download v5.5.5 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.5.5_Full_Online_Install.zip --dir baseline
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          from zipfile import ZipFile
+          p=Path('baseline/MFCase_Number_OCR_V5.5.5_Full_Online_Install.zip')
+          expected='e0e4b682abcd63d7c5c1f1c616f0e3d2c22cd898e513561ac2a07ca334f858bd'
+          assert sha256(p.read_bytes()).hexdigest()==expected,'Official v5.5.5 checksum mismatch'
+          with ZipFile(p) as z:
+              assert z.testzip() is None
+              assert all(not x.startswith('/') and '..' not in Path(x).parts for x in z.namelist())
+              z.extractall('stage')
+          sources=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(sources)==1,sources
+          print('Official baseline source SHA-256',sha256(sources[0].read_bytes()).hexdigest(),flush=True)
+          PY
+      - name: Decode verified patch and test payload
+        run: |
+          python - <<'PY'
+          import base64,hashlib
+          from pathlib import Path
+          from zipfile import ZipFile
+          payload=base64.b64decode(Path('tools/v556_release_payload.b64').read_text().strip(),validate=True)
+          assert hashlib.sha256(payload).hexdigest()=='6836467298c451f1423c5509b9f2367da679743020815c03e2a5e908ced28ba1'
+          with ZipFile(__import__('io').BytesIO(payload)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={'patch_556.py','test_release_556.py','package_556.py'}
+              z.extractall('transfer')
+          assert hashlib.sha256(Path('transfer/patch_556.py').read_bytes()).hexdigest()=='c132bb73b251d23c18cf61c579cb7b8528372da66dd8bf793a1e694d13a6b402'
+          print('Verified MFCase patch, tests and builder',flush=True)
+          PY
+      - name: Apply upper-right 4x4 independent handwritten OCR patch
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python transfer/patch_556.py "$APP/case_number_ocr.py"
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          source=app/'case_number_ocr.py'
+          expected='b9d1724b0b1a79799f02f7fff3e6a0421ec597e8b3adbe315326b4f6dc08aadf'
+          actual=sha256(source.read_bytes()).hexdigest()
+          print('Patched v5.5.6 source SHA-256',actual,flush=True)
+          assert actual==expected,'Source differs from locally tested build'
+          (app/'CHANGELOG_V5_5_6.txt').write_text(
+              'MFCase v5.5.6\n'
+              '- Independently detect handwritten case-number crops throughout the original upper-right 4x4 region.\n'
+              '- OCR these crops without requiring INCIDENT NO. labels or EasyOCR pre-detection.\n'
+              '- INCIDENT NO./NUMBER/# remains an additional secondary location clue.\n'
+              '- Accept only physically localized, complete 08- readings at 95% when unambiguous.\n'
+              '- Contradictory located case numbers require manual review.\n'
+              '- Preserve prior scan, learning, work log, startup, send, and updater safeguards.\n',
+              encoding='utf-8')
+          test=(Path('transfer')/'test_release_556.py').read_text('utf-8')
+          old="Path(__file__).resolve().parent/'source'/'MFCase_Number_OCR_V5.5.5_Full_Online_Install'"
+          assert test.count(old)==1,'Test loader location changed'
+          test=test.replace(old,'Path(__file__).resolve().parents[1]')
+          (app/'tests').mkdir(exist_ok=True)
+          (app/'tests'/'test_release_556.py').write_text(test,encoding='utf-8')
+          names=('case_number_ocr.py','updater_apply.py','SETUP.bat',
+                 'RUN_CASE_OCR.bat','Launch_Case_OCR.vbs',
+                 'CREATE_DESKTOP_SHORTCUT.bat','Create_Desktop_Shortcut.vbs')
+          manifest={name:sha256((app/name).read_bytes()).hexdigest() for name in names}
+          (app/'verify_package.py').write_text(
+               'from pathlib import Path\nimport hashlib\nROOT=Path(__file__).resolve().parent\nEXPECTED='
+               +repr(manifest)+'\nfor name,expected in EXPECTED.items():\n'
+               +'    assert hashlib.sha256((ROOT/name).read_bytes()).hexdigest()==expected,name\n'
+               +"print('MFCase v5.5.6 package integrity: PASS')\n",encoding='utf-8')
+          PY
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+          python "$APP/verify_package.py"
+      - name: Run existing and new GUI/OCR regressions
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP" xvfb-run -a python -m unittest discover -s "$APP/tests" -p 'test_*.py' -v
+      - name: Build full installer and updater and preserve private data
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python transfer/package_556.py "$APP" dist
+      - name: Publish to GitHub and verify uploaded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.5.6
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.5.6" --notes-file "$APP/CHANGELOG_V5_5_6.txt"
+          fi
+          gh release upload "$TAG" dist/CaseNumberOCR_Update.zip dist/MFCase_Number_OCR_V5.5.6_Full_Online_Install.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
