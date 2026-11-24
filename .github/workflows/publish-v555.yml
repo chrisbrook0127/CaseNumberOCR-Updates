@@ -1,0 +1,90 @@
+name: Build and publish MFCase v5.5.5 performance release
+on:
+  push:
+    branches: [publish/v5.5.5]
+    paths: [.github/workflows/publish-v555.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v555
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install GUI and numeric test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0'
+      - name: Retrieve exact published v5.5.4 installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p previous stage dist
+          gh release download v5.5.4 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.5.4_Full_Online_Install.zip --dir previous
+          unzip -q previous/MFCase_Number_OCR_V5.5.4_Full_Online_Install.zip -d stage
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          files=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(files)==1,files
+          expected='24f289f4043106d2ac2b0ae38069739412626d7d81b23a675938bcc74bea2ea1'
+          sha=hashlib.sha256(files[0].read_bytes()).hexdigest()
+          assert sha==expected,('Unexpected production baseline',sha)
+          print('Verified official 5.5.4 source',sha)
+          PY
+      - name: Verify and decode deterministic v5.5.5 patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64,hashlib,zlib
+          b64=Path('tools/patch_v555.b64').read_text().strip()
+          assert len(b64)==8592
+          assert hashlib.sha256(b64.encode()).hexdigest()=='dc3377e1867a3ffc35d49f9999adc21c723bf0b069c329ce79a4400fd6395916'
+          patch=zlib.decompress(base64.b64decode(b64,validate=True))
+          assert hashlib.sha256(patch).hexdigest()=='27383641f1294f10cae5065bd97f7967323ed4e21a9944f5b8a304cfaacad492'
+          out=Path('tools/patch_release_555_decoded.py')
+          out.write_bytes(patch)
+          compile(patch,str(out),'exec')
+          print('Patch SHA-256 verified')
+          PY
+      - name: Apply performance repairs and run full GUI regression suite
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python tools/patch_release_555_decoded.py "$APP"
+          cp tools/test_release_555.py "$APP/tests/test_release_555.py"
+          sed -i 's/a.app_version=="5.5.4"/a.app_version=="5.5.5"/' "$APP/tests/test_release_553_gui.py"
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+          grep -q 'self.app_version = "5.5.5"' "$APP/case_number_ocr.py"
+          grep -q 'V5.5.5' "$APP/SETUP.bat"
+          cd "$APP"
+          xvfb-run -a python -m unittest discover -s tests -q
+      - name: Build verified installer and updater; preserve private state
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python tools/package_release_555.py "$APP" dist
+      - name: Publish GitHub v5.5.5 release and verify the updater asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.5.5
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.5.5 — Scan performance" --notes-file "$APP/CHANGELOG_V5_5_5.txt"
+          fi
+          gh release upload "$TAG" dist/CaseNumberOCR_Update.zip dist/MFCase_Number_OCR_V5.5.5_Full_Online_Install.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
