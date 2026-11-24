@@ -1,0 +1,7 @@
+MFCase v5.5.6
+- Independently detect handwritten case-number crops throughout the original upper-right 4x4 region.
+- OCR these crops without requiring INCIDENT NO. labels or EasyOCR pre-detection.
+- INCIDENT NO./NUMBER/# remains an additional secondary location clue.
+- Accept only physically localized, complete 08- readings at 95% when unambiguous.
+- Contradictory located case numbers require manual review.
+- Preserve prior scan, learning, work log, startup, send, and updater safeguards.

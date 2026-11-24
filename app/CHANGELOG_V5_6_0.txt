@@ -1,0 +1,12 @@
+MFCase v5.6.0 — single-screen workflow, manual approvals during scans, auto-send and immutable audit
+
+- Adds a blue R button per row. Double-click anywhere opens REVIEW.
+- Keeps the green check active on rows not currently scanned; approval marks COMPLETED.
+- Removes the ONLINE/OFFLINE indicator from the main screen and settings.
+- Settings AUTO SEND COMPLETED (default OFF) sends eligible verified files after scan completion and before/after reconciliation. Never on STOP; no early case-switch sends.
+- RESCAN ALL processes every unsent root PDF including completed records. Human-reviewed case labels remain authoritative.
+- Work logs are append-only and never automatically pruned; permanent local text log records user decisions, scan outcomes, transfers and errors.
+- Original-to-sent lineage kept in permanent local trace. Optional separate manual combiner logs verified source page contributions to combined PDFs.
+- No automatic training at application start, and no training while scanning; eligible model updates may start after 90 seconds of post-scan idle.
+- Progress shows the active PDF filename and file number, with row highlighting.
+- Preserves strict primary upper-right 4x4 automatic OCR and full-page manual review.

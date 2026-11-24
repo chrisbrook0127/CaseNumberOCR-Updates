@@ -1,0 +1,10 @@
+MFCase v5.5.5 — 4×4-first scanning performance restoration
+- Upper-right 4×4 detection remains mandatory first scan, with existing 08- location proof and 95% rules.
+- Reviewer-learned outside-4×4 locations limited to two distinct attempts per PDF, secondary only.
+- Before/after now evaluates nearest applicable human/automatic anchors without enumerating every pair.
+- Incremental sequence review operates on the affected range; full validation still runs at stop/end.
+- Sent-history file existence verified at folder load, not per scanned file.
+- Automatic background fine-tuning fully yields before scan OCR starts; scan wait is non-blocking.
+- Local-only timing records distinguish PDF rendering, EasyOCR, TrOCR, learned fallback, sequence review and network file state operations.
+- v5.5.4 fast exits (95% located unique page; 99.5% clear printed field) preserved.
+- Existing single-screen UI, case-number editing, shortcut/setup, updater and send rules remain unchanged.

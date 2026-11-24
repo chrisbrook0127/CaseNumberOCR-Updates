@@ -1,0 +1,10 @@
+MFCase 5.6.1
+- Automatic scan region is the upper-right quarter: right half of width, top half of height.
+- Reuses the single printed OCR pass to locate INCIDENT NO. and CASE NUMBER fields.
+- Accepts a complete 08- case immediately after a detected label, including combined OCR text.
+- When a case label is detected, unrelated fields cannot replace it. INCIDENT NO. takes priority.
+- Rejects ink proposals over detected words such as OTHER instead of reinterpreting them as case numbers.
+- Either engine may establish 08-; the higher-confidence same-crop reading wins, with existing 95% approval.
+- Preserves before/after, learning, manual full-page selection, and existing rename/send workflow.
+- Retains one printed OCR call and at most three handwriting calls per page.
+Based on the published 5.6.0 installer. No existing learning data or checkpoints modified.

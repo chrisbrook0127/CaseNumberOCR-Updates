@@ -1,0 +1,7 @@
+MFCase v5.5.1
+
+- One-screen file list: no SCAN/REVIEW navigation tabs. Double-click a file to review or correct it.
+- Automatic local learning runs with a non-modal spinner, can yield to SELECT FILES, SCAN, and SEND FILES, and never removes the active OCR model during use.
+- Saved training crops remain available after background training is interrupted; model checkpoints activate on next launch.
+- No PDFs, learning images or case numbers are uploaded to model providers.
+- Retains explicit SEND FILES, before/after, fixed 95 percent and strict 08- rules.

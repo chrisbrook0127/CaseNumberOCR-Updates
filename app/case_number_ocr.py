@@ -7,6 +7,8 @@ from __future__ import annotations
 import os, re, shutil, threading, queue, json, logging, time, math, hashlib
 import sys, subprocess, tempfile, urllib.request, urllib.error, zipfile
 from contextlib import contextmanager
+from bisect import bisect_left, bisect_right
+from time import perf_counter
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
@@ -82,7 +84,8 @@ def _select_primary_case_hit(hits, source, image_shape):
                 (v.startswith("EasyOCR-") and "enhanced" not in v.lower())
                 for v in engines)
         agree=any(v.startswith("TrOCR") for v in engines) and raw
-        return (agree,raw,float(hit.get("score") or 0))
+        return (bool(hit.get("box_verified") and hit.get("box_rect")),
+                float(hit.get("score") or 0),agree,raw)
     if source in ("fallback","header"):
         margin=[]
         for h in hits:
@@ -97,8 +100,8 @@ def _select_primary_case_hit(hits, source, image_shape):
                 margin.append(h)
         if margin:
             return max(margin,key=lambda h:(
-                (float(h["rect"][0])+float(h["rect"][2]))/(2*width),
-                engine_quality(h)))
+                engine_quality(h),
+                (float(h["rect"][0])+float(h["rect"][2]))/(2*width)))
     return max(hits,key=engine_quality)
 
 
@@ -165,7 +168,7 @@ def _mfcase_export_case_name(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.4.1")
+        root.title("M.F. Case Number OCR — V5.6.0")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -183,6 +186,7 @@ class App:
         self.learning_pause_event.set()
         self.learning_stop_event = threading.Event()
         self.records = {}
+        self.sent_history = {}
         self.completed_photo_refs = {}
         self.completed_edit_widgets = {}
         self.completed_edit_drafts = {}
@@ -191,6 +195,9 @@ class App:
         self.completed_checked_iids = set()
         # Scan checkboxes do not change the Treeview review highlight.
         self.scan_checked_iids = set()
+        # Display-only sorts; sequence approval always uses original filenames.
+        self._table_sort_state = {}
+        self._table_column_titles = {}
         # Never export before a running scan's sequence check has completed.
         self.export_busy = False
         self._auto_export_after = None
@@ -198,7 +205,7 @@ class App:
         self._export_in_flight_iids = set()
         self.scan_items = []
         self.learning_dir = None
-        self.learning_data = {"examples": [], "corrections": {},
+        self.learning_data = {"examples": [], "corrections": {}, "field_regions_full_page":[],
                               "trocr_v2_trained_count": 0,
                               "trocr_v2_attempted_count": 0,
                               "trocr_v2_validation": {}}
@@ -213,7 +220,7 @@ class App:
         self.training_close_button = None
         self.training_pause_button = None
         self.training_stop_button = None
-        self.auto_label_var = tk.BooleanVar(value=False)
+        self.auto_label_var = tk.BooleanVar(value=True)
         self.auto_threshold_var = tk.StringVar(value="95")
         self.log_path = None
         self.scan_year_prefix = REQUIRED_CASE_YEAR
@@ -226,8 +233,14 @@ class App:
         self._startup_learning_pending = False
         self._offline_prepare_busy = False
         self._auto_learning_started = False
+        self._crop_ocr_generation = 0
+        self._network_indicator_after = None
         self._learning_connection_source = None
         self._learning_auto_run = False
+        self._auto_learning_interrupted = False
+        self._post_scan_learning_after = None
+        self._last_activity_time = time.monotonic()
+        self._training_model_ready_on_restart = False
         # All animation is driven by Tk's own event loop; file and model I/O
         # happens in workers so the loading indicator remains responsive.
         self._loading_jobs = set()
@@ -239,17 +252,29 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.4.1"
+        self.app_version = "5.6.1"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
         self._diag_lock=threading.RLock()
+        self._perf_stages={}
+        self._training_worker_done=threading.Event()
+        self._training_worker_done.set()
+        self._scan_waiting_for_training=False
         self._startup_ready = False
         self._sequence_review_pending = False
         self._startup_error = None
         self._learning_revision = None
         self._cached_model_dir = None
         self._run_outcomes = {}
+        self._active_scan_iid = None
+        self._worker_current_iid = None
+        self._rescan_force_iids = set()
+        self._audit_lock = threading.RLock()
+        self._audit_root = Path(os.getenv("LOCALAPPDATA") or str(Path(__file__).resolve().parent)) / "MFCase" / "logs"
+        self._audit_file = self._audit_root / "MFCase_Work_Log.txt"
+        self.auto_send_var = tk.BooleanVar(master=root, value=False)
+        self._load_user_settings()
         self.app_dir = Path(__file__).resolve().parent
         self.update_config_path = self.app_dir / "update_config.json"
         self._ui()
@@ -263,6 +288,8 @@ class App:
         self.auto_label_var.set(True)
         self.auto_threshold_var.set("95")
         self._refresh_auto_eligibility_status()
+        root.bind_all("<ButtonPress>", self._mark_user_activity, add="+")
+        root.bind_all("<KeyPress>", self._mark_user_activity, add="+")
         root.after(150, self._poll)
         # Production is local-only. Network access is possible only after an
         # explicit click on UPDATE or PREPARE OFFLINE MODELS.
@@ -272,6 +299,7 @@ class App:
             self._startup_ready = True  # headless test harness
         else:
             root.after(250,self._begin_offline_startup)
+            root.after(650,lambda: self.check_for_updates(automatic=True))
 
     def _loader_start(self, job, description):
         """Show a centered, animated, quarter-screen-scale spinner (UI thread only)."""
@@ -364,10 +392,133 @@ class App:
         except Exception as exc:
             self.queue.put(("folder_load_error", generation, str(exc)))
 
+    def _sent_history_path(self):
+        return Path(self.folder) / ".case_ocr_sent_history.json" if self.folder else None
+
+    def _load_sent_history(self, previous_state=None):
+        with self._perf_measure("network_io_history_load"):
+            return self._load_sent_history_impl(previous_state=previous_state)
+
+    def _load_sent_history_impl(self, previous_state=None):
+        """Restore verified sent-file anchors using real COMPLETED PDFs only."""
+        self.sent_history = {}
+        if not self.folder:
+            return
+        completed=Path(self.folder)/"COMPLETED"
+        path=self._sent_history_path()
+        try:
+            payload=json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            rows=payload.get("sent",{})
+        except (OSError,ValueError,TypeError):
+            rows={}
+        if not isinstance(rows,dict):
+            rows={}
+        # Backfill v5.5.1 state entries that were exported but not yet tracked.
+        for value in (previous_state or {}).values():
+            if not isinstance(value,dict) or not value.get("exported"):
+                continue
+            origin=str(value.get("original_name") or "")
+            target=str(value.get("export_name") or "")
+            case=normalize_case_number(value.get("confirmed"))
+            if (origin and target and CASE_RE.fullmatch(case) and
+                    (value.get("manual_approved") or value.get("auto_labeled"))):
+                rows.setdefault(origin,{"original_name":origin,"destination_name":target,
+                    "confirmed":case,"source":"prior_state",
+                    "manual_approved":bool(value.get("manual_approved")),
+                    "auto_labeled":bool(value.get("auto_labeled")),
+                    "sequence_inferred":bool(value.get("sequence_inferred"))})
+        if completed.is_dir():
+            # Recovery of older sent files that v5.5.1 forgot after restarting.
+            # The strict _08-number filename suffix is created by MFCase SEND FILES.
+            # We validate that the physical destination exists before anchoring.
+            try:
+                for pdf in completed.iterdir():
+                    if not pdf.is_file() or pdf.suffix.lower()!=".pdf":
+                        continue
+                    match=re.fullmatch(r"(.+)_(08-[0-9]{1,7})(?: \(\d+\))?",pdf.stem)
+                    if match:
+                        origin=match.group(1)+".pdf"
+                        rows.setdefault(origin,{"original_name":origin,
+                            "destination_name":pdf.name,"confirmed":match.group(2),
+                            "source":"completed_filename_recovery","manual_approved":True,
+                            "auto_labeled":False})
+            except OSError as exc:
+                self._log("Could not inspect COMPLETED history: %s",exc)
+        for origin,value in rows.items():
+            if not isinstance(value,dict):
+                continue
+            name=str(value.get("destination_name") or "")
+            case=normalize_case_number(value.get("confirmed"))
+            if (not origin or Path(origin).name!=origin or not name
+                    or Path(name).name!=name or not CASE_RE.fullmatch(case)
+                    ):
+                continue
+            path=completed/name
+            if not path.is_file():
+                continue
+            row=dict(value)
+            row.update(original_name=origin,destination_name=name,confirmed=case)
+            self.sent_history[origin]=row
+        self._save_sent_history()
+
+    def _save_sent_history(self):
+        with self._perf_measure("network_io_history_save"):
+            return self._save_sent_history_impl()
+
+    def _save_sent_history_impl(self):
+        path=self._sent_history_path()
+        if path is None:
+            return False
+        try:
+            payload={"version":1,"updated_at":datetime.now().isoformat(timespec="seconds"),
+                     "sent":self.sent_history}
+            temp=path.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(payload,indent=2),encoding="utf-8")
+            os.replace(temp,path)
+            return True
+        except OSError as exc:
+            self._log("Could not persist sent-file anchor history: %s",exc)
+            return False
+
+    def _sequence_order_with_sent_history(self, include_unscanned=True):
+        """Original PDF order, including independently confirmed SENT anchors."""
+        if not self.folder:
+            return []
+        folder=Path(self.folder)
+        order=[]
+        active=set()
+        for iid,rec in self.records.items():
+            if not rec.get("path") or Path(rec["path"]).parent!=folder:
+                continue
+            if not include_unscanned and str(rec.get("status") or "") in ("Not scanned","Scanning"):
+                continue
+            original=Path(rec.get("original_name") or rec["path"]).name
+            active.add(original.casefold())
+            order.append((iid,rec))
+        # History is validated against actual COMPLETED PDFs ONCE at folder load.
+        # Do not re-stat every historical file on each scan row over SMB.
+        for original,row in getattr(self,"sent_history",{}).items():
+            if original.casefold() in active or row.get("sequence_inferred"):
+                continue
+            target=folder/"COMPLETED"/str(row.get("destination_name") or "")
+            case=normalize_case_number(row.get("confirmed"))
+            if not CASE_RE.fullmatch(case):
+                continue
+            rec={"path":target,"original_name":original,"confirmed":case,
+                 "manual_approved":bool(row.get("manual_approved",True)),
+                 "auto_labeled":bool(row.get("auto_labeled",False)),
+                 "sequence_inferred":False,"sequence_conflict":False,
+                 "scan_ambiguous":False,"exported":True,
+                 "status":"Sent to COMPLETED (history)"}
+            order.append(("sent-history::"+original,rec))
+        return sorted(order,key=lambda item:self._natural_pdf_sort_key(
+            Path(item[1].get("original_name") or item[1]["path"])))
+
     def _apply_folder_load(self, year, saved, pdfs, state_error):
         """Install the folder listing onto Tk controls, preserving saved state."""
-        self._sequence_review_pending=any(
-            bool(old.get("sequence_review_pending")) for old in saved.values())
+        # A prior process may have been closed mid-scan. Its finished
+        # decisions remain on disk; do not carry the export lock across runs.
+        self._sequence_review_pending=False
         self.year_var.set(REQUIRED_CASE_YEAR)
         for tree in (self.tree, self.completed_tree):
             for item in tree.get_children():
@@ -387,7 +538,9 @@ class App:
             old=saved.get(pdf.name,{})
             sent=False  # A PDF still in the selected root has not been sent to COMPLETED.
             item = {
-                "path": pdf, "candidate": old.get("candidate", ""),
+                "path": pdf, "candidate": (
+                    normalize_case_number(old.get("candidate"))
+                    if CASE_RE.fullmatch(normalize_case_number(old.get("candidate"))) else ""),
                 "confirmed": old.get("confirmed", ""), "status": old.get("status", "Not scanned"),
                 "snippet": None, "handwritten": bool(old.get("handwritten", False)),
                 "score": float(old.get("score", 0.0) or 0.0),
@@ -422,6 +575,8 @@ class App:
                 "learning_pending": bool(old.get("learning_pending", False)),
                 "export_error": str(old.get("export_error", ""))
             }
+            if not item.get("case_draft") and not str(item.get("status", "")).startswith("Edited —"):
+                item.pop("case_draft",None)
             if item["auto_labeled"] and item["approval_rule_version"]!="5.3.2":
                 item.update(confirmed="",auto_labeled=False,manual_approved=False,
                             sequence_inferred=False,sequence_conflict=False,
@@ -453,6 +608,7 @@ class App:
             else:
                 item["completed_iid"]=None
             self._insert_scan_row(iid,item)
+        self._load_sent_history(saved)
         self.status.config(
             text=f"Found {len(pdfs)} PDF(s) in this folder. Saved review/export progress restored where available.")
         pending_files = any(
@@ -466,6 +622,7 @@ class App:
         self._update_scan_file_count()
         self._save_state()
         self._recheck_after_decision()
+        self._update_completed_count()
         self._schedule_auto_export()
 
     def _ui(self):
@@ -478,25 +635,23 @@ class App:
         brand.pack(side="left", padx=(0, 10))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Case Number OCR & Renamer — V5.4.1",
+        ttk.Label(title_stack, text=f"Case Number OCR & Renamer — V{self.app_version}",
                   font=("Segoe UI", 17, "bold")).pack(anchor="w")
 
-        # Coworker-facing navigation and learning action.
-        self.select_files_nav_btn = tk.Button(
-            header, text="SCAN", command=lambda: self._show_main_view("select"),
-            bg="#0d4388", fg="white", activebackground="#0d4388", activeforeground="white",
-            relief="sunken", bd=2, padx=14, pady=8, font=("Segoe UI", 10, "bold"), cursor="hand2")
-        self.completed_nav_btn = tk.Button(
-            header, text="REVIEW", command=lambda: self._show_main_view("completed"),
-            bg="#1456a8", fg="white", activebackground="#0d4388", activeforeground="white",
-            relief="raised", bd=2, padx=14, pady=8, font=("Segoe UI", 10, "bold"), cursor="hand2")
+        # One-screen workflow: scan, review and approved files use one list.
+        # The detailed crop editor opens from a double-click on a file.
         self.settings_nav_btn=tk.Button(
-            header,text="SETTINGS",command=lambda:self._show_main_view("settings"),
+            header,text="SETTINGS",command=self._open_settings_window,
             bg="#1456a8",fg="white",activebackground="#0d4388",
             activeforeground="white",relief="raised",bd=2,padx=14,pady=8,
             font=("Segoe UI",10,"bold"),cursor="hand2")
         self.settings_nav_btn.pack(side="right",padx=(6,0))
-        self.select_files_nav_btn.pack(side="right", padx=(6, 0))
+        # The local training spinner never covers or disables the file list.
+        self.learning_activity = ttk.Frame(header)
+        ttk.Label(self.learning_activity, text="LOCAL LEARNING", font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,6))
+        self.learning_activity_bar = ttk.Progressbar(self.learning_activity,
+            mode="indeterminate", length=70)
+        self.learning_activity_bar.pack(side="left")
         ttk.Separator(main, orient="horizontal").pack(fill="x", pady=(8, 7))
 
         self.view_container = ttk.Frame(main)
@@ -508,8 +663,9 @@ class App:
         self.finish_batch_btn = ttk.Button(self.settings_tab, text="UPDATE LEARNING", command=self._finish_import_batch, state="disabled")
         self.update_btn.pack(anchor="w", pady=5)
         self.finish_batch_btn.pack(anchor="w", pady=5)
-        for view in (self.review_tab, self.completed_tab, self.settings_tab):
-            view.place(relx=0, rely=0, relwidth=1, relheight=1)
+        # Keep the old completed widgets as internal state compatibility only;
+        # do not display a second tab or lose historical verified records.
+        self.review_tab.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         # The selected year stays internal at the established default of 08.
         # Coworkers only choose the folder and run/review the files.
@@ -517,58 +673,36 @@ class App:
         self.auto_label_var.set(True)
         self.auto_threshold_var.set("95")
 
-        folder_bar = ttk.Frame(self.review_tab)
-        folder_bar.pack(fill="x", pady=(0, 8))
-        self.choose_folder_btn = ttk.Button(
-            folder_bar, text="SELECT FILES", command=self.choose_folder)
-        self.choose_folder_btn.pack(side="left", padx=(0, 10))
-        self.folder_label = ttk.Label(folder_bar, text="No folder selected")
-        self.folder_label.pack(side="left", fill="x", expand=True)
-
-        action_bar = ttk.Frame(self.review_tab)
-        action_bar.pack(fill="x", pady=(0, 7))
-        self.scan_btn = ttk.Button(action_bar, text="SCAN", command=self.scan, state="disabled")
-        self.scan_btn.pack(side="left", padx=(0, 5), ipadx=8, ipady=3)
-        self.pause_btn = ttk.Button(
-            action_bar, text="PAUSE", command=self.toggle_pause, state="disabled")
-        self.pause_btn.pack(side="left", padx=5, ipadx=8, ipady=3)
-        self.restart_btn = ttk.Button(
-            action_bar, text="STOP", command=self.stop_or_restart_scan, state="disabled")
-        self.restart_btn.pack(side="left", padx=5, ipadx=8, ipady=3)
-        self.review_btn = ttk.Button(
-            self.settings_tab, text="REVIEW SELECTED", command=self.review_selected, state="disabled")
-        self.review_btn.pack(anchor="w", pady=5)
-        self.review_all_btn = self.review_btn
-        scan_tools = ttk.Frame(self.review_tab)
-        scan_tools.pack(fill="x", pady=(0, 5))
-        self.rescan_btn = ttk.Button(
-            scan_tools, text="RESCAN SELECTED", command=self.rescan_selected, state="disabled")
-        self.rescan_btn.pack(side="left", padx=(0, 6))
-        self.refresh_root_btn = ttk.Button(
-            scan_tools, text="REFRESH", command=self.refresh_root_folder)
-        self.refresh_root_btn.pack(side="left", padx=(0, 6))
-        self.clear_root_btn = ttk.Button(
-            scan_tools, text="CLEAR", command=self.clear_scan_screen)
-        self.clear_root_btn.pack(side="left", padx=(0, 6))
+        self.action_bar = ttk.Frame(self.review_tab)
+        self.action_bar.pack(fill="x",pady=(0,8))
+        action_specs = [
+            ("choose_folder_btn","SELECT FILES",self.choose_folder,"normal"),
+            ("scan_btn","SCAN",self.scan,"disabled"),
+            ("pause_btn","PAUSE",self.toggle_pause,"disabled"),
+            ("restart_btn","STOP",self.stop_or_restart_scan,"disabled"),
+            ("rescan_btn","RESCAN ALL",self.rescan_all,"disabled"),
+            ("refresh_root_btn","REFRESH",self.refresh_root_folder,"normal"),
+            ("clear_root_btn","CLEAR",self.clear_scan_screen,"normal"),
+            ("send_selected_btn","SEND FILES",self.export_completed,"disabled")]
+        style=ttk.Style(self.root)
+        style.configure("MFCase.Action.TButton",font=("Segoe UI",10,"bold"),padding=(4,7),anchor="center")
+        for c,(name,label,callback,state) in enumerate(action_specs):
+            self.action_bar.columnconfigure(c,weight=1,uniform="mfaction")
+            button=ttk.Button(self.action_bar,text=label,command=callback,
+                state=state,style="MFCase.Action.TButton")
+            button.grid(row=0,column=c,sticky="ew",padx=2)
+            setattr(self,name,button)
+        self.scan_file_count_label=ttk.Label(self.review_tab,text="0 of 0 selected")
+        self.scan_file_count_label.pack(anchor="e",pady=(0,2))
+        self.folder_label=ttk.Label(self.review_tab,text="No folder selected")
+        self.folder_label.pack(anchor="w",pady=(0,5))
+        # Legacy callbacks still reference review_btn/finish_batch_btn, but
+        # their action buttons are not presented on the main screen.
+        self.review_btn = ttk.Button(self.settings_tab,text="REVIEW SELECTED",
+                                     command=self.review_selected,state="disabled")
+        self.review_all_btn=self.review_btn
         self.work_log_btn=ttk.Button(self.settings_tab,text="EXPORT WORK LOG",command=self._diag_export)
-
-        self.send_selected_btn=ttk.Button(
-            action_bar,text="SEND FILES",command=self.export_completed,
-            state="disabled")
-        self.send_selected_btn.pack(side="left",padx=5,ipadx=8,ipady=3)
-        self.scan_file_count_label = ttk.Label(action_bar, text="0 of 0 selected")
-        self.scan_file_count_label.pack(side="right", padx=(8, 0))
-
-        rules_bar = ttk.Frame(self.review_tab)
-        rules_bar.pack(fill="x", pady=(0, 8))
-        self.before_after_btn = ttk.Button(
-            rules_bar, text="BEFORE/AFTER", command=self._run_before_after)
-        self.before_after_btn.pack(side="left", padx=(0, 16))
-        ttk.Label(rules_bar, text="Either engine approval threshold:").pack(side="left")
-        tk.Scale(rules_bar, from_=75, to=100, resolution=1, orient="horizontal",
-                 variable=self.auto_threshold_var, length=240,
-                 label="% (applies to new scans)").pack(side="left", padx=8)
-
+        self.before_after_btn=ttk.Button(self.settings_tab,text="BEFORE/AFTER",command=self._run_before_after)
         scan_progress_row=ttk.Frame(self.review_tab)
         scan_progress_row.pack(fill="x",pady=(0,8))
         self.scan_progress_label=ttk.Label(
@@ -588,30 +722,36 @@ class App:
         self._scan_preview_photos={}
         self._scan_preview_widgets={}
         self._scan_approve_widgets={}
+        self._scan_review_widgets={}
+        self._scan_case_widgets={}
+        self._scan_case_sync=False
         self._scan_preview_keys={}
         self._scan_preview_refresh_id=None
         ttk.Style().configure("MFCase.Scan.Treeview",rowheight=74)
-        cols = ("scan_select", "file", "preview", "candidate", "approve", "score", "workflow", "status")
+        cols = ("scan_select", "file", "preview", "candidate", "approve", "review", "score", "workflow", "status")
         self.tree = ttk.Treeview(pane, columns=cols, show="headings",
                                  style="MFCase.Scan.Treeview",selectmode="extended")
         self.tree.heading("scan_select", text="☑ ALL", command=self._toggle_scan_select_all)
         self.tree.column("scan_select", width=76, minwidth=65, stretch=False, anchor="center")
-        self.tree.heading("file", text="PDF FILE")
+        self._set_sortable_heading("scan", self.tree, "file", "PDF FILE")
         self.tree.column("file",width=210,minwidth=140,stretch=True)
         self.tree.heading("preview",text="CASE NUMBER THUMBNAIL")
         self.tree.column("preview",width=230,minwidth=210,stretch=False,anchor="center")
-        self.tree.heading("candidate", text="CASE NUMBER")
+        self._set_sortable_heading("scan", self.tree, "candidate", "CASE NUMBER")
         self.tree.column("candidate", width=135, minwidth=110, stretch=False, anchor="center")
         self.tree.heading("approve", text="APPROVE")
         self.tree.column("approve", width=60, minwidth=60, stretch=False, anchor="center")
-        self.tree.heading("score", text="EASY / TrOCR")
+        self.tree.heading("review", text="REVIEW")
+        self.tree.column("review", width=58, minwidth=58, stretch=False, anchor="center")
+        self._set_sortable_heading("scan", self.tree, "score", "EASY / TrOCR")
         self.tree.column("score", width=135, minwidth=120, stretch=False, anchor="center")
-        self.tree.heading("workflow",text="STATUS")
+        self._set_sortable_heading("scan", self.tree, "workflow", "STATUS")
         self.tree.column("workflow",width=114,minwidth=98,stretch=False,anchor="center")
-        self.tree.heading("status", text="OCR DETAILS")
+        self._set_sortable_heading("scan", self.tree, "status", "OCR DETAILS")
         self.tree.column("status", width=220, minwidth=120, stretch=True)
         # Make OCR-generated case-number suggestions visible in the main queue.
-        self.tree["displaycolumns"] = ("scan_select", "file", "preview", "candidate", "approve", "score", "workflow", "status")
+        self.tree["displaycolumns"] = ("scan_select", "file", "preview", "candidate", "approve", "review", "score", "workflow", "status")
+        self.tree.tag_configure("scanning_now",background="#fff2d5")
         sy = ttk.Scrollbar(pane, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=lambda first,last:(
              sy.set(first,last),self._schedule_scan_preview_refresh()))
@@ -645,10 +785,12 @@ class App:
         ttk.Label(completed_header, text="Ready for Review / Export",
                   font=("Segoe UI", 12, "bold")).pack(side="left")
         self.export_btn = ttk.Button(
-            completed_header, text="SEND FILES", command=self.export, state="disabled")
+            completed_header, text="SEND FILES", command=self.export, state="disabled",
+            style="MFCase.Action.TButton")
         self.export_btn.pack(side="right", padx=(8, 0))
         self.completed_refresh_btn = ttk.Button(
-            completed_header, text="REFRESH", command=self.refresh_completed_list)
+            completed_header, text="REFRESH", command=self.refresh_completed_list,
+            style="MFCase.Action.TButton")
         self.completed_refresh_btn.pack(side="right", padx=(8, 0))
         ttk.Label(
             self.completed_tab,
@@ -683,7 +825,10 @@ class App:
             ("status", "QUEUE STATUS", 185, 140),
             ("unverify", "UNVERIFY", 94, 82),
             ("select", "☐ SELECT ALL", 112, 96)]:
-            self.completed_tree.heading(col, text=title)
+            if col in ("case", "file", "original_path", "status"):
+                self._set_sortable_heading("completed", self.completed_tree, col, title)
+            else:
+                self.completed_tree.heading(col, text=title)
             self.completed_tree.column(col, width=width, minwidth=min_width,
                                        anchor="center", stretch=col in ("file", "original_path", "status"))
         self.completed_tree.heading("select", command=self._toggle_completed_select_all)
@@ -710,10 +855,10 @@ class App:
         self.completed_count.pack(side="left")
         self.review_completed_btn = ttk.Button(
             cbar, text="Review / Approve Selected", command=self.review_completed_selected, state="disabled")
-        self.review_completed_btn.pack(side="right")
+        # Review selected is removed; double-click any row to open review.
         self.unverify_selected_btn = ttk.Button(
             cbar, text="UNVERIFY SELECTED", command=self._unverify_completed_selected,
-            state="disabled")
+            state="disabled",style="MFCase.Action.TButton")
         self.unverify_selected_btn.pack(side="right", padx=(0, 8))
         # Transfer outcomes must be visible while the user is on COMPLETED;
         # the generic status label lives on a different tab.
@@ -721,41 +866,96 @@ class App:
             self.completed_tab, text="Approved files are ready for SEND FILES.",
             wraplength=1100)
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
-        ttk.Label(self.settings_tab,text="SETTINGS",
-                  font=("Segoe UI",16,"bold")).pack(anchor="w",pady=(0,14))
-        ttk.Label(self.settings_tab,text="Application version: V5.4.1",
-                  font=("Segoe UI",11,"bold")).pack(anchor="w",pady=4)
-        ttk.Label(self.settings_tab,
-                  text="OFFLINE BY DEFAULT: OCR, local learning and logs use this computer. UPDATE is a separate manual GitHub request. Existing installed models are reused. Selecting a network PDF folder still uses that network share.",
-                  wraplength=900,justify="left").pack(anchor="w",pady=9)
-        self.connection_status_label=ttk.Label(
-            self.settings_tab,text="Connection status not checked",
-            wraplength=1000,justify="left")
-        self.connection_status_label.pack(anchor="w",pady=(5,14))
-        ttk.Button(self.settings_tab,text="CHECK OFFLINE / ONLINE STATUS",
-                   command=self._check_connection_status).pack(anchor="w",pady=5)
-        ttk.Button(self.settings_tab,text="INSTRUCTIONS / HOW TO USE",
-                   command=self._open_instructions).pack(anchor="w",pady=5)
-        ttk.Button(self.settings_tab,text="EXPORT WORK LOG",
-                   command=self._diag_export).pack(anchor="w",pady=5)
-        ttk.Label(self.settings_tab,
-                  text="Full OCR logs remain on the authorized workstation and restricted shared learning drive. They are never automatically uploaded to the public GitHub repository.",
-                  wraplength=900,justify="left").pack(anchor="w",pady=10)
+        # The SETTINGS widget is an unplaced parent for internal status labels.
+        # Users see four options in a compact pop-out instead.
         self._show_main_view("select")
 
-    def _show_main_view(self, view_name):
-        """Only SCAN and SETTINGS are public UI surfaces."""
-        if view_name=="settings":
-            self._active_main_view="settings"
-            self.settings_tab.lift()
-            active,inactive=self.settings_nav_btn,self.select_files_nav_btn
-            self._check_connection_status()
+    def _show_main_view(self, view_name="select"):
+        """Always show the single combined list, even for legacy callbacks."""
+        self._active_main_view="select"
+        self.review_tab.lift()
+
+    def _background_learning_active(self):
+        return bool(self.trocr_training and getattr(self,"_learning_auto_run",False))
+
+    def _training_blocks_work(self):
+        """Only deliberate/manual training may block a competing task."""
+        return bool(self.trocr_training and not getattr(self,"_learning_auto_run",False))
+
+    def _set_background_learning_indicator(self, enabled):
+        """Small non-modal spinner; tkinter widgets are updated on the UI thread."""
+        frame=getattr(self,"learning_activity",None)
+        if frame is None:
+            return
+        if enabled:
+            if not frame.winfo_manager():
+                frame.pack(side="right",padx=8)
+            self.learning_activity_bar.start(80)
         else:
-            self._active_main_view="select"
-            self.review_tab.lift()
-            active,inactive=self.select_files_nav_btn,self.settings_nav_btn
-        active.configure(bg="#0d4388",relief="sunken")
-        inactive.configure(bg="#1456a8",relief="raised")
+            self.learning_activity_bar.stop()
+            frame.pack_forget()
+
+    def _yield_background_learning(self, reason="user work"):
+        """Let selection/scanning/sending proceed; abort idle fine-tuning safely.
+
+        Training uses a private model instance and checks stop_event between
+        steps. It must not tear down the OCR model currently used by scanning.
+        Any unfinished examples remain in local learning and can be retried.
+        """
+        if not self._background_learning_active():
+            return False
+        self._auto_learning_interrupted=True
+        self.learning_stop_event.set()
+        self.learning_pause_event.set()
+        self._set_background_learning_indicator(False)
+        self._log("Background learning yielding to %s; saved examples retained",reason)
+        return True
+
+    def _open_settings_window(self):
+        existing=getattr(self,"_settings_popup",None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift();existing.focus_force();return
+        win=tk.Toplevel(self.root)
+        self._settings_popup=win
+        win.title(f"MFCase Settings — V{self.app_version}")
+        win.transient(self.root)
+        win.resizable(False,False)
+        win.geometry("480x370")
+        panel=ttk.Frame(win,padding=20)
+        panel.pack(fill="both",expand=True)
+        ttk.Label(panel,text=f"SETTINGS  •  V{self.app_version}",
+                  font=("Segoe UI",15,"bold")).pack(pady=(0,14))
+        for label,func in (
+            ("USER GUIDE",self._open_instructions),
+            ("EXPORT WORK LOG",self._diag_export),
+            ("UPDATE",lambda: self.check_for_updates(automatic=False)),
+            ("UPDATE LEARNING",self._finish_import_batch)):
+            ttk.Button(panel,text=label,command=func,
+                style="MFCase.Action.TButton").pack(fill="x",pady=5)
+        ttk.Separator(panel).pack(fill="x",pady=(12,6))
+        ttk.Checkbutton(panel,text="AUTO SEND COMPLETED — after scan finishes",
+            variable=self.auto_send_var,command=self._save_user_settings).pack(anchor="w",pady=5)
+        ttk.Label(panel,text="OFF by default. Sends only eligible approved files after the final before/after check. "
+            "STOP never triggers an automatic send. PDFs and logs stay local.",
+            wraplength=425,justify="left").pack(anchor="w",pady=(4,0))
+
+    def _network_online_passive(self):
+        """Passive OS check, never a network probe or claim of zero data leakage."""
+        if os.name=="nt":
+            try:
+                import ctypes
+                flags=ctypes.c_ulong(0)
+                return bool(ctypes.windll.wininet.InternetGetConnectedState(
+                    ctypes.byref(flags),0))
+            except Exception:
+                return True  # Fail closed: do not declare safe without evidence.
+        try:
+            import psutil
+            return any(name.lower() not in ("lo","loopback") and status.isup
+                       for name,status in psutil.net_if_stats().items())
+        except Exception:
+            return True
+
 
     def _startup_notice(self, text):
         label = getattr(self, "_startup_phase_label", None)
@@ -842,12 +1042,31 @@ class App:
     def _startup_software_complete(self,error=None):
         self._startup_auto_update=False
         self._loader_finish("startup")
-        self._begin_offline_startup()
+        if not self._startup_ready and not self._loading_jobs:
+            self._begin_offline_startup()
 
     def _start_automatic_learning_if_ready(self):
-        """Never train or synchronize automatically at application startup."""
+        """Run only from the post-scan idle scheduler (not on application startup)."""
+        if not self._startup_ready:
+            return False
+        if self.busy or self.export_busy or self.trocr_training:
+            # Do not permanently lose automatic learning when someone starts
+            # a scan before the idle-learning timer fires.
+            if self.busy or self.export_busy:
+                self.root.after(30000,self._start_automatic_learning_if_ready)
+            return False
         self._startup_learning_pending=False
-        return False
+        try:
+            pending=self._pending_learning_examples()
+            if not pending:
+                return False
+            started=self._maybe_train_trocr(automatic=True)
+            if started:
+                self._auto_learning_started=True
+            return started
+        except Exception as exc:
+            self._log("Automatic learning skipped: %s",exc)
+            return False
 
     def _read_update_config(self):
         try:
@@ -868,7 +1087,7 @@ class App:
         return tuple(int(part) for part in parts[:4]) if parts else (0,)
 
     def check_for_updates(self, automatic=False):
-        if self.update_busy:
+        if self.update_busy or (automatic and (self.busy or self.export_busy or self.trocr_training)):
             return
         self._startup_auto_update = bool(automatic)
         try:
@@ -944,13 +1163,15 @@ class App:
                     digest.update(block)
             actual_digest = digest.hexdigest()
             expected = str(release.get("digest") or "")
-            if expected.startswith("sha256:") and actual_digest.lower() != expected.split(":", 1)[1].lower():
+            if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}",expected):
+                raise RuntimeError("No SHA-256 digest in the GitHub release. Update blocked.")
+            if actual_digest.lower() != expected.split(":", 1)[1].lower():
                 raise RuntimeError("The downloaded update failed GitHub's SHA-256 digest check. No files were changed.")
             with zipfile.ZipFile(temp_path, "r") as archive:
                 bad = archive.testzip()
                 if bad:
                     raise RuntimeError(f"The update ZIP failed its integrity check at {bad}.")
-                allowed = {"case_number_ocr.py", "updater_apply.py", "RUN_CASE_OCR.bat", "MF.ico", "Launch_Case_OCR.vbs", "README.txt", "update_config.json", "CHANGELOG_V5_0_2.txt", "CHANGELOG_V5_0_3.txt", "CHANGELOG_V5_0_4.txt"}
+                allowed = {"case_number_ocr.py", "updater_apply.py", "RUN_CASE_OCR.bat", "MF.ico", "Launch_Case_OCR.vbs", "README.txt", "README_FIRST.txt", "SETUP.bat", "verify_package.py", "update_config.json", "CREATE_DESKTOP_SHORTCUT.bat", "Create_Desktop_Shortcut.vbs", "RUN_CASE_OCR_DEBUG.bat", "CHANGELOG_V5_0_2.txt", "CHANGELOG_V5_0_3.txt", "CHANGELOG_V5_0_4.txt"}
                 found = {Path(name).name for name in archive.namelist() if not name.endswith("/")}
                 if not {"case_number_ocr.py", "updater_apply.py"}.issubset(found):
                     raise RuntimeError("The update ZIP does not contain the expected application files.")
@@ -967,6 +1188,12 @@ class App:
             self.queue.put(("update_error", str(exc)))
 
     def _launch_update_installer(self, archive_path):
+        if self._background_learning_active():
+            self._yield_background_learning("software update")
+        if self.busy or self.export_busy or self.trocr_training:
+            self.status.config(text="Update verified; installation deferred until work is idle.")
+            self.root.after(3000,lambda path=archive_path:self._launch_update_installer(path))
+            return
         helper = self.app_dir / "updater_apply.py"
         if not helper.is_file():
             if self._startup_auto_update:
@@ -1033,6 +1260,103 @@ class App:
 
 
     @staticmethod
+    def _valid_ocr_box_candidates(record):
+        """Only a real, complete 08- OCR hit can authorize a red/selectable box.
+
+        Unverified historic snippets and unlocated model guesses may be retained
+        as diagnostic data but never appear as candidate boxes in the UI.
+        """
+        snippet = record.get("snippet") if record else None
+        if not snippet or len(snippet) < 5 or not isinstance(snippet[4], list):
+            return []
+        valid = []
+        for hit in snippet[4]:
+            if not isinstance(hit, dict):
+                continue
+            number = normalize_case_number(hit.get("number"))
+            rect = hit.get("rect")
+            # A TrOCR/strip guess can say 08- even when the boxed handwriting
+            # is only a suffix (e.g. "234"). Never draw that unproven box.
+            if (not hit.get("box_verified") or not CASE_RE.fullmatch(number)
+                    or not isinstance(rect, (list, tuple)) or len(rect) != 4):
+                continue
+            try:
+                x0, y0, x1, y1 = map(float, rect)
+            except (ValueError, TypeError):
+                continue
+            if not (all(math.isfinite(v) for v in (x0,y0,x1,y1)) and
+                    x0 >= 0 and y0 >= 0 and x1 > x0 and y1 > y0):
+                continue
+            if snippet[1] is not None and hasattr(snippet[1], "shape"):
+                h,w=snippet[1].shape[:2]
+                if x1>w+4 or y1>h+4:
+                    continue
+            valid.append(hit)
+        # Multiple OCR passes may report overlapping versions of the same
+        # printed field. Display ONE compact, trustworthy box per location.
+        preferred = _case_identity(record.get("confirmed") or record.get("candidate"))
+        def rank(hit):
+            x0,y0,x1,y1=map(float,hit["rect"])
+            area=(x1-x0)*(y1-y0)
+            return (_case_identity(hit.get("number"))==preferred,
+                    float(hit.get("score") or 0),-area)
+        kept=[]
+        for hit in sorted(valid,key=rank,reverse=True):
+            x0,y0,x1,y1=map(float,hit["rect"])
+            duplicate=False
+            for old in kept:
+                a0,b0,a1,b1=map(float,old["rect"])
+                overlap=max(0,min(x1,a1)-max(x0,a0))*max(0,min(y1,b1)-max(y0,b0))
+                smaller=min((x1-x0)*(y1-y0),(a1-a0)*(b1-b0))
+                if smaller>0 and overlap/smaller>=0.55:
+                    duplicate=True
+                    break
+            if not duplicate:
+                kept.append(hit)
+        return kept
+
+    def _sort_table_column(self, table_name, column):
+        """Sort the visible table without changing the before/after scan order."""
+        tree = self.tree if table_name == "scan" else self.completed_tree
+        previous = self._table_sort_state.get(table_name)
+        reverse = bool(previous and previous[0] == column and not previous[1])
+        self._table_sort_state[table_name] = (column, reverse)
+        self._apply_table_sort(table_name)
+
+    def _apply_table_sort(self, table_name):
+        tree = self.tree if table_name == "scan" else self.completed_tree
+        state = self._table_sort_state.get(table_name)
+        if not state:
+            return
+        column, reverse = state
+        ids = list(tree.get_children(""))
+        def row_key(iid):
+            raw = str(tree.set(iid, column) or "")
+            if column == "score":
+                match = re.match(r"\s*(\d+(?:\.\d+)?)%", raw)
+                if match:
+                    return (0, float(match.group(1)))
+                return (1, 0)
+            if not raw or raw in ("—", "☐", "☑"):
+                return (1, ())
+            return (0, self._natural_pdf_sort_key(raw))
+        for index, iid in enumerate(sorted(ids, key=row_key, reverse=reverse)):
+            tree.move(iid, "", index)
+        for col, title in self._table_column_titles.get(table_name, {}).items():
+            tree.heading(col, text=title + (
+                (" ▼" if reverse else " ▲") if col == column else ""))
+        if table_name == "scan":
+            self._schedule_scan_preview_refresh()
+        else:
+            self.root.after_idle(self._position_completed_unverify_buttons)
+
+    def _set_sortable_heading(self, table_name, tree, column, title):
+        self._table_column_titles.setdefault(table_name, {})[column] = title
+        tree.heading(column, text=title,
+                     command=lambda table_name=table_name, column=column:
+                         self._sort_table_column(table_name, column))
+
+    @staticmethod
     def _workflow_status(record):
         if record.get("exported"):
             return "RENAMED"
@@ -1067,7 +1391,7 @@ class App:
         if snippet and len(snippet)>1 and snippet[1] is not None:
             try:
                 page=Image.fromarray(snippet[1]).convert("RGB")
-                candidates=snippet[4] if len(snippet)>4 and isinstance(snippet[4],list) else []
+                candidates=self._valid_ocr_box_candidates(record)
                 case=str(record.get("confirmed") or record.get("candidate") or "")
                 def same_case(value):
                     try:return _case_identity(value)==_case_identity(case) and _case_identity(case) is not None
@@ -1075,7 +1399,11 @@ class App:
                 chosen=next((h for h in candidates if h.get("rect") and same_case(h.get("number"))),None)
                 rect=(record.get("manual_crop_rect") if record.get("manual_crop_origin")=="drawn"
                       else chosen.get("rect") if chosen else None)
-                rect=rect or (snippet[3] if CASE_RE.fullmatch(case) and not record.get("sequence_inferred") else None)
+                # A bare snippet rect cannot authorize a box: it must belong
+                # to an actual, valid 08- OCR candidate for this case.
+                if not rect and not record.get("sequence_inferred"):
+                    match=next((h for h in candidates if same_case(h.get("number"))),None)
+                    rect=match.get("rect") if match else None
                 if rect:
                     x0,y0,x1,y1=map(int,map(float,rect))
                     w=max(10,x1-x0);h=max(10,y1-y0)
@@ -1147,15 +1475,28 @@ class App:
                 accept_box=self.tree.bbox(iid,"approve")
                 if accept_box:
                     ax,ay,aw,ah=accept_box
-                    button.configure(state="disabled" if self.busy or self.export_busy or self.trocr_training or self.records[iid].get("exported") else "normal")
+                    button.configure(state="disabled" if self._scan_row_locked(iid) else "normal")
                     button.place(x=ax+(aw-34)//2,y=ay+(ah-32)//2,width=34,height=32)
+                review_button=self._scan_review_widgets.get(iid)
+                if review_button is None:
+                    review_button=tk.Button(self.tree,text="R",bg="#1456a8",fg="white",
+                        activebackground="#0d4388",activeforeground="white",
+                        font=("Segoe UI",15,"bold"),relief="flat",cursor="hand2",
+                        command=lambda key=iid:self._open_review_iid(key))
+                    self._scan_review_widgets[iid]=review_button
+                review_box=self.tree.bbox(iid,"review")
+                if review_box:
+                    rx,ry,rw,rh=review_box
+                    review_button.configure(state="disabled" if self._scan_row_locked(iid) else "normal")
+                    review_button.place(x=rx+(rw-34)//2,y=ry+(rh-32)//2,width=34,height=32)
+                self._place_scan_case_entry(iid)
                 photo=self._make_scan_preview(iid,self.records[iid])
                 widget=self._scan_preview_widgets.get(iid)
                 if widget is None:
                     widget=tk.Label(self.tree,borderwidth=0,highlightthickness=0,
                                     cursor="hand2")
                     widget.bind("<Button-1>",lambda e,key=iid:self._select_preview_row(key,e))
-                    widget.bind("<Double-1>",lambda e,key=iid:self._open_preview_review(key))
+                    widget.bind("<Double-1>",lambda e,key=iid:self._open_review_iid(key))
                     self._scan_preview_widgets[iid]=widget
                 widget.configure(image=photo)
                 width=min(222,max(0,w-6));image_height=min(68,max(0,h-4))
@@ -1173,6 +1514,13 @@ class App:
                 self._scan_preview_photos.pop(iid,None)
                 self._scan_preview_keys.pop(iid,None)
 
+        for iid,button in list(self._scan_review_widgets.items()):
+            if iid not in visible or not self.tree.exists(iid):
+                button.place_forget()
+            if not self.tree.exists(iid):
+                button.destroy()
+                self._scan_review_widgets.pop(iid,None)
+
         for iid,button in list(self._scan_approve_widgets.items()):
             if iid not in visible or not self.tree.exists(iid):
                 button.place_forget()
@@ -1180,18 +1528,77 @@ class App:
                 button.destroy()
                 self._scan_approve_widgets.pop(iid,None)
 
-    def _quick_approve(self, iid):
-        if self.busy or self.export_busy or self.trocr_training:
+        for iid,(entry,var) in list(self._scan_case_widgets.items()):
+            if iid not in visible or not self.tree.exists(iid):
+                entry.place_forget()
+            if not self.tree.exists(iid):
+                entry.destroy()
+                self._scan_case_widgets.pop(iid,None)
+
+    def _place_scan_case_entry(self, iid):
+        bounds=self.tree.bbox(iid,"candidate")
+        if not bounds:
             return
-        commit=getattr(self,"_scan_case_commit",None)
-        if commit:
-            commit()
-            if getattr(self,"_scan_case_editor",None) is not None:
-                return
+        record=self.records[iid]
+        value=record.get("case_draft") if "case_draft" in record else (record.get("confirmed") or record.get("candidate") or "")
+        pair=self._scan_case_widgets.get(iid)
+        if pair is None:
+            var=tk.StringVar(master=self.tree,value=value)
+            entry=ttk.Entry(self.tree,textvariable=var,font=("Segoe UI",11))
+            self._scan_case_widgets[iid]=(entry,var)
+            var.trace_add("write",lambda *_args,key=iid:self._inline_case_changed(key))
+            entry.bind("<Return>",lambda _event,key=iid:(self._quick_approve(key),"break")[1])
+            entry.bind("<Double-1>",lambda event,key=iid:(self._open_review_iid(key),"break")[1])
+            entry.bind("<FocusIn>",lambda _event:key_focus(iid))
+            entry.bind("<FocusOut>",lambda _event:self._save_state())
+            def key_focus(key):
+                self._yield_background_learning("case-number edit")
+                self.tree.focus(key)
+        else:
+            entry,var=pair
+            if var.get()!=value:
+                self._scan_case_sync=True
+                try:var.set(value)
+                finally:self._scan_case_sync=False
+        disabled=self._scan_row_locked(iid)
+        entry.configure(state="disabled" if disabled else "normal")
+        x,y,w,h=bounds
+        entry.place(x=x+2,y=y+(h-28)//2,width=max(20,w-4),height=28)
+
+    def _inline_case_changed(self, iid):
+        if self._scan_case_sync or iid not in self.records:
+            return
+        record=self.records[iid]
+        if self._scan_row_locked(iid):
+            return
+        text=self._scan_case_widgets[iid][1].get()
+        # Blank and invalid edits are retained as drafts, never an old approved value.
+        record.update(case_draft=text,confirmed="",manual_approved=False,
+                      auto_labeled=False,sequence_inferred=False,sequence_conflict=False,
+                      sequence_excluded=True,status="Edited — click the green check to approve")
+        if self.completed_tree.exists(iid):
+            self.completed_tree.delete(iid)
+        record["completed_iid"]=None
+        self.tree.set(iid,"candidate",text)
+        self.tree.set(iid,"workflow","REVIEW")
+        self.tree.set(iid,"status",record["status"])
+        self._update_completed_count()
+
+    def _quick_approve(self, iid):
+        if self._scan_row_locked(iid):
+            self.status.config(text="This file is being scanned, sent or is not editable.")
+            return
+        self._yield_background_learning("file approval")
         record=self.records.get(iid)
         if not record or record.get("exported"):
             return
-        value=record.get("case_draft") or record.get("confirmed") or record.get("candidate") or ""
+        value=record.get("case_draft") if "case_draft" in record else (record.get("confirmed") or record.get("candidate") or "")
+        value=normalize_case_number(value)
+        if ("case_draft" not in record and record.get("confirmed")==value
+                and record.get("manual_approved") and not record.get("sequence_conflict")):
+            self.status.config(text=f"{record['path'].name} is already COMPLETED and ready to send.")
+            self._insert_scan_row(iid,record)
+            return  # Never duplicate learning or rename a previously approved file.
         if not CASE_RE.fullmatch(normalize_case_number(value)):
             self.status.config(text="Enter a complete 08- case number before accepting.")
             self._start_scan_case_edit(iid)
@@ -1199,6 +1606,8 @@ class App:
         class Value:
             def get(self): return value
         if self._save_completed_case_edit(iid,Value()):
+            self._audit_event("CHECK_APPROVED",original_name=record.get("original_name") or record["path"].name,
+                              confirmed=value)
             record.pop("case_draft",None)
             self._save_state()
             self._insert_scan_row(iid,record)
@@ -1208,6 +1617,8 @@ class App:
         value=normalize_case_number(entry.get())
         if not CASE_RE.fullmatch(value):
             return False
+        self._audit_event("DRAFT_SAVED",original_name=record.get("original_name") or record["path"].name,
+                          proposed_case=value)
         record.update(case_draft=value,confirmed="",manual_approved=False,exported=False,
                       auto_labeled=False,sequence_inferred=False,sequence_conflict=False,
                       sequence_excluded=True,status="Edited — click the green check to approve")
@@ -1242,9 +1653,7 @@ class App:
             self._refresh_review_controls()
 
     def _open_preview_review(self,iid):
-        self._select_preview_row(iid)
-        if iid in self._review_ready_ids():
-            self.review_selected()
+        return self._open_review_iid(iid)
 
     def _insert_scan_row(self, iid, record, candidate_override=None, score_override=None):
         """Keep case number and PDF visible until explicit user transfer."""
@@ -1253,31 +1662,37 @@ class App:
             if self.tree.exists(iid):
                 self.tree.delete(iid)
             return
+        proposed=(record.get("case_draft") or
+                  (record.get("confirmed") if record.get("manual_approved") and record.get("confirmed")
+                   else record.get("candidate", "")))
+        if not CASE_RE.fullmatch(normalize_case_number(proposed)):
+            proposed=""
         values=("☑" if iid in self.scan_checked_iids else "☐",
                 record["path"].name,"",
-                (record.get("case_draft") or
-                 (record.get("confirmed") if record.get("manual_approved") and record.get("confirmed")
-                  else record.get("candidate","")))
-                if candidate_override is None else candidate_override,
-                "",
+                proposed if candidate_override is None else
+                (candidate_override if CASE_RE.fullmatch(normalize_case_number(candidate_override)) else ""),
+                "", "R",
                 (" / ".join(f"{record['engine_scores'][engine]:.1f}%"
                     if engine in record.get("engine_scores",{}) else "—"
                     for engine in ("EasyOCR","TrOCR"))) if score_override is None else score_override,
                 self._workflow_status(record),
                 record.get("status","Not scanned"))
         if self.tree.exists(iid):
-            self.tree.item(iid,values=values)
+            self.tree.item(iid,values=values,tags=("scanning_now",) if iid==getattr(self,"_active_scan_iid",None) else ())
         else:
-            self.tree.insert("","end",iid=iid,values=values)
+            self.tree.insert("","end",iid=iid,values=values,
+                             tags=("scanning_now",) if iid==getattr(self,"_active_scan_iid",None) else ())
         if iid in self.scan_checked_iids and iid not in self.tree.selection():
             self.tree.selection_add(iid)
 
         btn=getattr(self,"send_selected_btn",None)
         if btn is not None:
-            allowed=(not self.busy and not self.export_busy and not self.trocr_training
+            allowed=(not self.busy and not self.export_busy and not self._training_blocks_work()
                      and any(self._eligible_for_kurt(x,self.records[x])
                              for x in self.records))
             btn.config(state="normal" if allowed else "disabled")
+        if self._table_sort_state.get("scan"):
+            self._apply_table_sort("scan")
         self._schedule_scan_preview_refresh()
         self._update_scan_file_count()
 
@@ -1290,120 +1705,39 @@ class App:
         return self.export_completed()
 
     def _unified_double_click(self,event):
-        """Only double-click may reopen COMPLETED / SENT; explicitly confirm."""
+        """Review opens from any row column, not just the thumbnail."""
         iid=self.tree.identify_row(event.y)
-        if not iid or iid not in self.records:return
-        if self.tree.identify_column(event.x)=="#4":
-            self._start_scan_case_edit(iid)
-            return "break"
+        if iid in self.records:
+            self._open_review_iid(iid)
+        return "break"
+
+    def _open_review_iid(self,iid):
+        """Open the full-page manual editor without withdrawing an existing approval."""
+        if iid not in self.records or self._scan_row_locked(iid):
+            return
+        self._mark_user_activity()
+        self._yield_background_learning("manual review")
         rec=self.records[iid]
-        state=self._workflow_status(rec)
-        if state=="RENAMED":
-            self.status.config(text="This file has already been sent.")
+        if rec.get("exported"):
+            self.status.config(text="Sent files cannot be edited from the root queue. Restore the PDF first.")
             return
-        if state in ("COMPLETED","SENT"):
-            if not messagebox.askyesno(
-                "Reopen verified file",
-                f"{rec['path'].name} is {state}.\n\n"
-                "Reopen it for manual review? This can change its case number. "
-                "The file stays in its current folder. "
-                "No changes will occur if you choose No."):
-                return
-            if state=="SENT":
-                current=Path(rec["path"])
-                if not current.is_file():
-                    messagebox.showerror("Missing sent PDF","The sent PDF no longer exists.")
-                    return
-                intended=rec.get("original_name") or current.name
-                original=self.folder / Path(intended).name
-                if original.exists():
-                    messagebox.showerror("Filename collision",
-                       f"Cannot restore {intended}; a file already exists in the root. "
-                       "No existing file was replaced.")
-                    return
-                if current.parent.resolve()!=(self.folder/"COMPLETED").resolve():
-                    messagebox.showerror("Unsafe location",
-                       "This file is not in the selected folder's COMPLETED directory.")
-                    return
-                try:
-                    os.replace(current,original)
-                except OSError as exc:
-                    messagebox.showerror("Restore failed",str(exc))
-                    return
-                rec["previous_export_name"]=rec.get("export_name") or current.name
-                rec["path"]=original
-                rec["exported"]=False
-                rec["export_name"]=""
-            rec["confirmed"]=""
-            rec["auto_labeled"]=False
-            rec["manual_approved"]=False
-            rec["sequence_inferred"]=False
-            rec["sequence_excluded"]=True
-            rec["send_after_manual_approval"]=False
-            rec["status"]="Reopened for manual review"
-            rec["export_error"]=""
-            self.scan_checked_iids.add(iid)
-            if self.completed_tree.exists(iid):
-                self.completed_tree.delete(iid)
-            rec["completed_iid"]=None
-            self._insert_scan_row(iid,rec)
-            self._save_state()
-            self._recheck_after_decision()
-        elif state=="NOT SCANNED":
-            messagebox.showinfo("Scan required",
-                                "Run SCAN before opening the verification window.")
-            return
-        self.review_queue=[iid]
-        self._show_review_item(0)
+        try:
+            self.review_queue=[iid]
+            self._show_review_item(0)
+            self._audit_event("REVIEW_OPENED",original_name=rec.get("original_name") or rec['path'].name,
+                              current_case=rec.get("confirmed") or rec.get("candidate") or "")
+        except Exception as exc:
+            self._log("Manual review failed for %s: %s",iid,exc)
+            messagebox.showerror("Review unavailable",str(exc),parent=self.root)
 
     def _start_scan_case_edit(self,iid):
-        if self.busy or self.export_busy or self.trocr_training:
-            self.status.config(text="Wait for scanning, sending, or learning to finish before editing.")
+        if self._scan_row_locked(iid):
             return
-        record=self.records[iid]
-        if getattr(self,"_scan_case_editor",None) is not None:
-            self._scan_case_editor.focus_set()
-            return
-        bounds=self.tree.bbox(iid,"#4")
-        if not bounds:
-            return
-        editor=ttk.Entry(self.tree,font=("Segoe UI",11))
-        self._scan_case_editor=editor
-        editor.insert(0,record.get("case_draft") or record.get("confirmed") or record.get("candidate") or "08-")
-        editor.place(x=bounds[0],y=bounds[1],width=max(bounds[2],100),height=bounds[3])
-        initial_value=editor.get()
-        editing={"saving":False,"closed":False}
-        def close():
-            editing["closed"]=True
-            self._scan_case_editor=None
-            self._scan_case_commit=None
-            editor.destroy()
-        def save(event=None):
-            if editing["saving"] or editing["closed"]:
-                return "break"
-            focus_out=event is not None and str(getattr(event,"type","")) in ("10","FocusOut")
-            if focus_out and editor.get()==initial_value:
-                close()  # Opening a cell alone does not approve a machine guess.
-                return "break"
-            value=normalize_case_number(editor.get())
-            if not CASE_RE.fullmatch(value):
-                self.status.config(text="Enter 08- followed by 1–7 digits. Invalid edits cannot complete a file.")
-                return "break"
-            editing["saving"]=True
-            try:
-                if self._save_completed_case_edit(iid,editor) is not True:
-                    return "break"
-                close()
-            finally:
-                editing["saving"]=False
-            return "break"
-        self._scan_case_commit=save
-        editor.bind("<Return>",save)
-        editor.bind("<FocusOut>",save)
-        editor.bind("<Escape>",lambda _event:(close(),"break")[1])
-        editor.focus_set()
-        editor.selection_range(0,"end")
-        self.status.config(text="Edit case number: Enter or clicking away saves and approves. Esc cancels.")
+        self._place_scan_case_entry(iid)
+        pair=self._scan_case_widgets.get(iid)
+        if pair:
+            pair[0].focus_set()
+            pair[0].selection_range(0,"end")
 
     def _open_instructions(self):
         win=tk.Toplevel(self.root)
@@ -1415,33 +1749,23 @@ class App:
         text=tk.Text(frame,wrap="word",font=("Segoe UI",10))
         text.pack(fill="both",expand=True)
         text.insert("1.0",
-            "M.F. CASE NUMBER OCR — HOW TO USE (OFFLINE FIRST)\n\n"
-            "1. SELECT FILES lists ONLY PDFs in the selected root folder. "
-            "Subfolders, including COMPLETED, are not scanned.\n\n"
-            "2. SCAN recognizes only case numbers beginning with 08-. "
-            "It examines the top-right 4 by 4 inches. "
-            "Existing image enhancements retry difficult crops without expanding the search. Other years are ignored.\n\n"
-            "3. Double-click a case-number cell to edit; Enter or clicking away saves, approves and renames. Use the green check to approve an unchanged guess. Esc cancels. "
-            "Double-click the filename to open review. REVIEW SELECTED opens an editable case entry and crop selection. "
-            "The typed correction overrides an OCR crop selection. "
-            "SAVE REVIEW retains the corrected file in the root folder.\n\n"
-            "4. Either engine must meet the selected threshold (default 95%, minimum 75%) for a valid 08- case. "
-            "After scanning, matching confirmed before/after cases correct one or more middle files, "
-            "even over a manual middle entry; competing boundary answers require review. Only independently confirmed files anchor. "
-            "Auto-approved and manually reviewed PDFs remain visible "
-            "and editable in SCAN. Click "
-            "SEND FILES to move all approved files into the COMPLETED subfolder. Existing names are never overwritten; collisions receive a unique suffix.\n\n"
-            "5. UPDATE checks GitHub ONLY when clicked; UPDATE LEARNING "
-            "trains the local handwriting model ONLY when clicked. "
-            "These buttons are separate; neither runs at startup.\n\n"
-            "6. OFFLINE: installed OCR models, learning examples and diagnostic "
-            "logs remain on this computer. Once models are installed, "
-            "scanning needs no internet or shared-drive access.\n\n"
-            "7. Installed model files are reused locally; there is no model-download button. "
-            "Updates do not remove existing learning or checkpoints.\n\n"
-            "8. EXPORT WORK LOG saves a local ZIP when you select a destination. "
-            "Never place identifiable case logs in the public GitHub repository. "
-            "The app does not automatically upload or share diagnostics.\n")
+             "MFCase v5.6.0 USER GUIDE\n\n"
+             "1. SELECT FILES, then SCAN. The OCR confidence threshold is fixed at 95%.\n"
+             "2. A GREEN CHECK completes a file but never sends it. SEND FILES moves only verified files.\n"
+             "3. STOP finishes the current file, saves before/after decisions, then enables SEND FILES. PAUSE does not.\n"
+             "4. Before/after matching runs during and after scans. Only independent anchors count. "
+             "Matching verified anchors can surround any number of pages, and can correct conflicting automatic OCR reads. "
+             "Human-corrected case numbers are never silently overwritten.\n"
+             "5. Double-click a file to REVIEW. Select Draw / Redraw, drag across the number, release: OCR runs on "
+             "that crop and suggests 08- digits. Verify/correct before SAVE REVIEW.\n"
+             "6. When a corrected number is saved, its crop and location become local learning data. "
+             "Manual crop selection may cover the whole page; automatic OCR stays within the upper-right quarter.\n"
+             "7. SETTINGS contains USER GUIDE, EXPORT WORK LOG, UPDATE, UPDATE LEARNING. "
+             "Software checks GitHub at opening; verified updates install and restart when idle. "
+             "Learning uses previously verified local examples in a background worker when enough exist.\n"
+             "8. Red ONLINE / green OFFLINE reports Windows connectivity; it does not certify data isolation. "
+             "OCR and PDFs remain local; updates contact GitHub for release files. "
+             "Keep work logs and confidential PDFs out of any public repository.\n")
         text.configure(state="disabled")
         ttk.Button(frame,text="CLOSE",command=win.destroy).pack(anchor="e",pady=8)
 
@@ -1512,7 +1836,7 @@ class App:
                 self.tree.selection_remove(iid)
 
     def _toggle_scan_select_all(self):
-        if self.busy or self.trocr_training:
+        if self.busy or self._training_blocks_work():
             return
         visible = set(self.tree.get_children(""))
         make_checked = not (bool(visible) and visible.issubset(self.scan_checked_iids))
@@ -1528,6 +1852,11 @@ class App:
             iid=self.tree.identify_row(event.y)
             if iid in self.records:
                 self._select_preview_row(iid,event)
+                if self.tree.identify_column(event.x)=="#4":
+                    # Schedule after Tk finishes selection (single click).
+                    self.root.after_idle(lambda item=iid:
+                        self._start_scan_case_edit(item)
+                        if item in self.records else None)
                 return "break"
 
     def _select_all_for_rescan(self, event=None):
@@ -1541,7 +1870,7 @@ class App:
         widget = getattr(event, "widget", None)
         if widget is not None and isinstance(widget, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, tk.Spinbox)):
             return None
-        if not self._startup_ready or self.busy or self.trocr_training or self.export_busy:
+        if not self._startup_ready or self.busy or self._training_blocks_work() or self.export_busy:
             return "break"
         selected = tuple(self.tree.get_children(""))
         if selected:
@@ -1577,13 +1906,12 @@ class App:
             return False
 
     def _refresh_rescan_button(self):
-        btn = getattr(self, "rescan_btn", None)
-        if btn is None or not hasattr(self, "tree"):
+        btn=getattr(self,"rescan_btn",None)
+        if btn is None:
             return
-        allowed = (self._startup_ready and not self.busy
-                   and not self.trocr_training and not self.export_busy
-                   and any(self._rescan_eligible(iid) for iid in self.tree.selection()))
-        btn.config(state="normal" if allowed else "disabled")
+        enabled=(self._startup_ready and not self.busy and not self.export_busy
+                 and not self._training_blocks_work() and bool(self._rescan_all_candidates()))
+        btn.config(state="normal" if enabled else "disabled")
 
     def rescan_selected(self):
         """Rescan ONLY highlighted, unresolved rows; retain all original PDFs.
@@ -1591,7 +1919,7 @@ class App:
         This never resets completed files and never touches learning examples.
         Checkbox state governs ordinary SCAN; highlight state governs RESCAN.
         """
-        if not self._startup_ready or self.busy or self.trocr_training or self.export_busy:
+        if not self._startup_ready or self.busy or self._training_blocks_work() or self.export_busy:
             return
         selected = [iid for iid in self.tree.selection() if self._rescan_eligible(iid)]
         if not selected:
@@ -1623,10 +1951,70 @@ class App:
         self._log("Targeted rescan requested for %d selected PDF(s)", len(selected))
         self.scan(only_iids=set(selected))
 
+    def _rescan_all_candidates(self):
+        if not self.folder:
+            return []
+        root=Path(self.folder)
+        items=[]
+        for iid,rec in self.records.items():
+            if rec.get("exported") or rec.get("status")=="Moved to BLANKS":
+                continue
+            path=Path(rec.get("path") or "")
+            if path.suffix.lower()!=".pdf":
+                continue
+            try:
+                if path.is_file() and path.parent.resolve()==root.resolve() and self.tree.exists(iid):
+                    items.append(iid)
+            except OSError:
+                pass
+        return items
+
+    def rescan_all(self):
+        """Rescan every remaining root PDF, including unsent COMPLETED rows.
+
+        Explicit human corrections remain authoritative. Automatic approvals
+        are re-evaluated without deleting local learning or provenance records.
+        """
+        if (not self._startup_ready or self.busy or self._training_blocks_work()
+                or self.export_busy):
+            return
+        eligible=self._rescan_all_candidates()
+        if not eligible:
+            self.status.config(text="No remaining root PDFs to rescan.")
+            return
+        if not messagebox.askyesno("RESCAN ALL",
+              f"Rescan all {len(eligible)} remaining PDFs, including unsent COMPLETED rows?\n\n"
+              "Manual corrections stay protected. Automatic OCR approvals will be recalculated;"
+              " sent files, learning data and audit logs will not be modified.",parent=self.root):
+            return
+        self._rescan_force_iids=set(eligible)
+        self.scan_checked_iids.update(eligible)
+        self.tree.selection_set(tuple(eligible))
+        for iid in eligible:
+            rec=self.records[iid]
+            rec["scan_selected"]=True
+            # Human corrections must survive a speculative rescan.
+            human=bool(rec.get("manual_approved")) and not bool(rec.get("auto_labeled"))
+            if not human:
+                rec.update(candidate="",confirmed="",status="Not scanned",
+                    snippet=None,preview_meta={},manual_crop_rect=None,
+                    handwritten=False,score=0.0,engines=[],engine_scores={},
+                    engine_agreement=False,auto_labeled=False,manual_approved=False,
+                    scan_source="",scan_ambiguous=False,sequence_inferred=False,
+                    sequence_conflict=False,sequence_anchors=[],sequence_suggestion="",
+                    sequence_excluded=False,export_error="")
+                if self.completed_tree.exists(iid):
+                    self.completed_tree.delete(iid)
+                rec["completed_iid"]=None
+            self._insert_scan_row(iid,rec)
+        self._audit_event("RESCAN_ALL",count=len(eligible),manual_decisions_preserved=True)
+        self._save_state()
+        self.scan(only_iids=set(eligible))
+
     def _refresh_scan_button(self):
         if not hasattr(self, "scan_btn"):
             return
-        if self.busy or self.trocr_training or self.export_busy:
+        if self.busy or self._training_blocks_work() or self.export_busy:
             self.scan_btn.config(state="disabled")
             return
         if not self._startup_ready:
@@ -1640,12 +2028,12 @@ class App:
                  or str(rec.get("status", "")).startswith("Scan error:"))
             and Path(rec["path"]).is_file()
             for iid, rec in self.records.items())
-        self.scan_btn.config(state="normal" if candidates or any(self._rescan_eligible(iid) for iid in self.tree.selection()) or getattr(self,"_sequence_review_pending",False) else "disabled")
+        self.scan_btn.config(state="normal" if candidates or getattr(self,"_sequence_review_pending",False) else "disabled")
         self._refresh_rescan_button()
         button=getattr(self,"send_selected_btn",None)
         if button is not None:
             allowed=(self._startup_ready and not self.busy and
-                    not self.export_busy and not self.trocr_training and
+                    not self.export_busy and not self._training_blocks_work() and
                     any(self._eligible_for_kurt(iid,self.records[iid])
                         for iid in self.records))
             button.config(state="normal" if allowed else "disabled")
@@ -1656,7 +2044,7 @@ class App:
             self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
             self._scan_case_editor.focus_set()
             return
-        if self.busy or self.trocr_training or self.export_busy:
+        if self.busy or self._training_blocks_work() or self.export_busy:
             self.status.config(text="Clear is available after scanning, learning, or sending finishes.")
             return
         for iid in self.tree.get_children(""):
@@ -1692,7 +2080,7 @@ class App:
             self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
             self._scan_case_editor.focus_set()
             return
-        if not self._startup_ready or self.busy or self.trocr_training or self.export_busy:
+        if not self._startup_ready or self.busy or self._training_blocks_work() or self.export_busy:
             return
         if "rolls" in self._loading_jobs:
             self.status.config(text="Folder refresh is already in progress.")
@@ -1719,11 +2107,12 @@ class App:
             return
         if not self._startup_ready or self._loading_jobs:
             return
-        if self.busy or self.trocr_training or self.export_busy:
+        if self.busy or self.export_busy or self._training_blocks_work():
             messagebox.showinfo(
                 "Processing in progress",
-                "Pause or finish the current scan/training before changing folders.")
+                "Stop the current scan or send before changing folders.")
             return
+        self._yield_background_learning("folder selection")
         folder = filedialog.askdirectory(title="Select folder containing scanned PDFs")
         if not folder:
             return
@@ -1743,6 +2132,10 @@ class App:
                          daemon=True, name="MFCase-LoadRolls").start()
 
     def _save_state(self):
+        with self._perf_measure("network_io_state_save"):
+            return self._save_state_impl()
+
+    def _save_state_impl(self):
         if not self.folder:
             return
         payload = {"version": 2, "updated_at": datetime.now().isoformat(timespec="seconds"), "files": {}}
@@ -1810,6 +2203,9 @@ class App:
             from datetime import datetime as _dt, timezone as _tz
             filepath=getattr(self,"_diag_file",None)
             if filepath is None:
+                # A work log is permanent even outside an active scan run.
+                if event in ("scan_error","manual_case_confirmation","transfer_result"):
+                    self._audit_event("SCAN_"+event.upper(),**details)
                 return
             payload={"schema":"mfcase.diagnostic.v1",
                      "utc":_dt.now(_tz.utc).isoformat(timespec="milliseconds"),
@@ -1823,6 +2219,13 @@ class App:
                 with open(filepath,"a",encoding="utf-8",newline="\n") as handle:
                     handle.write(_json.dumps(payload,ensure_ascii=False,default=str,
                                              separators=(",",":"))+"\n")
+            if event in ("scan_error","manual_case_confirmation","approval_decision",
+                         "run_end","row_final","transfer_result","auto_send_error"):
+                small={key:value for key,value in payload.items()
+                       if key in ("file","candidate","confirmed","case","score",
+                                  "status","outcome","error","source_file",
+                                  "destination_file","auto_approved","run_id")}
+                self._audit_event("SCAN_"+event.upper(),**small)
         except Exception as exc:
             # Diagnostics must never block evidence processing.
             try: logging.warning("Diagnostic logging failed: %s",exc)
@@ -1848,14 +2251,13 @@ class App:
                  selected_files=[Path(x[1]["path"]).name for x in self.scan_items],
                  scan_folder=str(self.folder),
                  year_prefix=self.scan_year_prefix,
-                 scan_region_inches=[4,4],
+                 scan_region_fraction=[0.5,0.0,1.0,0.5],
                  either_engine_min_inclusive=self._get_auto_threshold(),
                  auto_label_enabled=bool(self.auto_label_var.get()),
                  application_version=self.app_version)
-            # Keep a bounded history on the workstation (not on the shared share).
-            for excess in sorted(directory.glob("mfcase-*.jsonl"),reverse=True)[25:]:
-                try: excess.unlink()
-                except OSError: pass
+            # Retain EVERY diagnostic run. Do not prune historical work logs.
+            self._audit_event("SCAN_STARTED", selected_count=len(self.scan_items),
+                              folder=str(self.folder))
         except Exception as exc:
             self._diag_file=None
             self._log("Could not initialize detailed diagnostic log: %s",exc)
@@ -1911,6 +2313,11 @@ class App:
                     archive.write(path,arcname=path.name)
                 if self.log_path and Path(self.log_path).is_file():
                     archive.write(self.log_path,arcname="existing_ocr_log.txt")
+                if self._audit_file.is_file():
+                    archive.write(self._audit_file,arcname="MFCase_Work_Log.txt")
+                provenance=self._audit_root / "MFCase_File_Trace.jsonl"
+                if provenance.is_file():
+                    archive.write(provenance,arcname="MFCase_File_Trace.jsonl")
             _messagebox.showinfo("Work log saved",
                  "Diagnostic ZIP saved. You can upload it here for a complete "
                  "file-by-file OCR decision review.\n\n"+str(target))
@@ -1918,7 +2325,7 @@ class App:
             _messagebox.showerror("Work log export failed",str(exc))
 
 
-    def _scan_progress_update(self,done=None,phase="SCANNING"):
+    def _scan_progress_update(self,done=None,phase="SCANNING",filename=None,index=None):
         """Non-blocking Tk progress display reflecting actual PDF scan work."""
         total=len(getattr(self,"scan_items",[]) or [])
         if done is None:
@@ -1929,7 +2336,10 @@ class App:
         pct=int(round(100*done/total)) if total else 0
         label=getattr(self,"scan_progress_label",None)
         if label is not None:
-            label.configure(text=f"{phase} — {done} of {total} PDF files")
+            if filename:
+                label.configure(text=f"{phase} — {index or done} of {total}: {filename}")
+            else:
+                label.configure(text=f"{phase} — {done} of {total} PDF files")
         pct_label=getattr(self,"scan_progress_pct",None)
         if pct_label is not None:
             pct_label.configure(text=f"{pct}%")
@@ -1949,6 +2359,22 @@ class App:
             return (x0>=0 and y0>=0 and x1>x0 and y1>y0
                     and (x0+x1)/2>=w*.82
                     and y0<=h*.24 and x1<=w+6)
+        except (TypeError,ValueError,AttributeError):
+            return False
+
+    @staticmethod
+    def _is_in_4x4_rect(rect,image):
+        """Verify an on-page OCR box lies within the actual upper-right quarter ROI."""
+        if rect is None or image is None:
+            return False
+        try:
+            height,width=image.shape[:2]
+            span=width-width//2
+            x0,y0,x1,y1=map(float,rect)
+            return (all(math.isfinite(v) for v in (x0,y0,x1,y1))
+                    and x0>=width-span and y0>=0
+                    and x1<=width and y1<=height//2
+                    and x1>x0 and y1>y0)
         except (TypeError,ValueError,AttributeError):
             return False
 
@@ -1999,9 +2425,111 @@ class App:
               expected_year=expected)
         return filtered
 
+    def _load_user_settings(self):
+        """Auto-send defaults OFF and stays OFF after a failed settings read."""
+        self._user_settings_file=Path(os.getenv("LOCALAPPDATA") or str(Path.home())) / "MFCase" / "user_settings.json"
+        try:
+            cfg=json.loads(self._user_settings_file.read_text(encoding="utf-8"))
+            self.auto_send_var.set(cfg.get("auto_send_completed") is True)
+        except (OSError,ValueError,TypeError):
+            self.auto_send_var.set(False)
+
+    def _save_user_settings(self):
+        path=self._user_settings_file
+        try:
+            path.parent.mkdir(parents=True,exist_ok=True)
+            tmp=path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"version":1,
+                      "auto_send_completed":bool(self.auto_send_var.get())},indent=2),encoding="utf-8")
+            os.replace(tmp,path)
+            self._audit_event("AUTO_SEND_SETTING",enabled=bool(self.auto_send_var.get()))
+        except OSError as exc:
+            self.auto_send_var.set(False)  # No unsaved, silently active auto-send.
+            messagebox.showerror("Settings not saved",str(exc),parent=self.root)
+
+    def _mark_user_activity(self,event=None):
+        self._last_activity_time=time.monotonic()
+        # Idle learning is never permitted during scanning or while someone edits.
+        return None
+
+    def _scan_row_locked(self,iid):
+        """Only the current OCR record and in-flight transfer are locked."""
+        rec=self.records.get(iid)
+        return (not rec or rec.get("exported") or self.export_busy
+            or self._training_blocks_work() or
+            iid in getattr(self,"_export_in_flight_iids",set()) or
+            (self.busy and iid in (getattr(self,"_active_scan_iid",None),
+                                   getattr(self,"_worker_current_iid",None))))
+
+    def _schedule_post_scan_learning(self):
+        """Training is allowed only after a completed scan and 90 seconds idle."""
+        old=getattr(self,"_post_scan_learning_after",None)
+        if old is not None:
+            try:self.root.after_cancel(old)
+            except tk.TclError:pass
+        self._last_activity_time=time.monotonic()
+        self._post_scan_learning_after=self.root.after(90000,self._run_post_scan_learning_if_idle)
+
+    def _run_post_scan_learning_if_idle(self):
+        self._post_scan_learning_after=None
+        if self.export_busy:
+            # The transfer can outlast the first idle interval; retry after it finishes.
+            self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
+            return
+        if (self.busy or self.paused or self.trocr_training
+                or self._loading_jobs or not self._startup_ready):
+            return
+        idle=time.monotonic()-getattr(self,"_last_activity_time",time.monotonic())
+        if idle < 90:
+            self._post_scan_learning_after=self.root.after(int(max(1000,(90-idle)*1000)),
+                self._run_post_scan_learning_if_idle)
+            return
+        self._audit_event("IDLE_LEARNING_CHECK")
+        self._start_automatic_learning_if_ready()
+
+    def _audit_event(self, action, **data):
+        """Append-only text and trace records. Never rotate, truncate or delete."""
+        try:
+            from datetime import timezone
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            line=json.dumps({"at":timestamp,"action":action,**data},ensure_ascii=False,
+                            separators=(",",":"),default=str)
+            with self._audit_lock:
+                self._audit_root.mkdir(parents=True,exist_ok=True)
+                with open(self._audit_file,"a",encoding="utf-8",newline="\n") as handle:
+                    handle.write(line+"\n")
+                    handle.flush()
+                if action in ("FILE_SENT","FILE_RENAMED","FILE_COMBINED","FILE_RESTORED"):
+                    trace=self._audit_root/"MFCase_File_Trace.jsonl"
+                    with open(trace,"a",encoding="utf-8",newline="\n") as handle:
+                        handle.write(line+"\n")
+                        handle.flush()
+        except Exception as exc:
+            try:logging.warning("MFCase append-only audit failed: %s",exc)
+            except Exception:pass
+
+    def record_combination(self,combined_path,inputs):
+        """Companion combiner may call this for proven page-level input lineage.
+
+        The app cannot truthfully infer inclusion merely from matching filenames;
+        the actual combining operation must provide its source file list.
+        """
+        output=Path(combined_path)
+        for row in inputs:
+            if isinstance(row,dict):
+                origin=row.get("original_name") or row.get("input_name")
+                sent=row.get("sent_path") or row.get("input_path")
+            else:
+                origin=Path(row).name
+                sent=str(row)
+            self._audit_event("FILE_COMBINED",original_name=origin,
+                              sent_path=sent,combined_path=str(output),combined_name=output.name)
+
     def _log(self, message, *args):
         try:
             logging.info(message, *args)
+            rendered=message % args if args else str(message)
+            self._audit_event("MESSAGE",detail=rendered)
         except Exception:
             pass
 
@@ -2201,7 +2729,7 @@ class App:
                                   "trocr_v2_trained_count": 0,
                                   "trocr_v2_attempted_count": 0,
                                   "trocr_v2_validation": {}, "field_regions": [],
-                                  "training_type_validation": {}, "last_training_summary": {},
+                                  "training_type_validation": {}, "last_training_summary": {}, "field_regions_full_page": [],
                                   "trocr_v3_attempted_ids": [], "trocr_v3_trained_ids": []}
             self.queue.put(("learning_connect_result", False, str(exc)))
 
@@ -2258,6 +2786,14 @@ class App:
                         latest_regions.append(region)
                         seen.add(key)
                 self.learning_data["field_regions"] = latest_regions
+                stored_full=list(previous.get("field_regions_full_page",[]) or [])
+                known_full={json.dumps(entry,sort_keys=True) for entry in stored_full}
+                for entry in self.learning_data.get("field_regions_full_page",[]):
+                    key=json.dumps(entry,sort_keys=True)
+                    if key not in known_full:
+                        stored_full.append(entry)
+                        known_full.add(key)
+                self.learning_data["field_regions_full_page"]=stored_full[-200:]
                 self.learning_data["corrections"] = {**previous.get("corrections", {}), **self.learning_data.get("corrections", {})}
                 for field in ("trocr_v3_attempted_ids", "trocr_v3_trained_ids"):
                     self.learning_data[field] = sorted(set(previous.get(field, [])) | set(self.learning_data.get(field, [])))
@@ -2279,6 +2815,7 @@ class App:
                 "examples": [], "corrections": {},
                 "trocr_v2_trained_count": 0, "trocr_v2_attempted_count": 0,
                 "trocr_v2_validation": {}, "field_regions": [],
+                "field_regions_full_page":[],
                 "training_type_validation": {}, "last_training_summary": {},
                 "trocr_v3_attempted_ids": [], "trocr_v3_trained_ids": []
             }
@@ -2300,6 +2837,7 @@ class App:
                 "trocr_v2_attempted_count": int(loaded.get("trocr_v2_attempted_count", 0)),
                 "trocr_v2_validation": loaded.get("trocr_v2_validation", {}),
                 "field_regions": loaded.get("field_regions", []),
+                "field_regions_full_page": loaded.get("field_regions_full_page", []),
                 "training_type_validation": loaded.get("training_type_validation", {}),
                 "last_training_summary": loaded.get("last_training_summary", {}),
                 "trocr_v3_attempted_ids": list(loaded.get("trocr_v3_attempted_ids", [])),
@@ -2477,12 +3015,8 @@ class App:
                      f" • {trained} training samples{detail}")
 
     def _get_auto_threshold(self):
-        """Use the selected confidence, bounded to 75–100 percent."""
-        try:
-            value = float(self.auto_threshold_var.get())
-        except (AttributeError, ValueError, TypeError):
-            value = 95.0
-        return max(75.0, min(100.0, value)) if math.isfinite(value) else 95.0
+        """Fixed policy threshold, no user-adjustable confidence slider."""
+        return 95.0
 
     def _save_learning_example(self, record, confirmed_number):
         confirmed_number=normalize_case_number(confirmed_number)
@@ -2503,7 +3037,7 @@ class App:
         field_rect = record.get("manual_crop_rect") or (
             snippet[3] if snippet and record.get("scan_source") == "incident" else None)
         training_rect = None
-        candidates = snippet[4] if snippet and len(snippet) > 4 and isinstance(snippet[4], list) else []
+        candidates = self._valid_ocr_box_candidates(record)
         selected_candidate = next((c for c in candidates
                                    if str(c.get("number") or "").strip() == str(confirmed_number)
                                    and c.get("rect")), None)
@@ -2586,6 +3120,26 @@ class App:
                     regions.append(region)
                     # Bound the spatial memory file while preserving recent variety.
                     self.learning_data["field_regions"] = regions[-200:]
+
+        # Remember any reviewer-verified crop OUTSIDE the default 4x4.
+        # Normalize to the entire page and limit the stored coordinates.
+        if (snippet and snippet[1] is not None and field_rect
+                and record.get("manual_crop_origin")=="drawn"):
+            ph,pw=snippet[1].shape[:2]
+            sx=pw-min(pw,int(round(4*72*2.2)))
+            sh=min(ph,int(round(4*72*2.2)))
+            bx0,by0,bx1,by1=map(float,field_rect)
+            if bx0<sx or by1>sh:
+                region={"rect_norm":[round(max(0,min(1,bx0/pw)),6),
+                            round(max(0,min(1,by0/ph)),6),
+                            round(max(0,min(1,bx1/pw)),6),
+                            round(max(0,min(1,by1/ph)),6)],
+                        "confirmed_case_number":confirmed_number,
+                        "saved_at":datetime.now().isoformat(timespec="seconds")}
+                with self.data_lock:
+                    regions=self.learning_data.setdefault("field_regions_full_page",[])
+                    regions.append(region)
+                    self.learning_data["field_regions_full_page"]=regions[-200:]
 
         example = {
             "image": image_rel,
@@ -2686,16 +3240,12 @@ class App:
         threshold = self._get_auto_threshold()
         year = getattr(self, "scan_year_prefix", "") or (
             self.year_var.get().strip()[-2:] if hasattr(self, "year_var") else "08")
-        if self.auto_label_var.get():
-            message = f"Auto-confirm ON: valid 08- case with either engine at {threshold:g}%; final before/after check."
-        else:
-            message = "Auto-confirm OFF: manual review required."
+        message = (f"Auto-confirm ON: one complete localized 08- case at {threshold:g}% "
+                   "or higher, with no competing high-confidence case.")
         label.config(text=message)
 
     def _auto_label_block_reason(self, score, engine_agreement, candidate, engine_scores=None):
         """Require a valid 08- case meeting the selected threshold in either engine."""
-        if not self.auto_label_var.get():
-            return "Auto-confirm is turned off."
         normalized = normalize_case_number(candidate)
         if not CASE_RE.fullmatch(normalized):
             return "Case number must start with 08- followed by 1–7 case digits."
@@ -2738,64 +3288,27 @@ class App:
         return str(sequence_values[0]) if len(sequence_values) == 1 else ""
 
     def _sequence_index(self):
-        """Freeze independent OCR reads in the exact naturally sorted scan queue.
-
-        Filenames need NOT have consecutive numeric suffixes. An unreadable or
-        excluded file occupies its position and cannot be silently skipped.
-        Snapshot values prevent an earlier approval changing a later comparison.
-        """
-        queue_items=getattr(self,"scan_items",[]) or []
-        indexed={}
+        """Snapshot independent anchors across unsent and already-sent PDFs."""
         order=[]
-        for iid,_item in queue_items:
-            rec=self.records.get(iid)
-            if not rec:
-                continue
-            path=rec.get("path")
-            if not path or str(rec.get("status") or "") in ("Not scanned","Scanning"):
-                continue
-            # An already-sent strong OCR read remains an independent anchor.
-            case=self._sequence_case_number(rec)
-            order.append((len(order),iid,case))
-        for position,(_number,iid,_case) in enumerate(order):
-            indexed[iid]=(order,position)
-        return indexed
+        for iid,rec in self._sequence_order_with_sent_history(include_unscanned=False):
+            order.append((len(order),iid,self._sequence_case_number(rec)))
+        return {iid:(order,i) for i,(_n,iid,_case) in enumerate(order)}
 
     def _sequence_neighbors(self, iid, sequence_index=None):
-        """Return two distinct independent matching scan reads within 3 slots.
+        """Find independent, two-sided bounding anchors at any distance.
 
-        Middle files use immediately before and immediately after. The first
-        and last file may use the next two or previous two only if all THREE
-        files independently read the same case (checked by consensus caller).
-        No filename adjacency or gap check is used.
+        Never use two preceding/next files as a substitute for a real
+        before AND after pair, and never cascade inferred values.
         """
         indexed=sequence_index if sequence_index is not None else self._sequence_index()
         located=indexed.get(iid)
         if located is None:
             return None
         group,index=located
-        length=len(group)
-        if length<3:
-            return None
-        candidate=str(self.records[iid].get("candidate") or "").strip()
-        match_key=_case_identity
-        key=match_key(candidate)
-        windows=[]
-        if index>0 and index+1<length:
-            windows.append((group[index-1],group[index+1]))
-        if index>=2:
-            windows.append((group[index-2],group[index-1]))
-        if index+2<length:
-            windows.append((group[index+1],group[index+2]))
-        for a,b in windows:
-            if key and match_key(a[2])==key and match_key(b[2])==key:
-                return ((a[1],a[2]),(b[1],b[2]))
-        # Keep the original before/after disagreement safeguard. A real
-        # contradictory middle OCR read must go to manual review.
-        if index>0 and index+1<length:
-            a,b=group[index-1],group[index+1]
-            if a[2] and b[2] and match_key(a[2])==match_key(b[2]):
-                return ((a[1],a[2]),(b[1],b[2]))
+        before=next(((row[1],row[2]) for row in reversed(group[:index]) if row[2]),None)
+        after=next(((row[1],row[2]) for row in group[index+1:] if row[2]),None)
+        if before and after and _case_identity(before[1])==_case_identity(after[1]):
+            return before,after
         return None
 
     def _sequence_hint_for_iid(self, iid):
@@ -2805,15 +3318,15 @@ class App:
         left, right = neighbors
         if left[1] == right[1]:
             return [left[1]], (
-                f"Both adjacent files read {left[1]} across consecutive original "
-                "filenames. Sequence suggestion only; verify against this PDF.")
+                f"Both bounding anchors read {left[1]} in original file order. "
+                "Sequence suggestion only; verify against this PDF.")
         return [], (
-            f"Sequential filenames have different verified case numbers "
-            f"({left[1]} / {right[1]}). Scan takes precedence; review this PDF manually.")
+            f"Bounding independent anchors read {left[1]} / {right[1]}. "
+            "Scan takes precedence; review this PDF manually.")
 
     def _run_before_after(self):
         """Explicit recheck; never release an unfinished scan's export barrier."""
-        if self.busy or self.export_busy or self.trocr_training:
+        if self.busy or self.export_busy or self._training_blocks_work():
             messagebox.showinfo("BEFORE/AFTER", "Finish the current operation before checking.")
             return
         if not self.folder or not self.records:
@@ -2844,117 +3357,180 @@ class App:
         self._save_state()
         self._scan_progress_update(len(self.scan_items),"SCAN AND SEQUENCE CHECK COMPLETE")
 
-    def _apply_sequence_consensus(self):
-        """One final, frozen before/after pass. Never cascade inferred anchors."""
-        if self.busy:
+    def _incremental_sequence_check(self, changed_iid=None):
+        """Only recheck ranges affected by a new independent anchor.
+
+        Matching manually confirmed boundaries can span hundreds of pages.
+        Unrelated files do not need to be written again for each scanned PDF.
+        The full recheck at SCAN completion and STOP remains authoritative.
+        """
+        if not self.folder:
             return 0
-        order=sorted(((iid,r) for iid,r in self.records.items()
-                      if r.get("path") and Path(r["path"]).parent==Path(self.folder)),
-                     key=lambda item:self._natural_pdf_sort_key(Path(item[1].get("original_name") or item[1]["path"])))
+        anchors=tuple(sorted((iid,self._sequence_case_number(r),
+                    bool(r.get("manual_approved") and not r.get("auto_labeled")))
+                    for iid,r in self.records.items() if self._sequence_case_number(r)))
+        if anchors==getattr(self,"_last_sequence_signature",None):
+            return 0
+        self._last_sequence_signature=anchors
+        if changed_iid is None:
+            return self._apply_sequence_consensus()
+        order=self._sequence_order_with_sent_history()
+        index=next((j for j,(iid,_r) in enumerate(order) if iid==changed_iid),None)
+        if index is None:
+            return self._apply_sequence_consensus()
+        case=self._sequence_case_number(order[index][1])
+        if not case:
+            return 0
+        humans=[j for j,(_iid,r) in enumerate(order)
+                if self._sequence_case_number(r) and r.get("manual_approved")
+                and not r.get("auto_labeled")]
+        previous=max((j for j in humans if j<index), default=None)
+        following=min((j for j in humans if j>index), default=None)
+        # Without a human on a side, use the closest matching independent
+        # anchor; this covers legacy automatic-only before/after cases.
+        if previous is None:
+            previous=max((j for j in range(index)
+                if self._sequence_case_number(order[j][1])==case),default=index)
+        if following is None:
+            following=min((j for j in range(index+1,len(order))
+                if self._sequence_case_number(order[j][1])==case),default=index)
+        left=min(previous,index)
+        right=max(following,index)
+        if left>=right:
+            return 0
+        return self._apply_sequence_consensus(affected_range=(left,right+1))
+
+    def _sequence_consensus_plan(self, order, positions=None):
+        """Equivalent manual-first bracket ranking without quadratic anchor pairs.
+
+        For each case and each eligible interior file, only the nearest
+        left/right anchors of each *type* (human vs auto) can win the
+        (human endpoints, -distance) ranking. A farther same-type endpoint
+        can never beat the nearer one. Conflicting human anchors are barriers.
+        Preserves conflicts and protects every independent manual decision.
+        """
         anchors=[self._sequence_case_number(r) for _,r in order]
-        def key(value):
-            return _case_identity(value)
-        def excluded(r):
-            return ((r.get("exported") and not r.get("sequence_inferred")) or r.get("case_draft") or r.get("sequence_excluded") or
-                    r.get("status") in ("Not scanned","Scanning","Moved to BLANKS") or
-                    str(r.get("status","")).startswith("Scan error:"))
-        def original(r):
-            return r.get("sequence_original_candidate", "") if r.get("sequence_inferred") else (r.get("confirmed") or r.get("candidate", ""))
-        ranges=[]
-        last={}
-        for pos,case in enumerate(anchors):
-            if not case:
+        manual={i for i,(_,r) in enumerate(order)
+                if anchors[i] and r.get("manual_approved") and not r.get("auto_labeled")}
+        grouped={}
+        for i,case in enumerate(anchors):
+            if case:
+                g=grouped.setdefault(_case_identity(case),[[],[]])
+                g[int(i in manual)].append(i)
+        allowed=set(positions) if positions is not None else None
+        manual_points=sorted(manual)
+        winners={}
+        tied=set()
+        for identity,(auto,human) in grouped.items():
+            all_points=sorted(auto+human)
+            if len(all_points)<2:
                 continue
-            k=key(case)
-            left=last.get(k)
-            last[k]=pos
-            if left is None or pos<=left+1:
-                continue
-            middle=list(range(left+1,pos))
-            # Confirmed matching boundaries take priority over middle readings.
-            if any(excluded(order[j][1]) for j in middle):
-                continue
-            ranges.append((left,pos,case,middle))
-        # The number of bad middle reads is not a conflict between boundaries.
-        covered={pos for _,_,_,middle in ranges for pos in middle}
-        blocked=set()
-        for pos in range(1,len(order)-1):
-            left,right=anchors[pos-1],anchors[pos+1]
-            current=order[pos][1].get("candidate")
-            if (pos not in covered and left and right and key(left)!=key(right) and current
-                    and key(current) not in (key(left),key(right))):
-                blocked.add(pos)  # Two different surrounding answers: no winner.
-        # Alternating cases can generate competing sandwiches. Neither may
-        # rewrite an anchor used by the other; send their interiors to review.
-        for i,(a,b,case,middle) in enumerate(ranges):
-            for c,d,other,other_middle in ranges[i+1:]:
-                if key(case)!=key(other) and max(a,c)<min(b,d):
-                    blocked.update(middle)
-                    blocked.update(other_middle)
-        # Build a complete plan from independent anchors BEFORE changing records.
-        plan={}
-        for left,right,case,middle in ranges:
-            if left in blocked or right in blocked or any(j in blocked for j in middle):
-                continue
-            for pos in middle:
-                if not excluded(order[pos][1]):
-                    plan[pos]=(case,[order[left][0],order[right][0]])
-        changed=set()
+            # Only interior positions between the first and last SAME-case
+            # independent anchors are considered, regardless of 08 zero padding.
+            for pos in range(all_points[0]+1, all_points[-1]):
+                if (pos in manual or (allowed is not None and pos not in allowed)):
+                    continue
+                iid,r=order[pos]
+                status=str(r.get("status") or "")
+                if (r.get("exported") or r.get("case_draft") or r.get("sequence_excluded") or
+                    status in ("Not scanned","Scanning","Moved to BLANKS") or
+                    status.startswith("Scan error:")):
+                    continue
+                possible=[]
+                for left_type,arr_left in ((0,auto),(1,human)):
+                    left_idx=bisect_left(arr_left,pos)-1
+                    if left_idx<0:continue
+                    left=arr_left[left_idx]
+                    for right_type,arr_right in ((0,auto),(1,human)):
+                        right_idx=bisect_right(arr_right,pos)
+                        if right_idx>=len(arr_right):continue
+                        right=arr_right[right_idx]
+                        # Bisect the global independent-human anchors; any
+                        # different-case human BETWEEN endpoints forbids inference.
+                        hi=bisect_left(manual_points,right)
+                        lo=bisect_left(manual_points,left+1)
+                        if any(anchors[m]!=identity for m in manual_points[lo:hi]):
+                            continue
+                        rank=(left_type+right_type, -(right-left))
+                        possible.append((rank,identity,[order[left][0],order[right][0]]))
+                if not possible:continue
+                rank,case,pair=max(possible,key=lambda item:item[0])
+                previous=winners.get(pos)
+                if previous is None or rank>previous[0]:
+                    winners[pos]=(rank,case,pair)
+                    tied.discard(pos)
+                elif rank==previous[0] and case!=previous[1]:
+                    tied.add(pos)
+        return ({pos:(identity,pair) for pos,(rank,identity,pair) in winners.items()
+                 if pos not in tied}, tied)
+
+    def _apply_sequence_consensus(self, affected_range=None):
+        with self._perf_measure("before_after"):
+            result=self._apply_sequence_consensus_impl(affected_range=affected_range)
+        self._diag_event("performance_stage",stage="before_after",
+                         ms=round(self._perf_stages.get("before_after",(0,0))[0],2))
+        return result
+
+    def _apply_sequence_consensus_impl(self, affected_range=None):
+        """Apply and save current anchors during scans, on stop, and at completion."""
+        if not self.folder or self.export_busy:
+            return 0
+        order=self._sequence_order_with_sent_history()
+        if not order:
+            return 0
+        allowed=range(*affected_range) if affected_range is not None else None
+        plan,conflicted=self._sequence_consensus_plan(order,positions=allowed)
+        changed=0
         for pos,(iid,r) in enumerate(order):
-            if r.get("exported") and not r.get("sequence_inferred"):
+            if affected_range is not None and pos not in allowed:
+                continue
+            if iid not in self.records or r.get("exported") or (r.get("manual_approved") and not r.get("auto_labeled")
+                                     and not r.get("sequence_inferred")):
                 continue
             desired=plan.get(pos)
-            stale=r.get("sequence_inferred") and (
-                desired is None or desired[0]!=_case_identity(r.get("confirmed")))
-            if stale:
-                r.update(exported=False,candidate=r.get("sequence_original_candidate", ""),
+            current=_case_identity(r.get("confirmed"))
+            wanted=_case_identity(desired[0]) if desired else None
+            if r.get("sequence_inferred") and (not desired or wanted!=current):
+                r.update(candidate=r.get("sequence_original_candidate", ""),
                          score=r.get("sequence_original_score",r.get("score",0)),
-                         scan_ambiguous=bool(r.get("sequence_original_ambiguous",False)),
                          confirmed="",manual_approved=False,auto_labeled=False,
-                         sequence_inferred=False,sequence_conflict=True,sequence_anchors=[],
-                         status="Before/after approval withdrawn: matching confirmed anchors no longer support it — REVIEW")
-                if self.completed_tree.exists(iid):
-                    self.completed_tree.delete(iid)
+                         sequence_inferred=False,sequence_anchors=[],sequence_conflict=True,
+                         scan_ambiguous=bool(r.get("sequence_original_ambiguous",False)),
+                         status="Prior before/after result no longer supported — REVIEW")
+                if self.completed_tree.exists(iid):self.completed_tree.delete(iid)
                 r["completed_iid"]=None
                 self._insert_scan_row(iid,r)
-                changed.add(pos)
-            if pos in blocked and not excluded(r):
-                r.update(confirmed="",manual_approved=False,auto_labeled=False,
-                         sequence_conflict=True,sequence_inferred=False,sequence_anchors=[],
-                         status="Competing before/after answers — MANUAL REVIEW")
-                if self.completed_tree.exists(iid):
-                    self.completed_tree.delete(iid)
-                r["completed_iid"]=None
-                self._insert_scan_row(iid,r)
-                changed.add(pos)
-        for pos,(case,anchor_ids) in plan.items():
-            iid,r=order[pos]
-            if anchors[pos]==case:
+                changed+=1
+            if pos in conflicted or not desired:
                 continue
-            if (r.get("sequence_inferred") and _case_identity(r.get("confirmed"))==case
-                    and r.get("sequence_anchors")==anchor_ids):
+            if r.get("sequence_inferred") and wanted==_case_identity(r.get("confirmed")):
+                continue
+            if current==wanted and r.get("manual_approved"):
                 continue
             if not r.get("sequence_inferred"):
-                r["sequence_original_candidate"]=original(r)
+                r["sequence_original_candidate"]=r.get("candidate", "")
                 r["sequence_original_score"]=r.get("score",0)
-                r["sequence_original_ambiguous"]=bool(r.get("scan_ambiguous"))
-            prior=r.get("sequence_original_candidate","")
+                r["sequence_original_ambiguous"]=r.get("scan_ambiguous",False)
+            prior=r.get("confirmed") or r.get("candidate") or "unreadable"
+            case=desired[0]
             r.update(confirmed=case,candidate=case,sequence_inferred=True,
                      sequence_conflict=False,scan_ambiguous=False,
-                     sequence_anchors=anchor_ids,manual_approved=True,
+                     sequence_anchors=desired[1],manual_approved=True,
                      auto_labeled=True,approval_rule_version="5.3.2")
             self._move_to_completed(iid,batch=True)
-            r["status"]=f"Before/after confirmed {case}; original OCR {prior or 'unreadable'} — awaiting SEND FILES"
+            r["status"]=(f"Before/after {case}; replaced {prior} — ready for SEND FILES")
             self._insert_scan_row(iid,r)
-            self._diag_event("sequence_final_correction",file=str(r["path"]),
-                original=prior,confirmed=case,anchors=anchor_ids)
-            changed.add(pos)
-        self._refresh_review_controls()
-        self._update_completed_count()
-        if not self._save_state():
-            raise OSError("Could not save the before/after decisions; no files should be renamed.")
-        self._rename_completed_in_place()
-        return len(changed)
+            self._diag_event("sequence_update",file=str(r["path"]),original=prior,
+                             confirmed=case,anchors=desired[1])
+            changed+=1
+        if changed:
+            self._refresh_review_controls()
+            self._update_completed_count()
+            if not self._save_state():
+                raise OSError("Could not persist before/after decisions.")
+        if not self.busy:
+            self._rename_completed_in_place()
+        return changed
 
     def _rename_completed_in_place(self):
         """Rename only confirmed decisions after sequence review; never send here."""
@@ -3001,10 +3577,10 @@ class App:
 
     def _recheck_after_decision(self):
         """Refresh dependent approvals after a human changes an anchor."""
-        if (self.busy or self.export_busy or self.trocr_training or
-                getattr(self,"_sequence_review_pending",False)):
+        if self.export_busy or self._training_blocks_work():
             return
         try:
+            self._last_sequence_signature=None
             self._apply_sequence_consensus()
         except Exception as exc:
             self._sequence_review_pending=True
@@ -3177,8 +3753,9 @@ class App:
         self.choose_folder_btn.config(state="normal")
         self.refresh_root_btn.config(state="normal" if self.folder else "disabled")
         self._refresh_scan_button()
-        self.status.config(text="OFFLINE READY — local OCR/learning loaded. "
-                                "Click UPDATE or UPDATE LEARNING manually when desired.")
+        self.status.config(text="OCR READY — updates are checked at startup; "
+                                "background learning uses local confirmed examples.")
+        # No learning task at startup; only explicit UPDATE LEARNING or post-scan idle.
 
     def _fail_startup(self, reason):
         self._startup_ready = False
@@ -3234,6 +3811,10 @@ class App:
         return self._trocr_read_scored(image)[0]
 
     def _trocr_read_scored(self, image):
+        with self._perf_measure("trocr"):
+            return self._trocr_read_scored_impl(image)
+
+    def _trocr_read_scored_impl(self, image):
         if self.trocr_error:
             return "", 0.0
         try:
@@ -3390,7 +3971,7 @@ class App:
             pass
 
     def _maybe_train_trocr(self, automatic=False):
-        if self.trocr_training or not self.learning_dir:
+        if self.trocr_training or self.busy or self.export_busy or not self.learning_dir:
             return False
         usable = [
             dict(ex) for ex in self.learning_data.get("examples", [])
@@ -3422,15 +4003,18 @@ class App:
 
         self.trocr_training = True
         self._learning_auto_run = bool(automatic)
+        self._training_worker_done.clear()
         self.learning_pause_event.set()
         self.learning_stop_event.clear()
         if hasattr(self, "status"):
             self.status.config(
                 text=f"Updating ALL {len(selected_new)} new examples and {len(replay)} reference examples.")
-        self.scan_btn.config(state="disabled")
-        self.finish_batch_btn.config(state="disabled")
         if not automatic:
+            self.scan_btn.config(state="disabled")
             self._open_training_progress()
+        else:
+            self._set_background_learning_indicator(True)
+        self.finish_batch_btn.config(state="disabled")
         self._update_training_progress(0, "Preparing the new examples...")
         training_dir = Path(self.learning_dir)
         threading.Thread(
@@ -3735,6 +4319,7 @@ class App:
         finally:
             if candidate_dir and candidate_dir.exists():
                 shutil.rmtree(candidate_dir, ignore_errors=True)
+            self._training_worker_done.set()
 
     def scan(self, only_iids=None):
         """Start from current selection and report every blocked/failed request."""
@@ -3757,6 +4342,10 @@ class App:
         self.status.config(text=message)
         messagebox.showinfo("SCAN",message,parent=self.root)
 
+    def _resume_scan_after_training(self, only_iids=None):
+        self._scan_waiting_for_training=False
+        return self._start_scan(only_iids)
+
     def _start_scan(self, only_iids=None):
         if getattr(self,"_scan_case_editor",None) is not None:
             self._scan_blocked("Save the edited case with Enter or cancel with Esc first.")
@@ -3768,9 +4357,21 @@ class App:
         if not self.learning_dir:
             self._scan_blocked("Learning storage is unavailable. Restore access before scanning.")
             return
-        if self.busy or self.trocr_training or self.export_busy:
-            self._scan_blocked("An operation is already running. Finish scanning, learning or sending before starting another scan.")
+        if self.busy or self._training_blocks_work() or self.export_busy:
+            self._scan_blocked("An operation is already running. Finish scanning or sending before starting another scan.")
             return
+        if self._background_learning_active():
+            self._yield_background_learning("scanning")
+            if not self._training_worker_done.is_set():
+                # Do not freeze the Tk UI or overlap TrOCR/GPU with training.
+                # Re-enter only when the worker has released its model.
+                if not self._scan_waiting_for_training:
+                    self._scan_waiting_for_training=True
+                    self.status.config(text="Preparing scan: stopping background learning…")
+                    self.root.after(200,lambda selection=only_iids:
+                        self._resume_scan_after_training(selection))
+                return
+        self._scan_waiting_for_training=False
         if not self.folder or not self.records:
             self._scan_blocked("Click SELECT FILES and choose a folder containing PDFs first.")
             return
@@ -3797,10 +4398,10 @@ class App:
             if iid in self.scan_checked_iids
             and (only_iids is None or iid in only_iids)
             and self.tree.exists(iid)
-            and not rec.get("confirmed")
+            and (not rec.get("confirmed") or iid in self._rescan_force_iids)
             and not rec.get("exported")
             and rec.get("status") != "Moved to BLANKS"
-            and (rec.get("status") == "Not scanned"
+            and (iid in self._rescan_force_iids or rec.get("status") == "Not scanned"
                  or str(rec.get("status", "")).startswith("Scan error:"))
             and Path(rec["path"]).is_file()
             and Path(rec["path"]).parent.resolve() == self.folder.resolve()
@@ -3811,13 +4412,17 @@ class App:
                 self.busy=True
                 self.queue.put(("done",))
                 return
-            if any(self._rescan_eligible(iid) for iid in selected):
-                self.rescan_selected()
-                return
+            if self._rescan_force_iids:
+                self._rescan_force_iids.clear()
+            # RESCAN ALL is an explicit separate action; ordinary SCAN never resets approvals.
             self._scan_blocked("No unscanned PDFs selected. Select rows or press Ctrl+A. Approved files are protected; use UNVERIFY before rescanning them.")
             self.restart_btn.config(text="RESTART", state="normal")
             self._refresh_scan_button()
             return
+        if self._post_scan_learning_after is not None:
+            try:self.root.after_cancel(self._post_scan_learning_after)
+            except tk.TclError:pass
+            self._post_scan_learning_after=None
         self._run_outcomes = {"total_selected": len(self.scan_items)}
         self.busy = True
         self._sequence_review_pending = True
@@ -3839,6 +4444,11 @@ class App:
              minimum_independent_matches=3,
              filenames_need_consecutive_numbers=False)
         self._log("Scan started in %s with year filter %s", self.folder, self.scan_year_prefix or "ALL")
+        self._diag_event("performance_config", primary="upper_right_quarter_first",
+             learned_fallback_max_zones_per_pdf=0,confidence_threshold=95.0,
+             early_exit_clear_printed_threshold=99.5,early_exit_unique_pdf_threshold=95.0,
+             background_learning_waits_before_ocr=True)
+
         if self.reader is None:
             self._loader_start("ocr", "Loading OCR engines…")
         threading.Thread(target=self._worker, daemon=True).start()
@@ -3876,6 +4486,8 @@ class App:
                     stopped = True
                     break
                 source_path = Path(rec["path"])
+                self._worker_current_iid=iid
+                self.queue.put(("file_started",iid,source_path.name,idx,total))
                 processed = idx
                 try:
                     if not source_path.is_file():
@@ -3895,6 +4507,10 @@ class App:
                     self.queue.put((
                         "row", iid, candidate, snippet, note, handwritten,
                         score, engines, agreement, idx))
+                except InterruptedError:
+                    stopped=True
+                    processed=idx-1
+                    break
                 except Exception as exc:
                     self._diag_event("scan_error",file=source_path.name,error=repr(exc))
                     self._log("Scan failed for %s: %s", source_path, exc)
@@ -3903,8 +4519,10 @@ class App:
                         False, 0.0, [], False, idx))
             if self.stop_event.is_set():
                 stopped = True
+            self._worker_current_iid=None
             self.queue.put(("stopped", processed) if stopped else ("done",))
         except Exception as exc:
+            self._worker_current_iid=None
             self._log("Fatal scan initialization error: %s", exc)
             self.queue.put(("fatal", str(exc)))
 
@@ -3934,7 +4552,7 @@ class App:
         self.scan()
 
     def restart_scan(self):
-        if self.busy or self.trocr_training:
+        if self.busy or self._training_blocks_work():
             messagebox.showinfo("Processing in progress", "Finish the current scan or model update before restarting.")
             return
         if not self.folder:
@@ -4082,6 +4700,15 @@ class App:
                     current["label_distance"] = candidate.get("label_distance", 0.0)
             if candidate.get("learned_location"):
                 current["learned_location"] = True
+            if candidate.get("box_verified") and candidate.get("box_rect"):
+                new_rect=candidate["box_rect"]
+                prior_rect=current.get("box_rect")
+                new_area=(new_rect[2]-new_rect[0])*(new_rect[3]-new_rect[1])
+                prior_area=((prior_rect[2]-prior_rect[0])*(prior_rect[3]-prior_rect[1])
+                            if prior_rect else float("inf"))
+                if new_area<prior_area:
+                    current["box_rect"]=new_rect
+                current["box_verified"]=True
             # Prefer a specific OCR detection box over a wide TrOCR region box.
             if candidate.get("rect") and (
                 not current.get("rect") or
@@ -4098,7 +4725,7 @@ class App:
         if self.reader is None:
             return []
         try:
-            detections = self.reader.readtext(image, detail=1, paragraph=False)
+            detections = self._timed_easyocr_readtext(image, detail=1, paragraph=False)
         except Exception as exc:
             self._log("Case label detection failed: %s", exc)
             return []
@@ -4231,10 +4858,13 @@ class App:
         right = int(max(r[2] for r in numeric))
         bottom = int(max(r[3] for r in numeric))
         score = max(0.0,min(100.0,min(r[5] for r in numeric)*100))
-        return [{"number":v,"score":score,"rect":(left,top,right,bottom),
+        if len(values) != 1 or not re.fullmatch(r"08-\d{1,7}",joined.strip()):
+            return []
+        return [{"number":values[0],"score":score,"rect":(left,top,right,bottom),
+                 "box_rect":(left,top,right,bottom),"box_verified":True,
                  "engines":[engine],"engine_scores":{"EasyOCR":score},"label_type":"incident",
                  "label_context":True,"incident_label_context":True,
-                 "case_field_label_context":True,"label_distance":0.0} for v in values]
+                 "case_field_label_context":True,"label_distance":0.0}]
 
     def _recognize_case_strip(self, image):
         """Read a known number line without asking the detector to find it again.
@@ -4255,7 +4885,7 @@ class App:
         hits=[]
         for variant in variants:
             try:
-                readings=self.reader.recognize(np.asarray(variant),
+                readings=self._timed_easyocr_recognize(np.asarray(variant),
                     detail=1,paragraph=False,allowlist="0123456789-",
                     decoder="beamsearch",beamWidth=5)
                 for _bbox,text,score in readings:
@@ -4299,17 +4929,22 @@ class App:
         hits=[]
         for image,scale,engine in passes:
             try:
-                detected=self.reader.readtext(image,detail=1,paragraph=False)
+                detected=self._timed_easyocr_readtext(image,detail=1,paragraph=False)
                 found=self._incident_hits_from_detections(
                     detected,label_rect,(scale,x0),(scale,y0),engine)
                 hits=self._merge_case_hits(hits,found)
+                # A verified 99.5% printed case from the original field box
+                # needs no additional costly OCR of the same pixels.
+                if scale == 1.0 and self._clear_localized_case(hits,99.5) is not None:
+                    self._diag_event("scan_fast_field",stage="original_detector",case=hits[0]["number"])
+                    return hits
             except Exception as exc:
                 self._log("INCIDENT NO. right-field pass failed: %s",exc)
         try:
             nx=max(0,int(lx1+1))
             strip=page_image[y0:y1,nx:x1]
             if strip.size:
-                detected=self.reader.readtext(strip,detail=1,paragraph=False,
+                detected=self._timed_easyocr_readtext(strip,detail=1,paragraph=False,
                                               allowlist="0123456789-")
                 hits=self._merge_case_hits(hits,self._incident_hits_from_detections(
                     detected,label_rect,(1.0,nx),(1.0,y0),"EasyOCR-digits"))
@@ -4358,142 +4993,365 @@ class App:
         return hits
 
 
+    @staticmethod
+    def _localized_case_hits(hits, bounds):
+        """Only a detector-localized complete 08- read can become a scan result."""
+        left,top,right,bottom=bounds
+        valid=[]
+        for hit in hits:
+            if not CASE_RE.fullmatch(normalize_case_number(hit.get("number"))):
+                continue
+            rect=hit.get("box_rect")
+            if not hit.get("box_verified") or not isinstance(rect,(tuple,list)) or len(rect)!=4:
+                continue
+            try:
+                x0,y0,x1,y1=map(float,rect)
+            except (TypeError,ValueError):
+                continue
+            if not (all(math.isfinite(v) for v in (x0,y0,x1,y1)) and
+                    left<=x0<x1<=right and top<=y0<y1<=bottom):
+                continue
+            valid.append(dict(hit,rect=tuple(rect)))
+        return valid
+
+    @staticmethod
+    def _clear_localized_case(hits, threshold=95.0):
+        """Return one independently located case, or None if evidence conflicts.
+
+        Case confidence comes from real EasyOCR detector evidence; model-only
+        guesses, unverified rectangles and partial 08 prefixes never qualify.
+        The caller retains all normal fallback paths when evidence is uncertain.
+        """
+        verified=[]
+        for hit in hits:
+            case=normalize_case_number(hit.get("number"))
+            box=hit.get("box_rect")
+            if (CASE_RE.fullmatch(case) and hit.get("box_verified")
+                    and isinstance(box,(list,tuple)) and len(box)==4):
+                verified.append(hit)
+        if not verified or len({_case_identity(h["number"]) for h in verified}) != 1:
+            return None
+        high=[h for h in verified if float(h.get("score") or 0)>=threshold]
+        return max(high,key=lambda h:float(h.get("score") or 0)) if high else None
+
+    @contextmanager
+    def _perf_measure(self, stage):
+        begin=perf_counter()
+        try:
+            yield
+        finally:
+            elapsed=(perf_counter()-begin)*1000
+            stats=getattr(self,"_perf_stages",None)
+            if stats is not None:
+                duration,calls=stats.get(stage,(0.,0))
+                stats[stage]=(duration+elapsed,calls+1)
+
+    def _timed_easyocr_readtext(self,*args,**kwargs):
+        with self._perf_measure("easyocr"):
+            return self.reader.readtext(*args,**kwargs)
+
+    def _timed_easyocr_recognize(self,*args,**kwargs):
+        with self._perf_measure("easyocr"):
+            return self.reader.recognize(*args,**kwargs)
+
+    def _perf_file_report(self, path, total_start):
+        stats=getattr(self,"_perf_stages",{})
+        self._diag_event("performance_file", file=Path(path).name,
+                         total_ms=round((perf_counter()-total_start)*1000,2),
+                         stages={key:{"ms":round(value[0],2),"calls":value[1]}
+                                 for key,value in stats.items()},
+                         note="Local-only timings; no case PDF or text uploaded")
+
+    @staticmethod
+    def _automatic_case_crop_rects_4x4(region, max_regions=5):
+        """Locate plausible ink/word rectangles within the original 4 x 4 ROI.
+
+        This is geometry, NOT OCR or approval. It does not require a printed
+        INCIDENT NO. label or a first-stage EasyOCR text detection. A crop's
+        content must independently read as an entire 08- case before use.
+        """
+        if region is None or not getattr(region, "size", 0):
+            return []
+        from PIL import Image
+        gray = np.asarray(Image.fromarray(region).convert("L"))
+        h, w = gray.shape
+        if w < 45 or h < 30:
+            return []
+        try:
+            import cv2
+        except ImportError:
+            # EasyOCR normally installs OpenCV; without it, retain the normal
+            # EasyOCR and label passes rather than invent candidate locations.
+            return []
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        ink = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 41, 14)
+        ink = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                                np.ones((2, 2), dtype=np.uint8))
+        # Join digits on the same handwritten line before proposing a crop.
+        # The old 14-pixel join isolated 08- from the trailing case digits.
+        joined = cv2.dilate(ink, np.ones((4, max(20, min(42, int(w*.045)))),
+                                           dtype=np.uint8))
+        contours, _ = cv2.findContours(joined, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        proposals=[]
+        for contour in contours:
+            x, y, cw, ch = cv2.boundingRect(contour)
+            # Ignore isolated specks and huge printed table rows. Keep all
+            # four inches available, but prefer free handwriting to the right.
+            if (cw < 38 or ch < 11 or cw > w*.88 or ch > 135 or
+                    x+cw < w*.43 or cw/ch < 0.85):
+                continue
+            # Widen to a complete field crop, like the green reviewer box.
+            # Padding is asymmetric because digits after the hyphen are on
+            # the RIGHT; a tight 08- detector rectangle is not a full field.
+            pad_y=max(9, min(27, int(ch*.40)))
+            pad_left=max(85, min(150, int(ch*4.0)))
+            pad_right=max(50, min(130, int(ch*3.0)))
+            x0=max(0, x-pad_left); y0=max(0, y-pad_y)
+            x1=min(w, x+cw+pad_right); y1=min(h, y+ch+pad_y)
+            if x1-x0<42 or y1-y0<16:
+                continue
+            # Avoid proposing overlapping duplicates of the same ink line.
+            priority=(y0/(h+1), -(x+cw)/(w+1), -cw)
+            proposals.append((priority,(x0,y0,x1,y1)))
+        proposals.sort(key=lambda item:item[0])
+        kept=[]
+        for _, rect in proposals:
+            x0,y0,x1,y1=rect
+            duplicate=False
+            for a0,b0,a1,b1 in kept:
+                intersect=max(0,min(x1,a1)-max(x0,a0))*max(0,min(y1,b1)-max(y0,b0))
+                smaller=min((x1-x0)*(y1-y0),(a1-a0)*(b1-b0))
+                if smaller and intersect/smaller>=.60:
+                    duplicate=True
+                    break
+            if not duplicate:
+                kept.append(rect)
+                if len(kept)>=max_regions:
+                    break
+        return kept
+
+    def _automatic_handwritten_4x4(self, region, x_offset=0, y_offset=0):
+        """One printed pass and at most three handwriting crops per region.
+
+        Either engine may establish the literal 08- prefix. Never add it to
+        bare digits. Prefer the higher confidence reading of the SAME crop.
+        """
+        height,width=region.shape[:2]
+        detections=(self._timed_easyocr_readtext(region,detail=1,paragraph=False)
+                    if self.reader is not None else [])
+        pieces=[]
+        for box,text,confidence in detections:
+            xs=[float(p[0]) for p in box];ys=[float(p[1]) for p in box]
+            if not all(math.isfinite(v) for v in xs+ys):
+                continue
+            rect=(max(0,int(min(xs))),max(0,int(min(ys))),
+                  min(width,int(math.ceil(max(xs)))),min(height,int(math.ceil(max(ys)))))
+            if rect[2]>rect[0] and rect[3]>rect[1]:
+                pieces.append((rect,normalize_case_number(text),float(confidence or 0)*100))
+        # Reuse the one detector pass for labels, complete fields, and crops.
+        labels=[]
+        printed=[]
+        for rect,text,score in pieces:
+            label=CASE_FIELD_LABEL_RE.search(text)
+            if label:
+                labels.append((rect,"incident" if INCIDENT_LABEL_RE.search(text) else "case"))
+                tail=normalize_case_number(text[label.end():].lstrip(" .:#"))
+                if CASE_RE.fullmatch(tail):
+                    printed.append((rect,tail,score))
+                continue
+            if not re.match(r"^08-(?:[0-9]|$)",text):
+                continue
+            x0,y0,x1,y1=rect
+            for other,token,conf in sorted(pieces,key=lambda p:p[0][0]):
+                if other==rect or not re.fullmatch(r"[0-9]+",token):
+                    continue
+                overlap=min(y1,other[3])-max(y0,other[1])
+                if (0<=other[0]-x1<=max(12,(y1-y0)*1.5)
+                        and overlap>=.5*min(y1-y0,other[3]-other[1])):
+                    text+=token;score=min(score,conf)
+                    x1=other[2];y0=min(y0,other[1]);y1=max(y1,other[3])
+            if CASE_RE.fullmatch(text):
+                printed.append(((x0,y0,x1,y1),text,score))
+        def field_kind(rect):
+            for label,kind in sorted(labels,key=lambda item:item[1]!="incident"):
+                if rect==label:
+                    return kind
+                overlap=min(rect[3],label[3])-max(rect[1],label[1])
+                if (rect[0]>=label[2]-3 and rect[0]-label[2]<=max(60,(label[3]-label[1])*12)
+                        and overlap>=.4*min(rect[3]-rect[1],label[3]-label[1])):
+                    return kind
+            return None
+        def same_box(a,b):
+            intersection=max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]))
+            smaller=min((a[2]-a[0])*(a[3]-a[1]),(b[2]-b[0])*(b[3]-b[1]))
+            return smaller>0 and intersection/smaller>=.6
+        # Ink proposals are internal only; never display one until OCR returns
+        # a complete, explicitly prefixed case number.
+        if labels:
+            # Once a case label is found, unrelated boxes cannot override it.
+            printed=[p for p in printed if field_kind(p[0])]
+            boxes=[p[0] for p in printed]
+            for label,kind in sorted(labels,key=lambda item:item[1]!="incident"):
+                if any(field_kind(box)==kind and (box==label or same_box(box,label)) for box in boxes):
+                    continue
+                x0,y0,x1,y1=label
+                field=(x1,max(0,y0-3),min(width,x1+max(60,(y1-y0)*12)),min(height,y1+3))
+                if field[2]>field[0] and not any(same_box(field,b) for b in boxes):
+                    boxes.append(field)
+        else:
+            boxes=[p[0] for p in printed]
+            for box in self._automatic_case_crop_rects_4x4(region,max_regions=3):
+                # Do not reinterpret an explicitly detected word/checkbox label
+                # (such as OTHER) as a numeric field.
+                non_case_word=any(same_box(box,r) and re.search(r"[A-Za-z]{2,}",t)
+                                 and not CASE_RE.fullmatch(t) for r,t,c in pieces)
+                if not non_case_word and not any(same_box(box,b) for b in boxes):
+                    boxes.append(box)
+        boxes.sort(key=lambda box: {"incident":0,"case":1,None:2}[field_kind(box)])
+        candidates=[]
+        handwriting_calls=0
+        for rect in boxes:
+            if getattr(self,"stop_event",None) is not None and self.stop_event.is_set():
+                raise InterruptedError("Stopped during 4x4 OCR")
+            x0,y0,x1,y1=rect
+            choices=[(number,score,"EasyOCR") for box,number,score in printed if same_box(rect,box)]
+            if (handwriting_calls<3 and
+                    (self.trocr_model is not None or self.trocr_error=="")):
+                crop=region[max(0,y0-3):min(height,y1+3),max(0,x0-3):min(width,x1+3)]
+                text,score=self._trocr_read_scored(crop);handwriting_calls+=1
+                number=normalize_case_number(text)
+                label_match=CASE_FIELD_LABEL_RE.search(number)
+                if label_match:
+                    number=normalize_case_number(number[label_match.end():].lstrip(" .:#"))
+                if CASE_RE.fullmatch(number):
+                    choices.append((number,float(score or 0),"TrOCR"))
+            if not choices:
+                continue
+            number,score,engine=max(choices,key=lambda item:item[1])
+            scores={e:c for n,c,e in choices if _case_identity(n)==_case_identity(number)}
+            if len({_case_identity(n) for n,c,e in choices})>1:
+                self._diag_event("same_crop_ocr_disagreement",selected=number,
+                                 score=score,readings=[list(c) for c in choices])
+            absolute=(x0+x_offset,y0+y_offset,x1+x_offset,y1+y_offset)
+            candidates.append(dict(number=number,score=score,
+                rect=absolute,box_rect=absolute,box_verified=True,
+                prefix_source=engine,engines=list(scores),engine_scores=scores,
+                label_type=field_kind(rect),label_context=bool(field_kind(rect)),
+                incident_label_context=field_kind(rect)=="incident",
+                label_distance=0.0 if field_kind(rect) else float("inf")))
+        self._diag_event("bounded_ocr_pass",printed_calls=int(self.reader is not None),
+                         handwriting_calls=handwriting_calls,candidates=len(candidates))
+        return candidates
+
     def _ocr_pdf(self,path):
-        """Search one upper-right 4x4 region with the existing crop enhancements."""
-        _search_inches=4
-        doc=pymupdf.open(path)
+        """Search only each page's upper-right quarter for automatic OCR.
+
+        Printed and handwritten fields are checked with EasyOCR and TrOCR.
+        No page-wide or learned outside-region OCR is permitted; missing or
+        ambiguous case numbers remain for full-page manual review.
+        """
+        total_start=perf_counter()
+        self._perf_stages={}
+        with self._perf_measure("network_io_pdf_open"):
+            doc=pymupdf.open(path)
         try:
             if not len(doc):
                 return ("",None,"Empty PDF — manual review required",False,0.0,[],False)
             results=[]
             pages=[]
             any_label=False
-            dimension_px=int(round(_search_inches*72*2.2))
             for page_index,page in enumerate(doc):
-                pix=page.get_pixmap(matrix=pymupdf.Matrix(2.2,2.2),alpha=False)
-                image=np.frombuffer(pix.samples,dtype=np.uint8).reshape(
-                    pix.height,pix.width,pix.n).copy()
+                stop=getattr(self,"stop_event",None)
+                pause=getattr(self,"pause_event",None)
+                if stop is not None and stop.is_set():
+                    self._diag_event("scan_stop_within_pdf",file=Path(path).name,
+                                     page=page_index+1,total_pages=len(doc))
+                    # Leave this file unprocessed so it can be scanned later.
+                    raise InterruptedError("Stopped during a multi-page PDF")
+                if pause is not None:
+                    while not pause.wait(timeout=0.2):
+                        if stop is not None and stop.is_set():
+                            raise InterruptedError("Stopped during a paused PDF")
+                if stop is not None and stop.is_set():
+                    raise InterruptedError("Stopped during a multi-page PDF")
+                with self._perf_measure("pdf_render"):
+                    pix=page.get_pixmap(matrix=pymupdf.Matrix(2.2,2.2),alpha=False)
+                    image=np.frombuffer(pix.samples,dtype=np.uint8).reshape(
+                        pix.height,pix.width,pix.n).copy()
                 pages.append(image)
                 height,width=image.shape[:2]
-                side=min(height,dimension_px)
-                crop_width=min(width,dimension_px)
+                side=height//2
+                crop_width=width-width//2
                 offset_x=width-crop_width
                 region=image[:side,offset_x:].copy()
-                # The main OCR detector is NEVER called on the full page.
-                labels=self._find_case_field_label_regions(region)
-                valid_labels=[x for x in labels if x[4] in ("incident","case")]
+                # Single region pass. No label/enhancement/margin rescans.
                 self._diag_event("ocr_label_pass",page=page_index+1,
-                     region=[offset_x,0,width,side],
-                     labels=[{"bbox":list(x[:4]),"label":x[4]} for x in valid_labels])
-                if not valid_labels:
-                    try:
-                        from PIL import Image,ImageEnhance,ImageOps
-                        focused=ImageOps.autocontrast(Image.fromarray(region).convert("RGB"),cutoff=1)
-                        focused=ImageEnhance.Contrast(focused).enhance(1.4)
-                        doubled=focused.resize(
-                            (focused.width*2,focused.height*2),Image.Resampling.BICUBIC)
-                        detected=self._find_case_field_label_regions(np.asarray(doubled))
-                        valid_labels=[(r[0]/2,r[1]/2,r[2]/2,r[3]/2,r[4])
-                                      for r in detected if r[4] in ("incident","case")]
-                    except Exception as exc:
-                        self._log("Enhanced 4x4 label recognition failed: %s",exc)
-                if valid_labels:
-                    any_label=True
-                    for label in valid_labels:
-                        hits=self._read_incident_to_right(region,label[:4])
-                        absolute=[]
-                        for h in hits:
-                            if not CASE_RE.fullmatch(normalize_case_number(h.get("number"))) or not h.get("rect"):
-                                continue
-                            candidate=dict(h)
-                            rect=candidate.get("rect")
-                            if rect:
-                                candidate["rect"]=(int(rect[0]+offset_x),int(rect[1]),
-                                                   int(rect[2]+offset_x),int(rect[3]))
-                            absolute.append(candidate)
-                        self._diag_event("field_ocr_pass",page=page_index+1,
-                             label={"bbox":list(label[:4]),"type":label[4]},
-                             hits=self._diag_hits(absolute))
-                        if absolute:
-                            results.append((page_index,image,absolute,label[4]))
-                if not any(item[0]==page_index for item in results):
-                    try:
-                        hits=self._find_case_candidates(
-                            region,x_offset=offset_x,y_offset=0,run_trocr=True,
-                            case_pattern_override=re.compile(
-                                r"(?<![A-Za-z0-9|])(08\s*-\s*[0-9]{1,7})(?![A-Za-z0-9|]|\s+(?!08\s*-)[0-9]|\s+[Il|](?![A-Za-z]))"))
-                    except Exception as exc:
-                        self._log("4x4 header OCR failed: %s",exc)
-                        hits=[]
-                    inside=[]
-                    for h in hits:
-                        if not CASE_RE.fullmatch(normalize_case_number(h.get("number"))):
-                            continue
-                        rect=h.get("rect")
-                        if not rect:
-                            # A TrOCR-only, unlocalized guess must never
-                            # trigger the 95% handwritten auto-approval rule.
-                            continue
-                        x0,y0,x1,y1=map(float,rect)
-                        if (x0>=offset_x-4 and x1<=width+4 and
-                                y0>=0 and y1<=side+4):
-                            inside.append(h)
-                    self._diag_event("candidate_pass",page=page_index+1,
-                         source="unlabeled_4x4",all_hits=self._diag_hits(hits),
-                         region_hits=self._diag_hits(inside))
-                    # Focus on rightmost handwriting. This is a subset of
-                    # the existing 4x4 OCR region, never a full-page read.
-                    margin_x=int(round(crop_width*.55))
-                    margin_h=min(side,int(round(1.5*72*2.2)))
-                    margin_crop=region[:margin_h,margin_x:].copy()
-                    if margin_crop.size:
-                        try:
-                            focused_hits=self._find_case_candidates(
-                                margin_crop,x_offset=offset_x+margin_x,
-                                y_offset=0,run_trocr=True,
-                                case_pattern_override=re.compile(
-                                    r"(?<![A-Za-z0-9|])(08\s*-\s*[0-9]{1,7})(?![A-Za-z0-9|]|\s+(?!08\s*-)[0-9]|\s+[Il|](?![A-Za-z]))"))
-                            focused_valid=[]
-                            for h in focused_hits:
-                                if not CASE_RE.fullmatch(normalize_case_number(h.get("number"))):
-                                    continue
-                                rect=h.get("rect")
-                                if rect and float(rect[0])>=offset_x+margin_x-4:
-                                    focused_valid.append(h)
-                            self._diag_event("handwritten_margin_pass",
-                                page=page_index+1,
-                                region=[offset_x+margin_x,0,width,margin_h],
-                                hits=self._diag_hits(focused_valid))
-                            inside=self._merge_case_hits(inside,focused_valid)
-                        except Exception as exc:
-                            self._log("Top-right margin OCR pass failed: %s",exc)
-                    if inside:
-                        upper=_mfcase_header_field_candidates(inside,image.shape)
-                        if upper and max(float(h.get("score") or 0) for h in upper)>=95.0:
-                            results.append((page_index,image,upper,"header"))
-                        else:
-                            results.append((page_index,image,inside,"fallback"))
-            if any(r[3] in ("incident","case") for r in results):
-                # A complete labeled read wins over any fallback or header.
-                results=[r for r in results if r[3] in ("incident","case")]
+                                 region=[offset_x,0,width,side],labels=[])
+                with self._perf_measure("bounded_upper_right_quarter"):
+                    hits=self._automatic_handwritten_4x4(region,offset_x,0)
+                if hits:
+                    incident=[h for h in hits if h.get("label_type")=="incident"]
+                    case=[h for h in hits if h.get("label_type")=="case"]
+                    results.append((page_index,image,incident or case or hits,
+                                    "incident" if incident else "case" if case else "fallback"))
+                # Automatic OCR is restricted to the EXACT upper-right quarter
+                # rendered ROI on this page. No reviewer-learned or
+                # whole-page fallback may inspect pixels outside that square.
+                # Any crop saved outside the square is for MANUAL review only.
+                roi=(offset_x, 0, width, side)
+                bounded=[]
+                for source_page, source_image, source_hits, source_kind in results:
+                    if source_page != page_index:
+                        bounded.append((source_page,source_image,source_hits,source_kind))
+                        continue
+                    eligible=self._localized_case_hits(source_hits,roi)
+                    if eligible:
+                        bounded.append((source_page,source_image,eligible,source_kind))
+                    elif source_hits:
+                        self._diag_event("outside_quarter_rejected",
+                            page=page_index+1,source=source_kind,
+                            count=len(source_hits))
+                results=bounded
+                # Fast path: only a single, detector-located 08- identity at
+                # >=95%, with no conflicting candidates on the inspected page.
+                # Never use an inferred/TrOCR-only position to skip later pages.
+                matches=[r for r in results if r[0]==page_index and r[3] in
+                         ("incident","case","header","fallback")]
+                candidate_cases={_case_identity(h.get("number")) for _idx,_im,hh,_kind in matches
+                                 for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))}
+                if (len(candidate_cases)==1 and matches and
+                    any(self._clear_localized_case(hh,95.0) is not None
+                        for _idx,_im,hh,_kind in matches)):
+                    if len(doc)>page_index+1:
+                        self._diag_event("scan_fast_pdf",file=Path(path).name,
+                            page=page_index+1,total_pages=len(doc),
+                            reason="unique verified 95pct case from upper-right")
+                    break
+            # Labeled results are SECONDARY clues, not a gate that suppresses
+            # independent handwritten evidence inside the 4x4 region.
             if not results:
                 index=max(0,len(pages)-1)
                 why=("Case label but no complete 08- case in "
-                     f"{_search_inches}x{_search_inches} — MANUAL REVIEW"
+                     f"upper-right quarter — MANUAL REVIEW"
                      if any_label else
-                     "No valid 08- case in the 4x4 search — MANUAL REVIEW")
-                return ("",(index,pages[-1],"4x4 case field not read",None,[]),
+                     "No valid 08- case in the upper-right quarter search — MANUAL REVIEW")
+                return ("",(index,pages[-1],"Upper-right quarter case field not read",None,[]),
                         why,False,0.0,[],False)
             results=[(idx,img,self._diag_field_filter(hits,kind),kind)
-                     for idx,img,hits,kind in results]
+                     for idx,img,hits,kind in results if kind!="learned"]
             results=[item for item in results if item[2]]
             if not results:
                 return ("",(0,pages[0],"No valid 08- crop",None,[]),
-                        "No valid 08- case in 4x4 — MANUAL REVIEW",False,0.0,[],False)
+                        "No valid 08- case in the upper-right quarter — MANUAL REVIEW",False,0.0,[],False)
             def rank(entry):
                 index,image,hits,kind=entry
-                return ({"incident":3,"case":2,"header":1,"fallback":0}[kind],
-                        max((float(h.get("score") or 0) for h in hits),default=0.0))
+                verified=max((float(h.get("score") or 0) for h in hits
+                    if h.get("box_verified") and h.get("box_rect")),default=0.0)
+                return (verified>=95.0,verified,
+                        {"header":5,"incident":4,"case":3,"fallback":2,"learned":1}[kind])
             index,image,hits,kind=max(results,key=rank)
             self._diag_event("ocr_candidates",page=index+1,source=kind,
                  all_candidates=self._diag_hits(hits),
@@ -4505,8 +5363,8 @@ class App:
                 self._diag_event("ocr_decision",page=index+1,source=kind,
                      outcome="manual_review",reason="no_year_matching_case_candidate")
                 return ("",(index,image,
-                         f"{_search_inches}x{_search_inches} case read rejected",None,[]),
-                         "No valid 08- case in the 4x4 search — MANUAL REVIEW",
+                         f"upper-right quarter case read rejected",None,[]),
+                         "No valid 08- case in the upper-right quarter search — MANUAL REVIEW",
                          False,0.0,[],False)
             best=_select_primary_case_hit(hits,kind,image.shape)
             hits=self._resolve_ocr_alternates(hits,kind,best)
@@ -4527,13 +5385,31 @@ class App:
                 across.update(h["number"] for h in
                     self._resolve_ocr_alternates(_filtered,kind,_best))
             numeric_keys=lambda values: {_case_identity(value) for value in values}
-            ambiguous=(len(numeric_keys(distinct))>1 or len(numeric_keys(across))>1)
+            high_conf_cases={_case_identity(h.get("number"))
+                for _pg,_img,hh,_source in results
+                if _source in ("header","fallback","incident","case")
+                for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))
+                and h.get("box_verified") and h.get("box_rect")
+                and float(h.get("score") or 0)>=95.0}
+            all_region_cases={_case_identity(h.get("number"))
+                for _idx,_im,other_hits,source in results
+                if source in ("header","fallback","incident","case")
+                for h in other_hits
+                if CASE_RE.fullmatch(normalize_case_number(h.get("number")))}
+            # Weak OCR variants do not automatically defeat one independently
+            # localized 95+ read. Two different 95+ case identities do.
+            ambiguous=(len(high_conf_cases)>1 if high_conf_cases
+                       else (len(numeric_keys(distinct))>1 or
+                             len(numeric_keys(across))>1 or
+                             len(all_region_cases)>1))
             visuals=[]
             for h in hits:
                 rect=h.get("rect")
                 visuals.append({
                     "number":h["number"],
-                    "rect":[int(v) for v in rect] if rect else None,
+                    "rect":[int(v) for v in h["box_rect"]]
+                           if h.get("box_verified") and h.get("box_rect") else None,
+                    "box_verified":bool(h.get("box_verified") and h.get("box_rect")),
                     "score":float(h.get("score") or 0),
                     "engines":list(h.get("engines") or []),
                     "engine_scores":dict(h.get("engine_scores") or {}),
@@ -4546,16 +5422,19 @@ class App:
                  engines=engines,selected_bbox=best.get("rect"),
                  outcome="manual_review" if ambiguous else "candidate_ready")
             if ambiguous:
-                note=(f"{_search_inches}x{_search_inches} case field has conflicting OCR reads: "
-                      + ", ".join(sorted(distinct))+" — MANUAL REVIEW")
+                all_conflicts=sorted({h.get("number") for _i,_im,hh,source in results
+                        if source in ("header","fallback","incident","case")
+                        for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))})
+                note=(f"upper-right quarter case field has conflicting OCR reads: "
+                      + ", ".join(all_conflicts)+" — MANUAL REVIEW")
             elif kind=="incident":
-                note="Case field right-of-label full number — 4x4 labeled printed OCR"
+                note="Case field right-of-label full number — Upper-right quarter labeled printed OCR"
             elif kind=="case":
-                note="CASE NUMBER field full number — 4x4 labeled printed OCR"
+                note="CASE NUMBER field full number — Upper-right quarter labeled printed OCR"
             elif kind=="header":
-                note="Upper-right header 4x4 candidate — either-engine approval and final before/after check"
+                note="Upper-right header quarter-page candidate — either-engine approval and before/after check"
             else:
-                note=("Upper-right fallback in 4x4 — right-margin case box "
+                note=("Upper-right fallback in the upper-right quarter — right-margin case box "
                       "takes priority over fax pagination; 95% required for "
                       "direct approval, otherwise before/after or REVIEW")
             if len(doc)>1:
@@ -4566,13 +5445,14 @@ class App:
                     engines,agree)
         finally:
             doc.close()
+            self._perf_file_report(path,total_start)
 
     def _find_case_candidates(self, image, x_offset=0, y_offset=0, run_trocr=True, case_pattern_override=None):
         """Find only case-number-shaped text, prioritizing nearby field labels."""
         year_prefix = REQUIRED_CASE_YEAR  # HARD GATE: no non-08 case enters OCR candidates.
         case_pattern = case_pattern_override or re.compile(
             r"(?<![A-Za-z0-9|])(08\s*-\s*[0-9]{1,7})(?![A-Za-z0-9|]|\s+(?!08\s*-)[0-9]|\s+[Il|](?![A-Za-z]))")
-        detections = self.reader.readtext(image, detail=1, paragraph=False)
+        detections = self._timed_easyocr_readtext(image, detail=1, paragraph=False)
         candidates = {}
         parsed = []
         field_label_boxes = []
@@ -4650,7 +5530,8 @@ class App:
                         best_kind, best_distance = kind, distance
             return best_kind, best_distance
 
-        def add_candidate(number, engine, score, rect, label_kind=None, label_distance=float("inf")):
+        def add_candidate(number, engine, score, rect, label_kind=None,
+                          label_distance=float("inf"), box_verified=False):
             number=re.sub(r"\s+","",str(number or ""))
             if not CASE_RE.fullmatch(number) or not number.startswith("08-"):
                 return
@@ -4658,7 +5539,8 @@ class App:
                 "number": number, "score": 0.0, "rect": rect,
                 "engines": [], "engine_scores": {}, "label_context": False,
                 "incident_label_context": False, "label_type": None,
-                "label_distance": float("inf")})
+                "label_distance": float("inf"),"box_verified":False,
+                "box_rect":None})
             if engine not in entry["engines"]:
                 entry["engines"].append(engine)
             family=engine.split("-",1)[0]
@@ -4667,6 +5549,14 @@ class App:
             entry["score"] = max(previous_score, float(score or 0.0))
             if rect and (not entry.get("rect") or float(score or 0.0) > previous_score):
                 entry["rect"] = rect
+            if box_verified and rect:
+                current_box=entry.get("box_rect")
+                new_area=(rect[2]-rect[0])*(rect[3]-rect[1])
+                old_area=((current_box[2]-current_box[0])*(current_box[3]-current_box[1])
+                          if current_box else float("inf"))
+                if new_area < old_area:
+                    entry["box_rect"]=rect
+                entry["box_verified"]=True
             if label_kind:
                 priority = {"incident": 4, "case": 4, "report": 2, "sys": 1}
                 old_kind = entry.get("label_type")
@@ -4676,6 +5566,43 @@ class App:
                 entry["label_distance"] = min(entry["label_distance"], label_distance)
                 if label_kind == "incident":
                     entry["incident_label_context"] = True
+
+        # EasyOCR sometimes detects "08-" and "287" as two boxes. A partial
+        # prefix should not win simply because its score is high. Join only
+        # adjacent numeric fragments that share the SAME physical line.
+        fragments=sorted(parsed,key=lambda item:(item[3][1]+item[3][3],item[3][0]))
+        consumed_prefixes=set()
+        for index,(_box,text,confidence,rect) in enumerate(fragments):
+            stem=re.sub(r"\s+", "", normalize_case_number(text))
+            if not re.fullmatch(r"08-\d{0,6}",stem):
+                continue
+            x0,y0,x1,y1=rect
+            tail=[];last_x=x1
+            for _,next_text,next_score,next_rect in sorted(fragments,key=lambda e:e[3][0]):
+                xx0,yy0,xx1,yy1=next_rect
+                if xx0 < last_x-2 or (xx0==x0 and yy0==y0):continue
+                height=max(10,y1-y0)
+                if abs((yy0+yy1)/2-(y0+y1)/2)>max(16,height*.75):continue
+                if xx0-last_x>max(24,min(55,height*1.15)):continue
+                piece=re.sub(r"\s+", "",str(next_text))
+                if not re.fullmatch(r"\d{1,6}",piece):continue
+                if len(stem.split('-',1)[1])+sum(len(v[0]) for v in tail)+len(piece)>7:
+                    continue
+                tail.append((piece,float(next_score or 0),next_rect))
+                last_x=xx1
+                if len(tail)>=3:break
+            if not tail:continue
+            joined_number=stem+''.join(v[0] for v in tail)
+            if not CASE_RE.fullmatch(joined_number):continue
+            far=max(v[2][2] for v in tail)
+            ymin=min([y0]+[v[2][1] for v in tail]);ymax=max([y1]+[v[2][3] for v in tail])
+            joined_rect=(int(x0+x_offset),int(ymin+y_offset),
+                         int(far+x_offset),int(ymax+y_offset))
+            kind,distance=label_relation((x0,ymin,far,ymax),joined_number)
+            add_candidate(joined_number,"EasyOCR-joined",
+                          min([float(confidence or 0)]+[v[1] for v in tail])*100,
+                          joined_rect,kind,distance,box_verified=True)
+            consumed_prefixes.add((x0,y0,x1,y1))
 
         combined_text = []
         for bbox, text, confidence, local_rect in parsed:
@@ -4689,10 +5616,11 @@ class App:
 
             # Standard case-number form remains the primary rule.
             strict_matches = list(case_pattern.finditer(normalized))
-            for match in strict_matches:
+            for match in ([] if local_rect in consumed_prefixes else strict_matches):
                 add_candidate(
                     re.sub(r"\s+", "", match.group(1)), "EasyOCR",
-                    float(confidence) * 100.0, rect, label_kind, label_distance)
+                    float(confidence) * 100.0, rect, label_kind,
+                    label_distance,box_verified=True)
 
             digit_count = sum(ch.isdigit() for ch in text)
             likely_case_line = digit_count >= 2 or "-" in text
@@ -4765,9 +5693,9 @@ class App:
                 gray = ImageEnhance.Sharpness(gray).enhance(1.4)
                 enlarged = gray.resize((max(1, gray.width * 3), max(1, gray.height * 3)),
                                        Image.Resampling.LANCZOS).convert("RGB")
-                enhanced_reads = self.reader.readtext(np.asarray(enlarged), detail=1, paragraph=False)
+                enhanced_reads = self._timed_easyocr_readtext(np.asarray(enlarged), detail=1, paragraph=False)
                 if re.search(r"08\s*-",str(raw_text)):
-                    enhanced_reads += self.reader.readtext(np.asarray(enlarged),
+                    enhanced_reads += self._timed_easyocr_readtext(np.asarray(enlarged),
                         detail=1,paragraph=False,allowlist="0123456789-")
                 for ebbox, enhanced_text, enhanced_score in enhanced_reads:
                     normalized = re.sub(r"\s*-\s*", "-",
@@ -4782,7 +5710,8 @@ class App:
                     for match in case_pattern.finditer(normalized):
                         add_candidate(re.sub(r"\s+", "", match.group(1)),
                                       "EasyOCR-enhanced", float(enhanced_score) * 100.0,
-                                      absolute_rect, kind, distance)
+                                      absolute_rect, kind, distance,
+                                      box_verified=True)
         except Exception as exc:
             self._log("Enlarged candidate-crop OCR pass failed: %s", exc)
 
@@ -4815,7 +5744,7 @@ class App:
                         Image.Resampling.BICUBIC)
                     enhanced = ImageEnhance.Contrast(enlarged).enhance(1.25)
                     enhanced = ImageEnhance.Brightness(enhanced).enhance(1.03)
-                    anchor_detections = self.reader.readtext(
+                    anchor_detections = self._timed_easyocr_readtext(
                         np.asarray(enhanced), detail=1, paragraph=False)
                     for bbox, raw_text, confidence in anchor_detections:
                         text = str(raw_text).replace("—", "-").replace("–", "-")
@@ -4833,7 +5762,7 @@ class App:
                             add_candidate(
                                 re.sub(r"\s+", "", match.group(1)), "EasyOCR-anchored",
                                 float(confidence) * 100.0, absolute_rect,
-                                label_kind, 0.0)
+                                label_kind, 0.0, box_verified=True)
                 except Exception as exc:
                     self._log("Label-anchored EasyOCR recognition failed: %s", exc)
 
@@ -4870,7 +5799,14 @@ class App:
             while True:
                 msg = self.queue.get_nowait()
                 kind = msg[0]
-                if kind == "folder_load_result":
+                if kind == "review_crop_result":
+                    _,window,iid,rect,prior,result,callback=msg
+                    rec=self.records.get(iid)
+                    if (rec and rec.get("manual_crop_origin")=="drawn" and
+                        tuple(rec.get("manual_crop_rect") or ())==tuple(rect)):
+                        try:callback(prior,result)
+                        except tk.TclError:pass
+                elif kind == "folder_load_result":
                     _, generation, year, saved, pdfs, state_error = msg
                     if generation == self._folder_load_generation:
                         if self._folder_load_timeout_id is not None:
@@ -4934,9 +5870,9 @@ class App:
                     if connected:
                         self.status.config(text=f"{detail} PDF queue is ready.")
                         if startup_origin:
-                            self.root.after(250, self._start_automatic_learning_if_ready)
+                            pass  # Shared learning may load, but model training never starts at launch.
                         elif self._startup_learning_pending:
-                            self.root.after(250, self._start_automatic_learning_if_ready)
+                            pass  # Shared learning may load, but model training never starts at launch.
                     else:
                         if startup_origin:
                             self._startup_learning_pending = False
@@ -4951,6 +5887,9 @@ class App:
                             f"Details: {detail}")
                 elif kind == "blank":
                     _, iid, destination, idx = msg
+                    if iid==self._active_scan_iid:
+                        self._active_scan_iid=None
+                        if self.tree.exists(iid):self.tree.item(iid,tags=())
                     if iid in self.records:
                         self.records[iid]["status"] = "Moved to BLANKS"
                         if self.tree.exists(iid):
@@ -4962,6 +5901,9 @@ class App:
                     self._save_state()
                 elif kind == "blank_conflict":
                     _, iid, destination, idx = msg
+                    if iid==self._active_scan_iid:
+                        self._active_scan_iid=None
+                        if self.tree.exists(iid):self.tree.item(iid,tags=())
                     if iid in self.records:
                         self.records[iid]["status"] = "Blank candidate — filename conflict; left in root"
                         if self.tree.exists(iid):
@@ -4971,10 +5913,25 @@ class App:
                         text=f"Blank PDF not moved because BLANKS already contains {destination.name}.")
                     self._refresh_review_controls()
                     self._save_state()
+                elif kind == "file_started":
+                    _,iid,filename,index,total=msg
+                    self._active_scan_iid=iid
+                    self._scan_progress_update(index-1,"SCANNING",filename=filename,index=index)
+                    if self.tree.exists(iid):
+                        self.tree.item(iid,tags=("scanning_now",))
+                    self.status.config(text=f"SCANNING {index} of {total}: {filename}")
+                    self._schedule_scan_preview_refresh()
+                    self._audit_event("FILE_SCANNING",original_name=filename,index=index,total=total)
                 elif kind == "row":
                     _, iid, cand, snip, note, hand, score, engines, agreement, idx = msg
                     r = self.records[iid]
+                    if iid==self._active_scan_iid:
+                        self._active_scan_iid=None
+                        if self.tree.exists(iid):
+                            self.tree.item(iid,tags=())
                     normalized_candidate = normalize_case_number(cand) if cand else ""
+                    if not CASE_RE.fullmatch(normalized_candidate):
+                        normalized_candidate = ""  # Hard 08- gate before saving any OCR read.
                     if r.get("manual_approved") and not r.get("auto_labeled"):
                         self._diag_event("manual_override_preserved",
                             file=Path(r["path"]).name,ocr_candidate=normalized_candidate,
@@ -5038,13 +5995,16 @@ class App:
                         and float(score or 0) >= self._get_auto_threshold()
                         and isinstance(snip,(tuple,list)) and len(snip)>=4
                         and snip[3] is not None
-                        and self._is_corner_case_rect(snip[3],snip[1])
+                        and self._is_in_4x4_rect(snip[3],snip[1])
                     )
-                    if (normalized_candidate
+                    localized_complete_08=any(
+                        h.get("box_verified") and h.get("rect") and
+                        _case_identity(h.get("number"))==_case_identity(normalized_candidate)
+                        for h in self._valid_ocr_box_candidates(r))
+                    if (normalized_candidate and localized_complete_08
                             and ((labeled or positioned_header) and strong
                                  or fallback_95)
-                            and not r["scan_ambiguous"]
-                            and self.auto_label_var.get()):
+                            and not r["scan_ambiguous"]):
                         block_reason=self._auto_label_block_reason(
                             score,agreement,normalized_candidate,r["engine_scores"])
                         if block_reason is None:
@@ -5056,7 +6016,7 @@ class App:
                                   else "95pct_unique_upper_right_header" if positioned_header
                                   else "95pct_localized_4x4_fallback")
                             area=("labeled field" if labeled else "upper-right header"
-                                  if positioned_header else "4x4 localized fallback")
+                                  if positioned_header else "Upper-right quarter localized fallback")
                             r["status"]=(
                                 f"{score:.1f}% {area} — automatically approved; "
                                 "awaiting SEND FILES")
@@ -5074,16 +6034,21 @@ class App:
                         r["status"]=(
                             "Blank PDF — retained in root for manual review"
                             if note.startswith("Blank PDF") else
-                            "No valid 08- case number in 4x4 — checking before/after fallback")
+                            "No valid 08- case number in the upper-right quarter — checking before/after fallback")
                     elif r["scan_ambiguous"]:
                         r["status"]=note+" — conflicting case-field reads; manual review"
+                    elif (labeled or positioned_header) and not localized_complete_08:
+                        r["status"]=("No independently located full 08- OCR box — MANUAL REVIEW; "
+                                      "model-only or partial text is not safe to approve")
                     elif labeled or positioned_header:
-                        r["status"]=(f"{score:.1f}% case-field OCR; {self._get_auto_threshold():g}% OCR threshold not met "
-                                      "or auto-confirm disabled — manual review")
+                        r["status"]=(f"{score:.1f}% case-field OCR — "
+                            + (f"below fixed {self._get_auto_threshold():g}% threshold"
+                               if not strong else "full localized 08- field not independently verified")
+                            + "; manual review")
                     elif r["scan_source"]=="fallback":
-                        r["status"]=(f"{float(score or 0):.1f}% 4x4 fallback — "
-                            f"requires a localized read from either engine at {self._get_auto_threshold():g}%, "
-                            "and auto-confirm enabled; otherwise MANUAL REVIEW")
+                        r["status"]=(f"{float(score or 0):.1f}% Upper-right quarter fallback — "
+                            "no verified full-number box or conflicting candidate; "
+                            "review the field location before approval")
                     # A qualifying fallback with one localized case can complete;
                     # unlocated guesses and conflicting year-matched cases cannot.
                     self._diag_event("row_final",file=Path(r["path"]).name,
@@ -5093,7 +6058,8 @@ class App:
                     if not auto_done and self.tree.exists(iid):
                         self._insert_scan_row(iid, r)
                     self._scan_progress_update(idx,"SCANNING")
-                    self.status.config(text=f"Scanned {idx} of {len(self.scan_items)} PDF(s).")
+                    self.status.config(text=f"Scanned {idx} of {len(self.scan_items)} PDF(s): {Path(r['path']).name}")
+                    self._incremental_sequence_check(iid)
                     self._refresh_review_controls()
                     self._update_completed_count()
                     self._save_state()
@@ -5105,6 +6071,14 @@ class App:
                         self._scan_progress_update(len(self.scan_items),"SENDING FINISHED")
                     self.export_busy = False
                     self._export_in_flight_iids.clear()
+                    # A send changes the set of independent anchors. Reapply
+                    # the rule immediately to remaining unreviewed root PDFs.
+                    self._last_sequence_signature=None
+                    try:
+                        self._apply_sequence_consensus()
+                    except Exception as exc:
+                        self._log("Could not recheck remaining review files after SEND: %s",exc)
+                        self.status.config(text="SEND finished, but before/after recheck failed; review remaining PDFs.")
                     self._update_completed_count()
                     self._refresh_scan_button()
                     self._export_reschedule = False
@@ -5130,9 +6104,10 @@ class App:
                     self.trocr_training = False
                     self.learning_pause_event.set()
                     self.learning_stop_event.clear()
-                    self.trocr_model = None
-                    self.trocr_processor = None
-                    self.trocr_error = ""
+                    # Keep the live OCR model stable during and after training.
+                    # A validated new checkpoint activates on the next start.
+                    self._training_model_ready_on_restart=True
+                    self._set_background_learning_indicator(False)
                     self._load_learning_data()
                     self.status.config(text=message)
                     self._log(message)
@@ -5150,9 +6125,10 @@ class App:
                     self.learning_pause_event.set()
                     self.learning_stop_event.clear()
                     # The active model can be reloaded from its validated disk checkpoint.
-                    self.trocr_model = None
-                    self.trocr_processor = None
-                    self.trocr_error = ""
+                    # Keep the live OCR model stable during and after training.
+                    # A validated new checkpoint activates on the next start.
+                    self._training_model_ready_on_restart=True
+                    self._set_background_learning_indicator(False)
                     self._load_learning_data()
                     self.status.config(text=message)
                     self._log(message)
@@ -5174,6 +6150,9 @@ class App:
                     self._refresh_review_controls()
                     self._refresh_learning_button_state()
                     self._update_completed_count()
+                    self._active_scan_iid=None
+                    self._rescan_force_iids.clear()
+                    self._audit_event("SCAN_FATAL",error=str(msg[1]))
                     self._log("Fatal scan error: %s", msg[1])
                     messagebox.showerror("OCR initialization failed", msg[1])
                 elif kind == "update_check_result":
@@ -5236,11 +6215,20 @@ class App:
                     self._refresh_scan_button()
                     self.pause_btn.config(state="disabled", text="PAUSE")
                     self.restart_btn.config(state="normal", text="RESTART")
+                    self._sequence_review_pending=False
+                    try:
+                        self._apply_sequence_consensus()
+                    except Exception as exc:
+                        self._sequence_review_pending=True
+                        self._log("Stop sequence save failed: %s",exc)
                     self._refresh_review_controls()
                     self._refresh_learning_button_state()
                     self._update_completed_count()
-                    self.status.config(text="Scan stopped. Press RESTART to continue with the remaining files.")
+                    self.status.config(text="Scan stopped. Completed files may now be sent. Remaining files stay in root.")
+                    self._active_scan_iid=None
+                    self._rescan_force_iids.clear()
                     self._save_state()
+                    self._audit_event("SCAN_STOPPED",processed=msg[1])
                 elif kind == "done":
                     self._loader_finish("ocr")
                     self._loader_finish("model")
@@ -5255,11 +6243,18 @@ class App:
                     self._refresh_learning_button_state()
                     self._update_completed_count()
                     self.status.config(
-                        text="Scan complete. All PDFs remain in the root folder. "
-                             "Review or edit them, then press SEND FILES.")
+                        text=("Scan complete. AUTO SEND will transfer eligible completed PDFs "
+                              "after before/after checks." if self.auto_send_var.get()
+                              else "Scan complete. Approved PDFs remain available for review and SEND FILES."))
                     self._refresh_learning_button_state()
                     self._save_state()
                     self._diag_event("run_end",summary=dict(self._run_outcomes))
+                    self._active_scan_iid=None
+                    self._rescan_force_iids.clear()
+                    self._audit_event("SCAN_FINISHED",processed=len(self.scan_items))
+                    if bool(self.auto_send_var.get()):
+                        self.root.after_idle(lambda:self.export(automatic=True))
+                    self._schedule_post_scan_learning()
                     threading.Thread(target=self._diag_sync_shared,daemon=True).start()
                     self._log("Scan-run summary: %s", json.dumps(self._run_outcomes, sort_keys=True))
                     self._schedule_auto_export()
@@ -5285,7 +6280,7 @@ class App:
         if not hasattr(self,"review_btn") or not hasattr(self,"tree"):
             return
         ready=set(self._review_ready_ids())
-        enabled=not self.trocr_training and any(
+        enabled=not self._training_blocks_work() and any(
             iid in ready and self.tree.exists(iid) and
             (not self.folder or Path(self.records[iid]["path"]).parent==Path(self.folder))
             for iid in self.tree.selection())
@@ -5293,7 +6288,7 @@ class App:
         self.review_btn.config(state=state)
 
     def on_double_click(self, event):
-        if self.trocr_training:
+        if self._training_blocks_work():
             return
         iid = self.tree.identify_row(event.y)
         if iid:
@@ -5343,7 +6338,7 @@ class App:
         self._update_completed_count()
 
     def on_completed_double_click(self, event):
-        if self.trocr_training:
+        if self._training_blocks_work():
             return
         iid = self.completed_tree.identify_row(event.y)
         if not iid or iid not in self.records:
@@ -5422,6 +6417,11 @@ class App:
         record.pop("case_draft",None)
         old_case = str(record.get("confirmed", ""))
         if value == old_case and record.get("manual_approved") and not record.get("auto_labeled"):
+            record.pop("case_draft", None)
+            record["sequence_excluded"] = False
+            record["sequence_conflict"] = False
+            record["scan_ambiguous"] = False
+            record["sequence_inferred"] = False
             if not self._save_state():
                 self.status.config(text="Correction is in memory but could not be saved; check folder access and retry Enter.")
                 return False
@@ -5434,6 +6434,8 @@ class App:
                 old_cache.unlink()
             except OSError:
                 logging.exception("Could not remove old thumbnail cache after case-number edit")
+        self._audit_event("CASE_CORRECTED",original_name=record.get("original_name") or record["path"].name,
+                          previous=old_case,confirmed=value)
         record["confirmed"] = value
         record["scan_ambiguous"] = False
         # Editing is an explicit human decision, not another OCR inference.
@@ -5605,7 +6607,7 @@ class App:
         crop = None
         if snippet and snippet[1] is not None:
             page = Image.fromarray(snippet[1]).convert("RGB")
-            candidates = snippet[4] if len(snippet) > 4 and isinstance(snippet[4], list) else []
+            candidates = self._valid_ocr_box_candidates(record)
             confirmed = str(record.get("confirmed") or "").strip()
             chosen = next((c for c in candidates
                            if str(c.get("number") or "").strip() == confirmed and c.get("rect")), None)
@@ -5747,6 +6749,8 @@ class App:
             self.completed_tree.insert("", "end", iid=iid, image=photo, text="", values=vals)
         self.root.after_idle(self._position_completed_unverify_buttons)
         self._schedule_completed_layout()
+        if self._table_sort_state.get("completed"):
+            self._apply_table_sort("completed")
         self._refresh_completed_checkbox_heading()
 
     def _show_completed_evidence(self, iid):
@@ -5780,11 +6784,12 @@ class App:
                         snippet = record["snippet"]
             except Exception:
                 logging.exception("Could not rebuild blank evidence preview from source PDF")
-            candidates = snippet[4] if len(snippet) > 4 and isinstance(snippet[4], list) else []
+            candidates = self._valid_ocr_box_candidates(record)
             confirmed = str(record.get("confirmed") or "").strip()
             selected = next((c for c in candidates
                              if str(c.get("number") or "").strip() == confirmed and c.get("rect")), None)
-            green_rect = record.get("manual_crop_rect") or (selected.get("rect") if selected else None) or snippet[3]
+            green_rect = (record.get("manual_crop_rect") or (selected.get("rect") if selected else None)) \
+                if CASE_RE.fullmatch(normalize_case_number(confirmed)) else None
 
             win = tk.Toplevel(self.root)
             win.title(f"M.F. Case Evidence — {record['path'].name}")
@@ -5918,7 +6923,7 @@ class App:
 
     def _unverify_completed_selected(self):
         selected = self._selected_unverify_ids()
-        if not selected or self.export_busy or self.trocr_training:
+        if not selected or self.export_busy or self._training_blocks_work():
             return
         if not messagebox.askyesno(
             "Unverify selected files",
@@ -6012,7 +7017,7 @@ class App:
         self.status.config(text=f"Unverified {record['path'].name}; returned to the review list.")
 
     def review_selected(self):
-        if self.trocr_training:
+        if self._training_blocks_work():
             return
         ready=set(self._review_ready_ids())
         selected = [
@@ -6027,7 +7032,7 @@ class App:
         self._open_review_queue(selected, 0)
 
     def review_next(self):
-        if self.trocr_training:
+        if self._training_blocks_work():
             return
         pending = [
             iid for iid in self._review_ready_ids()
@@ -6040,7 +7045,7 @@ class App:
         self._open_review_queue(pending, 0)
 
     def review_completed_selected(self):
-        if self.trocr_training:
+        if self._training_blocks_work():
             return
         selected = list(self.completed_tree.selection())
         if not selected:
@@ -6051,6 +7056,7 @@ class App:
         self._open_review_queue(selected, 0)
 
     def _open_review_queue(self, iids, index=0):
+        self._yield_background_learning("review")
         ready = set(self._review_ready_ids())
         self.review_queue = [
             iid for iid in iids
@@ -6106,19 +7112,19 @@ class App:
         self.completed_count.config(
             text=f"{approved} approved to send • {needs_review} auto-detected awaiting review"
                  f" • {selected_count} selected")
-        can_export=(not self.busy and not self.export_busy and not self.trocr_training
+        can_export=(not self.busy and not self.export_busy and not self._training_blocks_work()
                     and not getattr(self,"_sequence_review_pending",False) and
                     any(self._eligible_for_kurt(iid,r) for iid,r in self.records.items()))
         self.export_btn.config(state="normal" if can_export else "disabled")
         if hasattr(self,"send_selected_btn"):
             self.send_selected_btn.config(state="normal" if can_export else "disabled")
-        can_unverify = not self.export_busy and not self.trocr_training and self._selected_unverify_ids()
+        can_unverify = not self.export_busy and not self._training_blocks_work() and self._selected_unverify_ids()
         self.unverify_selected_btn.config(state="normal" if can_unverify else "disabled")
         pending_review = any(
             r.get("confirmed") and not r.get("manual_approved")
             and not r.get("exported") for r in self.records.values())
         self.review_completed_btn.config(
-            state="normal" if pending_review and not self.trocr_training else "disabled")
+            state="normal" if pending_review and not self._training_blocks_work() else "disabled")
 
     def _ensure_preview(self, record):
         existing = record.get("snippet")
@@ -6152,6 +7158,15 @@ class App:
         except Exception:
             logging.exception("Could not rebuild review preview for %s", path.name)
 
+    def _ocr_review_crop(self, crop):
+        """Manual full-page crops use the same literal-prefix and call limits."""
+        hits=self._automatic_handwritten_4x4(np.asarray(crop.convert("RGB")))
+        identities={_case_identity(h["number"]) for h in hits}
+        if len(identities)!=1:
+            return ("",0.0,"","No unambiguous complete 08- reading; enter the case manually.")
+        best=max(hits,key=lambda h:h["score"])
+        return (best["number"],best["score"],"+".join(best["engines"]),"")
+
     def _show_review_item(self, index):
         if not self.review_queue:
             return
@@ -6160,14 +7175,14 @@ class App:
         iid = self.review_queue[index]
         r = self.records[iid]
         self._ensure_preview(r)
-        visual_candidates = (r.get("snippet")[4]
-                             if r.get("snippet") and len(r.get("snippet")) > 4 else [])
+        visual_candidates = self._valid_ocr_box_candidates(r)
         candidate_values = []
         for item in visual_candidates:
             number = item.get("number")
             if number and number not in candidate_values:
                 candidate_values.append(number)
-        if r.get("candidate") and r.get("candidate") not in candidate_values:
+        if (CASE_RE.fullmatch(normalize_case_number(r.get("candidate")))
+                and r.get("candidate") not in candidate_values):
             candidate_values.insert(0, r.get("candidate"))
         sequence_values, sequence_message = self._sequence_hint_for_iid(iid)
         # A two-sided exact agreement is a stronger clue than a truncated OCR
@@ -6175,7 +7190,7 @@ class App:
         # readings available as alternatives for reviewer inspection.
         sequence_consensus = (
             len(sequence_values) == 1
-            and "both adjacent files read" in sequence_message.lower()
+            and "both bounding anchors read" in sequence_message.lower()
         )
         if sequence_consensus:
             consensus_value = sequence_values[0]
@@ -6188,6 +7203,8 @@ class App:
 
         initial_reading = self._initial_review_reading(
             r, candidate_values, sequence_values, sequence_message)
+        if not CASE_RE.fullmatch(normalize_case_number(initial_reading)):
+            initial_reading = ""
 
         win = tk.Toplevel(self.root)
         win.title(f"Verify Case Number ({index+1} of {len(self.review_queue)})")
@@ -6263,11 +7280,15 @@ class App:
             label_row = 6
         else:
             label_row = 5
-        ttk.Label(controls, text="Confirmed case number (08- plus 1–7 digits):",
+        ttk.Label(controls, text="CLICK TO EDIT — confirmed case number (08- plus 1–7 digits):",
                   wraplength=280).grid(row=label_row, column=0, sticky="w")
         entry = ttk.Entry(controls, font=("Segoe UI", 14))
         entry.grid(row=label_row + 1, column=0, sticky="ew", pady=(5, 4))
         entry.insert(0, initial_reading)
+        entry.configure(state="normal")
+        entry.bind("<Control-a>", lambda event: (entry.selection_range(0,"end"),"break")[1])
+        entry.bind("<Control-A>", lambda event: (entry.selection_range(0,"end"),"break")[1])
+        entry.bind("<Button-1>", lambda event: entry.focus_set(), add="+")
         def use_selected_candidate(_event=None):
             # Hidden OCR dropdown cannot overwrite a manual correction.
             selected_value=candidate_choice_var.get().strip()
@@ -6392,30 +7413,29 @@ class App:
                 "preview_rect": None
             }
 
-            preview_note = f"Page {page_num+1} • {len(visual_candidates)} case-number box(es) in red • {label}" if label else f"Page {page_num+1} • No OCR candidate"
+            preview_note = (f"Page {page_num+1} • {len(visual_candidates)} verified 08- field box(es) in red • {label}"
+                            if label else f"Page {page_num+1} • No located OCR candidate")
             ttk.Label(controls, text=preview_note, wraplength=280).grid(
                 row=26, column=0, sticky="w", pady=(12, 0))
 
             crop_heading = ttk.Label(
-                controls, text="TRAINING CROP (optional)",
+                controls, text="SELECT CASE FIELD / READ OCR",
                 font=("Segoe UI", 10, "bold"))
             crop_heading.grid(row=27, column=0, sticky="w", pady=(14, 4))
 
             selection_status = ttk.Label(
                 controls,
-                text="Click a red box to choose that OCR reading. To teach a new location, draw a green box around the field label (Case Number or INCIDENT NO.) and complete case number.",
+                text="Draw a box around the complete case number. OCR will suggest a read in the field; verify it before saving. Only complete 08- numbers are accepted.",
                 wraplength=280)
             selection_status.grid(row=29, column=0, sticky="w", pady=(5, 5))
 
             def set_selection_mode():
-                selection["enabled"] = not selection["enabled"]
-                if selection["enabled"]:
-                    selection_button.config(text="Finish Box Selection")
-                    selection_status.config(
-                        text="Draw a green box around the field label (Case Number or INCIDENT NO.) AND the complete case number. The confirmed number is the training answer. Drag inside to move; drag an edge to resize.")
-                else:
-                    selection_button.config(text="Draw / Redraw Crop Box")
-                    selection_status.config(text="Box selection paused. Click any red OCR box to select that reading, or draw a new green training box.")
+                # A single drag is a complete action. Never leave the user in a
+                # persistent mode requiring "Finish Box Selection".
+                selection["enabled"] = True
+                selection["drag"] = None
+                selection_status.config(
+                    text="Drag around the full case number (08-...) and release to OCR it. You may redraw as needed.")
             selection_button = ttk.Button(
                 controls, text="Draw / Redraw Crop Box",
                 command=set_selection_mode)
@@ -6464,8 +7484,8 @@ class App:
                 canvas.create_image(0, 0, image=photo, anchor="nw")
                 canvas.configure(scrollregion=(0, 0, w, h))
 
-                # Red = every case-number-shaped OCR detection. Green = the
-                # reviewer-selected/drawn training region.
+                # Red = one real, independently localized full 08- OCR box
+                # per physical field. Green = reviewer-selected training crop.
                 if visual_candidates:
                     for candidate_box in visual_candidates:
                         rect = candidate_box.get("rect")
@@ -6481,11 +7501,7 @@ class App:
                                 ax0*scale, max(2, ay0*scale-8), anchor="sw",
                                 text=label_text, fill="#ff3333",
                                 font=("Segoe UI", max(8, int(9*scale)), "bold"))
-                elif auto_rect:
-                    ax0, ay0, ax1, ay1 = auto_rect
-                    canvas.create_rectangle(
-                        ax0*scale, ay0*scale, ax1*scale, ay1*scale,
-                        outline="#ff3333", width=2, dash=(5, 3))
+                # An unlabeled snippet rectangle is not proof of an 08- read.
                 manual_rect = selection["preview_rect"] or r.get("manual_crop_rect")
                 if manual_rect:
                     mx0, my0, mx1, my1 = manual_rect
@@ -6504,7 +7520,9 @@ class App:
 
             def update_crop_preview():
                 manual_rect = selection["preview_rect"] or r.get("manual_crop_rect")
-                rect_to_show = manual_rect or auto_rect
+                matching=next((h for h in visual_candidates
+                               if _case_identity(h.get("number")) == _case_identity(entry.get())),None)
+                rect_to_show = manual_rect or (matching.get("rect") if matching else None)
                 if not rect_to_show:
                     crop_preview_label.config(
                         image="", text="No crop box yet. Draw one around the case number.")
@@ -6536,6 +7554,8 @@ class App:
                     max(0.0, min(float(original.height), y)))
 
             def apply_candidate_selection(number):
+                if not CASE_RE.fullmatch(normalize_case_number(number)):
+                    return
                 chosen = next((item for item in visual_candidates
                                if item.get("number") == number), None)
                 if not number:
@@ -6671,11 +7691,32 @@ class App:
                 update_crop_preview()
                 return "break"
 
+            def apply_crop_ocr_result(original_entry, suggestion):
+                if not win.winfo_exists():
+                    return
+                number,score,engine,error=suggestion
+                if error:
+                    selection_status.config(text="Crop OCR unavailable: "+error[:180])
+                    return
+                if not CASE_RE.fullmatch(normalize_case_number(number)):
+                    selection_status.config(text="No complete 08- read in selected box. Enter the number manually or redraw. Crop coordinates remain saved.")
+                    return
+                # Never replace an edit made while OCR was running.
+                if entry.get()==original_entry:
+                    entry.delete(0,"end")
+                    entry.insert(0,number)
+                r["crop_ocr_suggestion"]=number
+                r["crop_ocr_engine"]=engine
+                r["crop_ocr_score"]=float(score or 0)
+                selection_status.config(text=f"Crop OCR suggests {number} ({engine}, {score:.1f}%). Verify or correct before SAVE REVIEW.")
+                redraw();update_crop_preview()
+
             def finish_box(event):
                 if not selection["enabled"] or not selection.get("drag"):
                     return
                 drag=selection["drag"]
                 selection["drag"]=None
+                selection["enabled"]=False  # Release completes the box selection.
                 selected=selection.get("preview_rect")
                 if selected:
                     x0,y0,x1,y1=selected
@@ -6686,6 +7727,18 @@ class App:
                         selection_status.config(
                             text=f"Manual crop selected: {x1-x0} × {y1-y0} pixels. Include the field label and complete case number in this box.")
                         self._save_state()
+                        crop=original.crop(tuple(map(int, selected)))
+                        original_entry=entry.get()
+                        crop_rect=tuple(map(int,selected))
+                        selection_status.config(text="Reading your selected crop locally…")
+                        def crop_worker():
+                            try:
+                                suggestion=self._ocr_review_crop(crop)
+                            except Exception as exc:
+                                suggestion=("",0.0,"",str(exc))
+                            self.queue.put(("review_crop_result",win,iid,crop_rect,
+                                            original_entry,suggestion,apply_crop_ocr_result))
+                        threading.Thread(target=crop_worker,daemon=True).start()
                     else:
                         selection["preview_rect"]=None
                         selection_status.config(
@@ -6746,7 +7799,7 @@ class App:
 
     def refresh_completed_list(self):
         """Reconcile the UI with actual unsent PDFs; preserve files and history."""
-        if self.busy or self.trocr_training:
+        if self.busy or self._training_blocks_work():
             messagebox.showinfo("Refresh unavailable", "The list can be refreshed when processing finishes.")
             return
         visible_rows = set()
@@ -6783,7 +7836,8 @@ class App:
         in review unless a person confirmed the corrected case number.
         """
         human_approved = bool(rec.get("manual_approved")) and not bool(rec.get("auto_labeled"))
-        if (not self.folder or not rec.get("confirmed")
+        if (not self.folder or rec.get("case_draft")
+                or not rec.get("confirmed")
                 or not rec.get("manual_approved") or rec.get("exported")
                 or not CASE_RE.fullmatch(str(rec.get("confirmed") or ""))):
             return False
@@ -6808,11 +7862,11 @@ class App:
         return True
 
     def _schedule_auto_export(self):
-        """Do not auto-transfer. User must press SEND FILES."""
+        """Do not send early: waiting for the final before/after pass is safest."""
         return None
 
     def _run_scheduled_auto_export(self):
-        """Legacy delayed callback cannot cause a PDF transfer."""
+        """Early case-transition transfers are intentionally disabled."""
         self._auto_export_after=None
         return None
 
@@ -6848,20 +7902,21 @@ class App:
                 self.status.config(text="Correct or cancel the unfinished case edit before exporting.")
                 self._scan_case_editor.focus_set()
                 return
-        if automatic:
-            self._diag_event("automatic_export_blocked",
-                             reason="explicit_export_completed_required")
+        if automatic and not bool(self.auto_send_var.get()):
+            return
+        if automatic and not self._startup_ready:
             return
         if self.export_busy:
             self._export_reschedule = True
             self.status.config(text="Export is already in progress. Wait for it to finish.")
             return
-        if not self.folder or self.busy or self.trocr_training or getattr(self,"_sequence_review_pending",False):
+        if not self.folder or self.busy or self._training_blocks_work() or getattr(self,"_sequence_review_pending",False):
             if not automatic:
                 message = "Sending waits until the scan and sequence review finish."
                 self.status.config(text=message)
                 self.completed_send_status.config(text=message)
             return
+        self._yield_background_learning("sending verified files")
         # Export is intentionally independent of scan/review selection.
         selected_set = None
         if not automatic:
@@ -6899,6 +7954,8 @@ class App:
             # A manual SEND retries prior transfers that failed, without popups.
             for iid, _, _ in approved:
                 self.records[iid]["export_error"] = ""
+        if automatic:
+            self._audit_event("AUTO_SEND_STARTED",approved_count=len(approved))
         self.export_busy = True
         self._export_in_flight_iids = {iid for iid, _, _ in approved}
         self._update_completed_count()
@@ -6992,6 +8049,7 @@ class App:
         self._export_in_flight_iids.discard(iid)
         if error:
             rec["export_error"] = error
+            self._audit_event("SEND_ERROR",original_name=source_name,error=error)
             rec["status"] = f"Transfer failed: {error}"
             self._log("PDF transfer failed for %s: %s", source_name, error)
             message = (f"Transfer failed for {source_name}: {error}. "
@@ -7010,6 +8068,25 @@ class App:
             rec["send_after_manual_approval"] = False
             rec["export_error"] = ""
             rec["export_name"] = target.name
+            # Track EVERY successful transfer. Only independent confirmed
+            # cases are anchors; sequence-inferred transfers are audit-only.
+            original=Path(rec.get("original_name") or source_name).name
+            if CASE_RE.fullmatch(normalize_case_number(rec.get("confirmed"))):
+                self.sent_history[original]={
+                    "original_name":original,"destination_name":target.name,
+                    "confirmed":normalize_case_number(rec["confirmed"]),
+                    "ocr_candidate":normalize_case_number(rec.get("sequence_original_candidate") or rec.get("candidate")),
+                    "manual_approved":bool(rec.get("manual_approved")),
+                    "auto_labeled":bool(rec.get("auto_labeled")),
+                    "sequence_inferred":bool(rec.get("sequence_inferred")),
+                    "source":"mfcase_send", "sent_at":datetime.now().isoformat(timespec="seconds")}
+                self._save_sent_history()
+            self._audit_event("FILE_SENT",
+                              original_name=rec.get("original_name") or source_name,
+                              original_path=rec.get("original_path") or "",
+                              confirmed_case=rec.get("confirmed") or "",
+                              sent_path=str(target),sent_name=target.name,
+                              inferred=bool(rec.get("sequence_inferred")))
             rec["status"] = f"Sent to COMPLETED: {target.name}"
             if self.completed_tree.exists(iid):
                 self.completed_tree.delete(iid)
@@ -7034,6 +8111,33 @@ class App:
         self._update_scan_file_count()
 
 
+def _install_startup_error_reporter():
+    """Make startup failures visible when pythonw.exe has no terminal."""
+    import traceback
+    original=sys.excepthook
+    def report(tp,value,tb):
+        details="".join(traceback.format_exception(tp,value,tb))
+        try:
+            logroot=Path(os.getenv("LOCALAPPDATA") or tempfile.gettempdir())/"MFCaseOCR"/"logs"
+            logroot.mkdir(parents=True,exist_ok=True)
+            dest=logroot/"startup_error.txt"
+            dest.write_text(details,encoding="utf-8")
+        except Exception:
+            dest=None
+        if os.name=="nt":
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(None,
+                    "MFCase could not start.\n\n"+str(value)+
+                    "\n\nError log: "+str(dest or "unavailable"),
+                    "MFCase startup error",0x10)
+            except Exception:
+                pass
+        original(tp,value,tb)
+    sys.excepthook=report
+
+
 def main():
+    _install_startup_error_reporter()
     root=tk.Tk(); App(root); root.mainloop()
 if __name__=="__main__": main()

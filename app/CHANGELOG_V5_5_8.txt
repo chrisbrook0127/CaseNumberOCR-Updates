@@ -1,0 +1,10 @@
+MFCase v5.5.8 — Four-by-four automatic OCR lockdown
+
+- Automatic OCR reads only the upper-right 4-inch-square region on each PDF page.
+- Both handwritten and printed 08- case numbers remain supported through EasyOCR and TrOCR.
+- INCIDENT NO./INCIDENT NUMBER/INCIDENT # labels remain optional locating clues.
+- The old reviewer-learned full-page fallback is disabled for ALL automatic scans.
+- Invalid or ambiguous OCR within 4x4 requires manual review; do not use unrelated text elsewhere.
+- Manual review still shows the entire page and permits boxes anywhere.
+- Fixed 95% approval, scan speed improvements, before/after, learning records, and SEND FILES remain.
+- Existing saved outside-region learning records are preserved, but cannot drive automatic scans.

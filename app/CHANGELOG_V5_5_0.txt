@@ -1,0 +1,10 @@
+MFCase v5.5.1
+- Draw in REVIEW to OCR the crop and suggest a complete 08- case.
+- Learn verified full-page case-number positions outside initial 4x4.
+- STOP persists sequence checks and enables SEND FILES.
+- Before/after runs incrementally and after scanning; independently verified anchors override conflicting automatic reads including 100% when enclosed.
+- Manual confirmed case numbers remain protected.
+- Fixed 95% auto-approval threshold; removed slider and redundant buttons.
+- One-row main actions and Settings popout: USER GUIDE, EXPORT WORK LOG, UPDATE, UPDATE LEARNING.
+- Online red / offline green is a connectivity indicator, not a security guarantee.
+- Automatic update and local learning startup; version display v5.5.1.

@@ -1,1 +1,1 @@
-Publish V5.4.1 scan-start fix; isolate scan dispatch tests from optional PDF installation
+Publish v5.6.1: upper-right quarter and INCIDENT NO. priority.
