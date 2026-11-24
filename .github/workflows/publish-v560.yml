@@ -100,6 +100,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # Rebuild release files from verified base64 if GitHub's upload step runs without dist output.
+          python - <<'PY'
+          import base64,hashlib
+          from pathlib import Path
+          from zipfile import ZipFile
+          expected={
+            'MFCase_Number_OCR_V5.6.0_Full_Online_Install.zip':(
+               'release-assets/v5.6.0_full_installer.base64',
+               '2d79036cd185eecc438f99a3c621d0420b0b6f4258dc72577ebf87cd936a2a50'),
+            'CaseNumberOCR_Update.zip':(
+               'release-assets/v5.6.0_updater.base64',
+               '83a11887f72dded61aee0cc8e05de9e58b663df48d29991564020f3977dbef08')}
+          root=Path('dist');root.mkdir(exist_ok=True)
+          for name,(src,digest) in expected.items():
+              raw=base64.b64decode(Path(src).read_text('ascii').strip(),validate=True)
+              assert hashlib.sha256(raw).hexdigest()==digest,name
+              out=root/name
+              if not out.is_file():out.write_bytes(raw)
+              assert hashlib.sha256(out.read_bytes()).hexdigest()==digest,name
+              with ZipFile(out) as archive:assert archive.testzip() is None
+              print('READY',out.resolve(),out.stat().st_size,flush=True)
+          PY
+          pwd
+          ls -lah dist
           TAG=v5.6.0
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
           test -s dist/CaseNumberOCR_Update.zip
