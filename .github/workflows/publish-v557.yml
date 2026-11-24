@@ -63,12 +63,32 @@ jobs:
           set -eu
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
           python transfer/patch_557.py "$APP"
+          # Include the full handwritten 08- prefix even when OpenCV splits ink contours.
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          source=app/'case_number_ocr.py'
+          old='pad_left=max(22, min(76, int(ch*1.4)))'
+          new='pad_left=max(85, min(150, int(ch*4.0)))'
+          text=source.read_text()
+          assert text.count(old)==1,'Unexpected primary-crop source'
+          source.write_text(text.replace(old,new))
+          names=('case_number_ocr.py','updater_apply.py','SETUP.bat','README_FIRST.txt')
+          manifest={name:sha256((app/name).read_bytes()).hexdigest() for name in names}
+          (app/'verify_package.py').write_text(
+              'from pathlib import Path\nimport hashlib\nROOT=Path(__file__).resolve().parent\nEXPECTED='
+              +repr(manifest)+'\nfor name,digest in EXPECTED.items():\n'
+              +'    assert hashlib.sha256((ROOT/name).read_bytes()).hexdigest()==digest,name\n'
+              +"print('PASS MFCase v5.5.7 package integrity')\n")
+          print('POST_PATCH_SOURCE_SHA',sha256(source.read_bytes()).hexdigest())
+          PY
           python - <<'PY'
           from pathlib import Path
           from hashlib import sha256
           app=next(Path('stage').rglob('case_number_ocr.py')).parent
           s=(app/'case_number_ocr.py').read_bytes()
-          assert sha256(s).hexdigest()=='f25c536ad7a87c64c1848bc32b9c6cf07c4382eaf6a8840bc2045420f39c73f5',sha256(s).hexdigest()
+          assert sha256(s).hexdigest()=='6ade1b3c9f7d9e0a9ef252488ec93af6294f9d68e58001b04daebaafbd07e353',sha256(s).hexdigest()
           gui=app/'tests/test_release_553_gui.py'
           code=gui.read_text()
           assert code.count('a.app_version=="5.5.6"')==1
