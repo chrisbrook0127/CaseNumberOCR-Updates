@@ -1,33 +1,33 @@
 Option Explicit
-
-Dim fso, shell, appFolder, desktopFolder, launcher, iconFile, wscriptExe, linkPath, link
-Set fso = CreateObject("Scripting.FileSystemObject")
+Dim shell, fs, folder, shortcut, path, desktop, launcher, icon, wscriptExe
 Set shell = CreateObject("WScript.Shell")
-
-' Use the folder containing this script. This avoids hard-coded Desktop paths.
-appFolder = fso.GetParentFolderName(WScript.ScriptFullName)
-launcher = fso.BuildPath(appFolder, "Launch_Case_OCR.vbs")
-iconFile = fso.BuildPath(appFolder, "MF.ico")
-wscriptExe = fso.BuildPath(shell.ExpandEnvironmentStrings("%WINDIR%"), "System32\wscript.exe")
-desktopFolder = shell.SpecialFolders("Desktop")
-linkPath = fso.BuildPath(desktopFolder, "M.F. Case Number OCR.lnk")
-
-If Not fso.FileExists(launcher) Then
-    WScript.Echo "ERROR: Launch_Case_OCR.vbs was not found beside this shortcut creator."
-    WScript.Quit 2
+Set fs = CreateObject("Scripting.FileSystemObject")
+folder = fs.GetParentFolderName(WScript.ScriptFullName)
+launcher = fs.BuildPath(folder, "Launch_Case_OCR.vbs")
+If Not fs.FileExists(launcher) Then
+  WScript.Echo "ERROR: Missing Launch_Case_OCR.vbs in " & folder
+  WScript.Quit 2
 End If
-If Not fso.FileExists(wscriptExe) Then
-    WScript.Echo "ERROR: Windows Script Host was not found."
-    WScript.Quit 3
+desktop = shell.SpecialFolders("Desktop")
+path = fs.BuildPath(desktop, "M.F. Case Number OCR.lnk")
+wscriptExe = shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\wscript.exe"
+Set shortcut = shell.CreateShortcut(path)
+shortcut.TargetPath = wscriptExe
+shortcut.Arguments = Chr(34) & launcher & Chr(34)
+shortcut.WorkingDirectory = folder
+icon = fs.BuildPath(folder, "MF.ico")
+If fs.FileExists(icon) Then shortcut.IconLocation = icon & ",0"
+shortcut.Description = "M.F. Case Number OCR & PDF Renamer"
+shortcut.WindowStyle = 1
+On Error Resume Next
+shortcut.Save
+If Err.Number <> 0 Then
+  WScript.Echo "Shortcut creation failed: " & Err.Description
+  WScript.Quit 3
 End If
-
-Set link = shell.CreateShortcut(linkPath)
-link.TargetPath = wscriptExe
-link.Arguments = Chr(34) & launcher & Chr(34)
-link.WorkingDirectory = appFolder
-If fso.FileExists(iconFile) Then link.IconLocation = iconFile & ",0"
-link.Description = "M.F. Case Number OCR and PDF Renamer"
-link.Save
-
-WScript.Echo "Shortcut created: " & linkPath
-WScript.Quit 0
+On Error GoTo 0
+If Not fs.FileExists(path) Then
+  WScript.Echo "Shortcut not created: " & path
+  WScript.Quit 4
+End If
+WScript.Echo "Created: " & path

@@ -1,0 +1,6 @@
+MFCase v5.4.4 — before/after, green-check and OCR overlay fixes
+- Green check completes and queues; only SEND FILES transfers.
+- Matching independently verified anchors surround arbitrary gaps, including 100+ files.
+- Manually corrected numbers anchor; inferred numbers do not.
+- Strict 08- OCR red-box evidence maintained; overlapping boxes consolidated.
+- Private PDFs and learning data excluded from release.

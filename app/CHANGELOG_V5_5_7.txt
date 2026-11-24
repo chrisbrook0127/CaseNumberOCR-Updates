@@ -1,0 +1,7 @@
+MFCase v5.5.7
+- Corrected fixed 95% auto-completion: hidden auto-confirm toggle never blocks a unique localized 08- reading.
+- Strengthened 4x4 handwriting crop geometry: join same-line ink and expand field to cover all trailing digits.
+- Join adjacent OCR fragments such as 08- + 287 without inventing digits.
+- Prioritize independent localized high-confidence evidence; competing high-confidence cases remain in review.
+- Remove misleading auto-confirm disabled status text.
+- Retain SEND FILES, original-filename tracking, manual corrections, privacy and learning data.

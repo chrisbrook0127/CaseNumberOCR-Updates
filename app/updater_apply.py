@@ -17,6 +17,9 @@ from pathlib import Path
 ALLOWED = {
     'case_number_ocr.py', 'updater_apply.py', 'RUN_CASE_OCR.bat',
     'Launch_Case_OCR.vbs', 'MF.ico', 'README.txt', 'update_config.json',
+    'SETUP.bat', 'README_FIRST.txt', 'verify_package.py',
+    'CREATE_DESKTOP_SHORTCUT.bat','Create_Desktop_Shortcut.vbs',
+    'RUN_CASE_OCR_DEBUG.bat',
     'CHANGELOG_V5_0_2.txt',
     'CHANGELOG_V5_0_3.txt',
     'CHANGELOG_V5_0_4.txt',

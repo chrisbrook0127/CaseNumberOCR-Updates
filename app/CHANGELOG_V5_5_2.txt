@@ -1,0 +1,9 @@
+MFCase v5.5.2
+- Real 4x4 upper-right ROI replaces false 82% width rejection.
+- A valid, unambiguous, physically located 08- case with >=95% OCR can complete without review.
+- Correct x-offset for red boxes around INCIDENT NO. case numbers.
+- Single-click editable CASE NUMBER column; confirmation remains manual-authoritative.
+- Durable original filename, destination and confirmation history for successful sends.
+- COMPLETED anchors can bracket unsent REVIEW files after send and across restarts.
+- Inferred values remain audit records and cannot become independent anchors.
+- No private PDFs, OCR logs, or learning records in release assets.

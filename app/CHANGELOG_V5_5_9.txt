@@ -1,0 +1,8 @@
+MFCase 5.5.9 — bounded OCR and literal-prefix suggestions
+- One EasyOCR region call and no more than three TrOCR crop calls per page.
+- No label, enhanced-image, margin, or repeated crop rescans.
+- Either engine can establish a complete literal 08- case; bare digits and wrong years never become suggestions.
+- Higher-confidence reading wins for the same crop; existing 95% approval and before/after rules remain.
+- Manual crop suggestions use the same prefix validation.
+- Existing learning data, checkpoints, file movement, and updater logic unchanged.
+- OCR confidence is not measured accuracy; handwritten 3/1 substitutions can still need manual correction.

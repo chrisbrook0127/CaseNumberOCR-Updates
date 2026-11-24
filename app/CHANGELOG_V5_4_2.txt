@@ -1,0 +1,7 @@
+MFCase V5.4.2
+
+Automatic OCR boxes require literal 08- evidence from unrestricted detection within the proposed crop; bare-digit boxes cannot trigger TrOCR guesses. Historical unverified boxes are hidden. Manual crop selection saves on release without a Finish step.
+Before/after runs at scan completion with a visible result; known sent auto/manual confirmations remain anchors in original filename order, including after reload. Reapproving an inferred value makes it an independent manual anchor.
+Click data column headings to sort ascending/descending without changing scan or before/after order.
+Green check explicitly approves, renames and sends ONLY that file to COMPLETED after the before/after check. SEND FILES still sends all completed files.
+Existing learning data and model checkpoints unchanged. Stricter prefix evidence can leave faint prefixes for manual review; OCR accuracy is not guaranteed.

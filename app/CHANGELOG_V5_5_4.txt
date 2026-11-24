@@ -1,0 +1,11 @@
+MFCase V5.5.4 - startup and scan performance repair
+- Fix missing desktop shortcut creator in v5.5.3 review installer.
+- Support Python 3.11 installed through the Windows Python Launcher or common Python locations.
+- Normal launch uses pythonw.exe and does not leave a CMD window visible.
+- Capture fatal Python startup errors in the user local log and display a Windows error dialog.
+- Add isolated RUN_CASE_OCR_DEBUG.bat for manual diagnostics.
+- Skip redundant OCR on an independently localized 99.5% field read.
+- Skip later PDF pages on a unique >=95% detector-localized 08- match; uncertain pages still use full fallback.
+- STOP can interrupt long PDFs between pages.
+- Delay background learning until startup has been idle 30 seconds and yield to scanning.
+- Preserve 4x4-first, strict 08- gate, single-screen review, manual corrections and sent-history rules.
