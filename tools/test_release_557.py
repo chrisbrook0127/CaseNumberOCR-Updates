@@ -38,7 +38,7 @@ class Tests(unittest.TestCase):
         a._timed_easyocr_recognize=lambda *args,**kwargs:[]
         a._recognize_case_strip=lambda *args,**kwargs:[]
         a._trocr_read_scored=lambda *args,**kwargs:('',0)
-        hits=a._find_case_candidates(np.full((160,634,3),255,np.uint8),x_offset=100,run_trocr=False)
+        hits=m.App._find_case_candidates(a,np.full((160,634,3),255,np.uint8),x_offset=100,run_trocr=False)
         found=[h for h in hits if h['number']=='08-287' and h['box_verified']]
         self.assertTrue(found,hits)
         self.assertGreaterEqual(found[0]['box_rect'][2],675)
