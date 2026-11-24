@@ -65,6 +65,9 @@ jobs:
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
           grep -q 'self.app_version = "5.5.5"' "$APP/case_number_ocr.py"
           grep -q 'V5.5.5' "$APP/SETUP.bat"
+          # Regenerate integrity hashes before the original v5.5.4
+          # self-integrity test runs; it must validate the new code.
+          python tools/package_release_555.py "$APP" dist
           cd "$APP"
           xvfb-run -a python -m unittest discover -s tests -q
       - name: Build verified installer and updater; preserve private state
