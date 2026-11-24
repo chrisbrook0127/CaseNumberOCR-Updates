@@ -90,6 +90,13 @@ jobs:
           test=test.replace(old,'Path(__file__).resolve().parents[1]')
           (app/'tests').mkdir(exist_ok=True)
           (app/'tests'/'test_release_556.py').write_text(test,encoding='utf-8')
+          # The previous release's GUI regression pins its old version
+          # number; update only the expected label, not application behavior.
+          old_gui=app/'tests'/'test_release_553_gui.py'
+          gui=old_gui.read_text('utf-8')
+          assert gui.count('assert a.app_version=="5.5.5"')==1
+          old_gui.write_text(gui.replace('assert a.app_version=="5.5.5"',
+                                         'assert a.app_version=="5.5.6"'),encoding='utf-8')
           names=('case_number_ocr.py','updater_apply.py','SETUP.bat',
                  'RUN_CASE_OCR.bat','Launch_Case_OCR.vbs',
                  'CREATE_DESKTOP_SHORTCUT.bat','Create_Desktop_Shortcut.vbs')
