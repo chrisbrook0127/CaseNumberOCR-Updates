@@ -1,0 +1,114 @@
+name: Publish MFCase v5.6.0 from verified v5.5.9 source
+on:
+  push:
+    branches:
+      - publish/v5.6.0
+    paths:
+      - .github/workflows/publish-v560.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v560
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install headless GUI test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0'
+      - name: Recover exact verified release assets
+        run: |
+          mkdir -p dist stage verify
+          python - <<'PY'
+          import base64,hashlib
+          from pathlib import Path
+          from zipfile import ZipFile
+          expected={
+            'MFCase_Number_OCR_V5.6.0_Full_Online_Install.zip':(
+              'release-assets/v5.6.0_full_installer.base64',
+              '2d79036cd185eecc438f99a3c621d0420b0b6f4258dc72577ebf87cd936a2a50'),
+            'CaseNumberOCR_Update.zip':(
+              'release-assets/v5.6.0_updater.base64',
+              '83a11887f72dded61aee0cc8e05de9e58b663df48d29991564020f3977dbef08')}
+          for name,(source,digest) in expected.items():
+              data=base64.b64decode(Path(source).read_text('ascii').strip(),validate=True)
+              actual=hashlib.sha256(data).hexdigest()
+              assert actual==digest,(name,actual)
+              path=Path('dist')/name
+              path.write_bytes(data)
+              with ZipFile(path) as z:
+                  assert z.testzip() is None
+                  assert all('..' not in Path(n).parts and not n.startswith('/')
+                             and not n.lower().endswith(('.pdf','.log','.jsonl','.pt','.pth','.sqlite','.db'))
+                             for n in z.namelist()),name
+              print('PASS verified packaged asset',name,len(data),digest,flush=True)
+          with ZipFile('dist/MFCase_Number_OCR_V5.6.0_Full_Online_Install.zip') as z:
+              z.extractall('stage')
+          PY
+      - name: Verify installer source, executable Python code and release version
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          test -s "$APP/MFCase_Combine_And_Trace.py"
+          test -s "$APP/CREATE_DESKTOP_SHORTCUT.bat"
+          test -s "$APP/Launch_Case_OCR.vbs"
+          test -s "$APP/CHANGELOG_V5_6_0.txt"
+          python "$APP/verify_package.py"
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py" "$APP/MFCase_Combine_And_Trace.py"
+          grep -q 'self.app_version = "5.6.0"' "$APP/case_number_ocr.py"
+      - name: Run focused GUI, auto-send, green check, rescan, audit and combine regressions
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          xvfb-run -a python "$APP/tests/test_release_560.py" "$APP"
+      - name: Simulate in-place upgrade and verify private data are unchanged
+        run: |
+          python - <<'PY'
+          import importlib.util, tempfile
+          from pathlib import Path
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          spec=importlib.util.spec_from_file_location('mfcase_updater',app/'updater_apply.py')
+          updater=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(updater)
+          with tempfile.TemporaryDirectory() as temp:
+              folder=Path(temp)
+              for name,body in [
+                   ('case.pdf','confidential pdf placeholder'),
+                   ('learning_examples_v3.json','private learning'),
+                   ('.case_ocr_state.json','private case state')]:
+                  (folder/name).write_text(body)
+              (folder/'models').mkdir()
+              (folder/'models/checkpoint.pt').write_text('private checkpoint')
+              updater.apply_update(folder,Path('dist/CaseNumberOCR_Update.zip'))
+              assert (folder/'case.pdf').read_text()=='confidential pdf placeholder'
+              assert (folder/'learning_examples_v3.json').read_text()=='private learning'
+              assert (folder/'.case_ocr_state.json').read_text()=='private case state'
+              assert (folder/'models/checkpoint.pt').read_text()=='private checkpoint'
+              assert 'self.app_version = "5.6.0"' in (folder/'case_number_ocr.py').read_text()
+              print('PASS private data preserved and source upgraded')
+          PY
+      - name: Publish release and verify real GitHub updater download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.6.0
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          test -s dist/CaseNumberOCR_Update.zip
+          test -s dist/MFCase_Number_OCR_V5.6.0_Full_Online_Install.zip
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.6.0" --notes-file "$APP/CHANGELOG_V5_6_0.txt"
+          fi
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.6.0_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
