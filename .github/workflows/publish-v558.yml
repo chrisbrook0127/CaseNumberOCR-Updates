@@ -1,0 +1,99 @@
+name: Publish MFCase v5.5.8 strict 4x4 OCR
+on:
+  push:
+    branches:
+      - publish/v5.5.8
+    paths:
+      - .github/workflows/publish-v558.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v558
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install headless OCR regression environment
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Download and verify official v5.5.7 baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p baseline stage transfer dist verify
+          gh release download v5.5.7 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.5.7_Full_Online_Install.zip --dir baseline
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          from hashlib import sha256
+          f=Path('baseline/MFCase_Number_OCR_V5.5.7_Full_Online_Install.zip')
+          assert sha256(f.read_bytes()).hexdigest()=='7d866da3d1edf462c471ea65c61f683d2ac30220c42180962aba696c1ecdd3e8','Unexpected public release archive'
+          with ZipFile(f) as z:
+              assert z.testzip() is None
+              assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              z.extractall('stage')
+          files=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(files)==1
+          source_sha=sha256(files[0].read_bytes()).hexdigest()
+          print('Official source',source_sha,flush=True)
+          assert source_sha=='6ade1b3c9f7d9e0a9ef252488ec93af6294f9d68e58001b04daebaafbd07e353'
+          PY
+      - name: Decode verified v5.5.8 patch, package builder and regression tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          from hashlib import sha256
+          from base64 import b64decode
+          from io import BytesIO
+          payload=b64decode(Path('tools/v558_release_payload.b64').read_text().strip(),validate=True)
+          assert sha256(payload).hexdigest()=='d8d5b56f1134faad4061c056f65cde54b2fe99683afcda466e233592f30ae524'
+          with ZipFile(BytesIO(payload)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={'patch_558.py','prepare_release_558.py','test_release_558.py','build_release_558.py'}
+              z.extractall('transfer')
+          print('Release payload checksum verified',flush=True)
+          PY
+      - name: Apply strict 4x4-only automatic scan and update regression expectations
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python transfer/patch_558.py "$APP/case_number_ocr.py"
+          python transfer/prepare_release_558.py "$APP"
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+          python "$APP/verify_package.py"
+      - name: Run entire GUI, OCR and scanned-zone regression suite
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP" xvfb-run -a python -m unittest discover -s "$APP/tests" -p 'test_*.py' -v
+      - name: Build verified full installer and in-place updater
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python transfer/build_release_558.py "$APP" dist
+          ls -lah dist
+      - name: Publish v5.5.8 and verify actual download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.5.8
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          test -s dist/CaseNumberOCR_Update.zip
+          test -s dist/MFCase_Number_OCR_V5.5.8_Full_Online_Install.zip
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.5.8" --notes-file "$APP/CHANGELOG_V5_5_8.txt"
+          fi
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.5.8_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
