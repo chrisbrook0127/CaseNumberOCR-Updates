@@ -4,6 +4,9 @@ from pathlib import Path
 def change(path, replacements):
     content=path.read_text('utf8')
     for before,after in replacements:
+        if before not in content:
+            print('NOT IN OFFICIAL RELEASE TEST:',path.name,before[:85],flush=True)
+            continue
         assert content.count(before)==1,(str(path),before[:100],content.count(before))
         content=content.replace(before,after,1)
     path.write_text(content,encoding='utf8')
