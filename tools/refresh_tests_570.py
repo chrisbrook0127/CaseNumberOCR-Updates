@@ -42,6 +42,8 @@ def run(root):
         ('def test_nearest_conflicting_auto_blocks_farther_manual(self):',
          'def test_matching_manual_pair_corrects_conflicting_auto(self):'),
         ('        self.assertNotIn(1,p);self.assertNotIn(3,p)',
-         "        self.assertEqual(p[1],('08-56',['i0','i4']))\n        self.assertEqual(p[3],('08-56',['i0','i4']))")
+         "        self.assertEqual(p[1],('08-56',['i0','i4']))\n        self.assertEqual(p[3],('08-56',['i0','i4']))"),
+        ('        self.assertIn(1,c);self.assertIn(3,c)',
+         '        self.assertNotIn(1,c);self.assertNotIn(3,c)')
     ])
 if __name__=='__main__':run(sys.argv[1])
