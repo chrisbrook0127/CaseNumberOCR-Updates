@@ -1,0 +1,7 @@
+MFCase v5.6.7 — reject unsupported repeated TrOCR case guesses
+- Detect implausible whole-number crops before handwriting OCR.
+- Do not interpret a recognized ordinary printed word as a handwritten case.
+- Test the handwriting decoder once against blank and unrelated-text controls; quarantine a repeated default case prediction from model-only approval.
+- Full literal 08- case readings from printed OCR remain valid; independent handwritten readings are valid when supported by number-shaped ink.
+- Keep the strict upper-right automatic scan, full-page manual review, fixed 95% confidence, before/after, file history, and separate SEND FILES.
+- Work logs and model data remain local, never included in update archives.
