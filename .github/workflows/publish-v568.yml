@@ -1,0 +1,178 @@
+name: Publish MFCase v5.6.8 nearest before-after anchors
+on:
+  push:
+    branches:
+      - publish/v5.6.8
+    paths:
+      - .github/workflows/publish-v568.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v568
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install headless GUI and OCR regression dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Download and verify actual v5.6.7 production installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p baseline stage dist verify
+          gh release download v5.6.7 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.6.7_Full_Online_Install.zip --dir baseline
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          from zipfile import ZipFile
+          f=Path('baseline/MFCase_Number_OCR_V5.6.7_Full_Online_Install.zip')
+          assert sha256(f.read_bytes()).hexdigest()=='d8a1b7ad94ef463c5fd177158c71c74647fb251436190511605b1e0e200824f8','Release baseline checksum mismatch'
+          with ZipFile(f) as z:
+              assert z.testzip() is None
+              assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              z.extractall('stage')
+          sources=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(sources)==1,sources
+          actual=sha256(sources[0].read_bytes()).hexdigest()
+          print('Official v5.6.7 source SHA-256',actual)
+          assert actual=='3a01bbdb8929695a953fc641f2588a40f529979d0ec6fe207d91de57e976a2b8'
+          PY
+      - name: Apply exact nearest completed-anchor source correction
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python tools/patch_release_568.py "$APP/case_number_ocr.py"
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          code=(app/'case_number_ocr.py').read_text()
+          assert 'self.app_version = "5.6.8"' in code
+          assert 'root.title("M.F. Case Number OCR — V5.6.8")' in code
+          assert 'independent_set=set(independent)' in code
+          assert 'def _automatic_handwritten_4x4' in code
+          assert 'def _sequence_order_with_sent_history' in code
+          changelog=(app/'CHANGELOG_V5_6_8.txt')
+          changelog.write_text(
+              'MFCase v5.6.8 — strict nearest before/after anchors\n'
+              '- Use exactly the nearest independently COMPLETED file before and after.\n'
+              '- Manual and automatic completions have identical boundary priority.\n'
+              '- Never skip over a nearer conflicting completed case for a farther manual match.\n'
+              '- Independently confirmed auto and manual records cannot be overwritten by inference.\n'
+              '- Inferred results cannot serve as new anchors.\n'
+              '- Preserve long gaps, sent-file history, OCR, learning and SEND FILES.\n',
+              encoding='utf-8')
+          (app/'tests').mkdir(exist_ok=True)
+          (app/'tests'/'test_release_568.py').write_text(
+              Path('tools/test_release_568.py').read_text(encoding='utf-8'),encoding='utf-8')
+          names=('case_number_ocr.py','updater_apply.py','SETUP.bat','README_FIRST.txt')
+          manifest={n:sha256((app/n).read_bytes()).hexdigest() for n in names}
+          (app/'verify_package.py').write_text(
+              'from pathlib import Path\nimport hashlib\nROOT=Path(__file__).resolve().parent\nEXPECTED='
+              +repr(manifest)+'\nfor n,digest in EXPECTED.items():\n'
+              +'    assert hashlib.sha256((ROOT/n).read_bytes()).hexdigest()==digest,n\n'
+              +"print('PASS MFCase v5.6.8 integrity')\n",encoding='utf-8')
+          print('Patched official source SHA-256',sha256((app/'case_number_ocr.py').read_bytes()).hexdigest())
+          PY
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+          python "$APP/verify_package.py"
+      - name: Run OCR plus nearest-anchor regressions and GUI startup
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP" python -m unittest discover -s "$APP/tests" -p 'test_release_5*.py' -v
+          MFCASE_SKIP_STARTUP_MAINTENANCE=1 PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import tkinter as tk
+          from case_number_ocr import App
+          root=tk.Tk()
+          a=App(root)
+          root.update_idletasks()
+          assert a.app_version=='5.6.8'
+          assert 'V5.6.8' in root.title()
+          assert a.tree.winfo_exists()
+          root.destroy()
+          print('PASS GUI startup and version display')
+          PY
+      - name: Build private-data-free installer and updater; verify preservation
+        run: |
+          python - <<'PY'
+          import hashlib,importlib.util,shutil,subprocess,sys,tempfile
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          root=Path('dist');root.mkdir(exist_ok=True)
+          update_files=[
+            'case_number_ocr.py','updater_apply.py','SETUP.bat','RUN_CASE_OCR.bat',
+            'RUN_CASE_OCR_DEBUG.bat','Launch_Case_OCR.vbs','MF.ico',
+            'CREATE_DESKTOP_SHORTCUT.bat','Create_Desktop_Shortcut.vbs',
+            'README_FIRST.txt','verify_package.py','update_config.json',
+            'CHANGELOG_V5_6_8.txt']
+          full_files=update_files[:]
+          full_files += [x.name for x in app.glob('CHANGELOG_V5_*.txt') if x.name not in full_files]
+          full_files += [str(x.relative_to(app)) for x in (app/'tests').glob('test_*.py')]
+          combiner=app/'MFCase_Combine_And_Trace.py'
+          if combiner.is_file():full_files.append(combiner.name)
+          assert all((app/n).is_file() for n in update_files+full_files)
+          paths=[]
+          for name,items,prefix in [
+              ('CaseNumberOCR_Update.zip',update_files,''),
+              ('MFCase_Number_OCR_V5.6.8_Full_Online_Install.zip',full_files,
+               'MFCase_Number_OCR_V5.6.8_Full_Online_Install/')]:
+              path=root/name
+              with ZipFile(path,'w',ZIP_DEFLATED,compresslevel=9) as z:
+                  for f in sorted(set(items)):z.write(app/f,prefix+f)
+              with ZipFile(path) as z:
+                  assert z.testzip() is None
+                  assert all('..' not in Path(n).parts and
+                             not n.lower().endswith(('.pdf','.pt','.pth','.log','.sqlite','.jsonl'))
+                             for n in z.namelist())
+              print('Built',name,path.stat().st_size,hashlib.sha256(path.read_bytes()).hexdigest(),flush=True)
+              paths.append(path)
+          spec=importlib.util.spec_from_file_location('updater',app/'updater_apply.py')
+          updater=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(updater)
+          with tempfile.TemporaryDirectory() as t:
+              d=Path(t)
+              for n in ('case_number_ocr.py','SETUP.bat','README_FIRST.txt'):
+                  (d/n).write_text('old')
+              (d/'case.pdf').write_text('confidential PDF')
+              (d/'.case_ocr_state.json').write_text('private state')
+              (d/'learning_examples_v3.json').write_text('private learning')
+              (d/'models').mkdir()
+              (d/'models/checkpoint.pt').write_text('private checkpoint')
+              archive=d/'download.zip';shutil.copy2(paths[0],archive)
+              updater.apply_update(d,archive)
+              assert 'self.app_version = "5.6.8"' in (d/'case_number_ocr.py').read_text()
+              assert (d/'case.pdf').read_text()=='confidential PDF'
+              assert (d/'.case_ocr_state.json').read_text()=='private state'
+              assert (d/'learning_examples_v3.json').read_text()=='private learning'
+              assert (d/'models/checkpoint.pt').read_text()=='private checkpoint'
+              subprocess.run([sys.executable,str(d/'verify_package.py')],check=True)
+          print('PASS safe in-place updater and private-data preservation')
+          PY
+      - name: Publish latest release and verify actual updater download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.6.8
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          test -s dist/CaseNumberOCR_Update.zip
+          test -s dist/MFCase_Number_OCR_V5.6.8_Full_Online_Install.zip
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.6.8" --notes-file "$APP/CHANGELOG_V5_6_8.txt"
+          fi
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.6.8_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
