@@ -68,31 +68,42 @@ CASE_FIELD_LABEL_RE = re.compile(
 INCIDENT_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9|])(08\s*-\s*[0-9]{1,7})(?![A-Za-z0-9|]|\s+(?!08\s*-)[0-9]|\s+[Il|](?![A-Za-z]))")
 
 
-def _select_primary_case_hit(hits, source, image_shape):
-    """Choose the strongest complete, physically located 08- field read.
+def _same_physical_case_box(a,b):
+    if not a or not b or len(a)!=4 or len(b)!=4:
+        return False
+    ax,ay,bx,by=map(float,a);cx,cy,dx,dy=map(float,b)
+    aw,ah=bx-ax,by-ay;bw,bh=dx-cx,dy-cy
+    if min(aw,ah,bw,bh)<=0:
+        return False
+    overlap=max(0,min(bx,dx)-max(ax,cx))*max(0,min(by,dy)-max(ay,cy))
+    return (overlap/min(aw*ah,bw*bh)>=.65 and
+            abs((ay+by-cy-dy)/2)<=.55*min(ah,bh) and
+            max(aw,bw)/min(aw,bw)<=4 and max(ah,bh)/min(ah,bh)<=3)
 
-    A nearby INCIDENT NO./NUMBER/# is a tie-breaking clue, never a gate.
-    Neither EasyOCR nor TrOCR must agree with the other engine.
-    """
+
+def _select_primary_case_hit(hits, source, image_shape):
+    """Identify the case field, then retain its strongest complete reading."""
     if not hits:
         raise ValueError("Cannot select from an empty candidate list")
     def ranking(hit):
         case=normalize_case_number(hit.get("number"))
         rect=hit.get("box_rect") or hit.get("rect")
         located=bool(hit.get("box_verified") and rect and len(rect)==4)
-        try: score=float(hit.get("score") or 0)
-        except (ValueError,TypeError): score=0.0
-        if not math.isfinite(score):score=0.0
-        label=hit.get("label_type") in ("incident","case")
-        # Inside the upper-right quarter, the number immediately right of
-        # INCIDENT NO./NUMBER/# is the preferred PHYSICAL field.  A detected
-        # label is optional, but where present its verified number comes
-        # before OCR of unrelated page text or form fields.
-        return (bool(located and CASE_RE.fullmatch(case)),
-                bool(located and label),
-                -float(rect[1]) if located else float('-inf'),
-                score>=95.0, score)
-    return max(hits,key=ranking)
+        try:score=float(hit.get("score") or 0)
+        except (ValueError,TypeError):score=0.
+        if not math.isfinite(score):score=0.
+        # All readings of the SAME physical field share its label evidence.
+        labeled=located and any(h.get("label_type") in ("incident","case")
+            and h.get("box_verified") and _same_physical_case_box(rect,h.get("box_rect") or h.get("rect"))
+            for h in hits)
+        return (bool(located and CASE_RE.fullmatch(case)),bool(labeled),
+                -float(rect[1]) if located else float('-inf'),score>=95.,score)
+    field=max(hits,key=ranking)
+    rect=field.get('box_rect') or field.get('rect')
+    same=[h for h in hits if h.get('box_verified')
+          and CASE_RE.fullmatch(normalize_case_number(h.get('number')))
+          and _same_physical_case_box(rect,h.get('box_rect') or h.get('rect'))]
+    return max(same,key=lambda h:ranking(h)[-1]) if same else field
 
 
 def _original_pdf_sequence_key(path):
@@ -262,10 +273,93 @@ def _learned_crop_rectangles(learning_data,width,height):
             boxes.append(dict(rect=rect,count=item['count'],rect_norm=item['rect_norm']))
     return boxes
 
+def _public_scan_event(event, aliases):
+    """Allowlist only: unknown strings/keys never leave the computer."""
+    enum_keys={
+        'event':{'run_start','run_end','row_final','ocr_candidates','ocr_decision',
+                 'performance_file','bounded_ocr_pass','crop_read_selection',
+                 'model_crop_rejected','scan_error','approval_decision','sequence_update'},
+        'source':{'incident','case','fallback','header','learned','unknown'},
+        'label_type':{'incident','case'},
+        'outcome':{'candidate_ready','manual_review','auto_approved'},
+        'engine':{'EasyOCR','TrOCR'},
+        'reason':{'non_case_word_detected','visual_number_line_evidence'}}
+    numbers={'score','confidence','page','count','ms','calls','total_ms','handwriting_calls','printed_calls',
+             'candidates','auto_approved','manual_review','no_case_number','scan_error',
+             'incident_candidate','incident_low_or_uncalibrated_confidence','unverified_fallback_location','conflicting_readings'}
+    flags={'ambiguous','box_verified','label_context','learned_location','auto_approved','printed_available'}
+    rectangles={'rect','bbox','box_rect','selected_bbox'}
+    cases={'number','primary','candidate','case','confirmed','original','selected'}
+    containers={'all_candidates','hits','per_page','readings','engine_scores','stages','summary'}
+    engines={'EasyOCR','EasyOCR-joined','TrOCR','TrOCR-learned'}
+    def alias(kind,value):
+        mapping=aliases.setdefault(kind,{})
+        if value not in mapping:mapping[value]=kind+str(len(mapping)+1)
+        return mapping[value]
+    def clean(obj):
+        if not isinstance(obj,dict):return {}
+        out={}
+        for key,value in obj.items():
+            if key=='file' and isinstance(value,str):out['file_id']=alias('file',value)
+            elif key in cases and isinstance(value,str):
+                valid=bool(re.fullmatch(r'08-[0-9]{1,7}',value))
+                out[key]={'valid_08':valid}
+                if valid:
+                    out[key].update(identity=alias('case',_case_identity(value)),digits=len(value)-3,
+                                    leading_zeros=len(value[3:])-len(value[3:].lstrip('0')))
+            elif key=='version' and isinstance(value,str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',value):out[key]=value
+            elif key in enum_keys and isinstance(value,str) and value in enum_keys[key]:out[key]=value
+            elif key in flags and isinstance(value,bool):out[key]=value
+            elif key in numbers and isinstance(value,(int,float)) and math.isfinite(value):out[key]=value
+            elif key in rectangles and isinstance(value,(list,tuple)) and len(value)==4 and all(isinstance(x,(int,float)) and math.isfinite(x) for x in value):out[key]=list(value)
+            elif key=='engines' and isinstance(value,list):out[key]=[x for x in value if isinstance(x,str) and x in engines]
+            elif key=='engine_scores' and isinstance(value,dict):out[key]={k:v for k,v in value.items() if k in engines and isinstance(v,(int,float)) and math.isfinite(v)}
+            elif key=='stages' and isinstance(value,dict):
+                allowed={'trocr','easyocr','pdf_render','network_io_pdf_open','learned_zone','learned_handwriting','learned_printed','bounded_upper_right_quarter'}
+                out[key]={k:clean(v) for k,v in value.items() if k in allowed}
+            elif key in containers:
+                if isinstance(value,dict):out[key]=clean(value)
+                elif isinstance(value,list):out[key]=[clean(v) for v in value if isinstance(v,dict)]
+        return out
+    if event.get('event') not in enum_keys['event']:return None
+    return clean(event)
+
+
+def _github_log_settings_path():
+    return Path(os.environ.get('LOCALAPPDATA') or str(Path.home()/'.local/share'))/'MFCase'/'github_logs.json'
+
+
+def _protect_github_token(value, decrypt=False):
+    """Windows DPAPI, current user only; never persist a plaintext token."""
+    if os.name!='nt':raise RuntimeError('Credential storage requires Windows; use MFCASE_GITHUB_LOG_TOKEN instead.')
+    import ctypes
+    from ctypes import wintypes
+    class Blob(ctypes.Structure):
+        _fields_=[('size',wintypes.DWORD),('data',ctypes.POINTER(ctypes.c_ubyte))]
+    buffer=ctypes.create_string_buffer(value)
+    source=Blob(len(value),ctypes.cast(buffer,ctypes.POINTER(ctypes.c_ubyte)));result=Blob()
+    crypt=ctypes.windll.crypt32
+    if decrypt:
+        ok=crypt.CryptUnprotectData(ctypes.byref(source),None,None,None,None,1,ctypes.byref(result))
+    else:
+        ok=crypt.CryptProtectData(ctypes.byref(source),'MFCase GitHub logs',None,None,None,1,ctypes.byref(result))
+    if not ok:raise RuntimeError('Windows could not protect/unlock the GitHub credential.')
+    try:return ctypes.string_at(result.data,result.size)
+    finally:
+        ctypes.windll.kernel32.LocalFree.argtypes=[ctypes.c_void_p]
+        ctypes.windll.kernel32.LocalFree(ctypes.cast(result.data,ctypes.c_void_p))
+
+
+def _read_github_log_settings():
+    path=_github_log_settings_path()
+    if not path.exists():return {'enabled':True}
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.6.13")
+        root.title("M.F. Case Number OCR — V5.6.14")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -349,7 +443,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.13"
+        self.app_version = "5.6.14"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -1039,7 +1133,7 @@ class App:
         win.title(f"MFCase Settings — V{self.app_version}")
         win.transient(self.root)
         win.resizable(False,False)
-        win.geometry("480x370")
+        win.geometry("480x420")
         panel=ttk.Frame(win,padding=20)
         panel.pack(fill="both",expand=True)
         ttk.Label(panel,text=f"SETTINGS  •  V{self.app_version}",
@@ -1047,6 +1141,7 @@ class App:
         for label,func in (
             ("USER GUIDE",self._open_instructions),
             ("EXPORT WORK LOG",self._diag_export),
+            ("GITHUB LOG UPLOAD",self._configure_github_logs),
             ("UPDATE",lambda: self.check_for_updates(automatic=False)),
             ("UPDATE LEARNING",self._finish_import_batch)):
             ttk.Button(panel,text=label,command=func,
@@ -1055,7 +1150,7 @@ class App:
         ttk.Checkbutton(panel,text="AUTO SEND COMPLETED — after scan finishes",
             variable=self.auto_send_var,command=self._save_user_settings).pack(anchor="w",pady=5)
         ttk.Label(panel,text="OFF by default. Sends only eligible approved files after the final before/after check. "
-            "STOP never triggers an automatic send. PDFs and logs stay local.",
+            "STOP never triggers an automatic send. PDFs and full logs stay local; configured sanitized diagnostics upload after scans.",
             wraplength=425,justify="left").pack(anchor="w",pady=(4,0))
 
     def _network_online_passive(self):
@@ -2409,9 +2504,80 @@ class App:
             except Exception: pass
 
 
-    def _diag_sync_shared(self):
-        """Never transmit diagnostic logs to SMB or the public internet."""
-        return None
+    def _configure_github_logs(self):
+        import base64
+        try:settings=_read_github_log_settings()
+        except Exception:
+            messagebox.showerror('GitHub logs','Could not read GitHub log settings.');return
+        win=tk.Toplevel(self.root);win.title('GitHub scan diagnostics');win.transient(self.root)
+        panel=ttk.Frame(win,padding=18);panel.pack(fill='both',expand=True)
+        enabled=tk.BooleanVar(value=bool(settings.get('enabled',True)))
+        ttk.Checkbutton(panel,text='Upload sanitized diagnostics after each scan',variable=enabled).pack(anchor='w')
+        ttk.Label(panel,text='Public repository: chrisbrook0127/CaseNumberOCR-Updates\n'
+            'Uploads omit filenames, case numbers, paths, OCR text and documents.\n'
+            'Full work logs remain local. No upload occurs without a credential.\n\n'
+            'Use a fine-grained GitHub token limited to this repository,\n'
+            'with Contents: Read and write. Saved encrypted for this Windows user.',justify='left').pack(pady=10)
+        ttk.Label(panel,text='GitHub token (leave blank to retain saved credential):').pack(anchor='w')
+        token=tk.StringVar();ttk.Entry(panel,textvariable=token,show='*',width=60).pack(fill='x')
+        def save():
+            try:
+                data=dict(settings,enabled=enabled.get())
+                if token.get().strip():data['protected_token']=base64.b64encode(_protect_github_token(token.get().strip().encode())).decode()
+                path=_github_log_settings_path();path.parent.mkdir(parents=True,exist_ok=True)
+                temp=path.with_suffix('.tmp');temp.write_text(json.dumps(data),encoding='utf-8');os.replace(temp,path)
+                token.set('');win.destroy()
+                self.status.config(text='GitHub diagnostic settings saved. Uploads run after scans; no document data is uploaded.')
+            except Exception:
+                messagebox.showerror('GitHub logs','Could not save the protected credential/settings. No upload was started.',parent=win)
+        ttk.Button(panel,text='SAVE',command=save).pack(pady=10)
+
+    def _diag_sync_shared(self, logfile=None):
+        """Authorized post-scan upload of an allowlisted, anonymous snapshot."""
+        import base64,gzip,io,uuid
+        # Legacy review/training hooks call this without a path. Only the
+        # completed-scan hook is authorized to start an automatic upload.
+        if logfile is None:return
+        logfile=Path(logfile)
+        def status(message):self.queue.put(('diagnostic_upload_status',message))
+        try:
+            settings=_read_github_log_settings()
+            if not settings.get('enabled',True):return
+            token=os.environ.get('MFCASE_GITHUB_LOG_TOKEN','').strip()
+            if not token and settings.get('protected_token'):
+                token=_protect_github_token(base64.b64decode(settings['protected_token']),decrypt=True).decode()
+            if not token:
+                status('GitHub logs not uploaded: configure a token in Settings > GITHUB LOG UPLOAD.');return
+            aliases={};output=io.BytesIO();count=0
+            with logfile.open(encoding='utf-8') as source,gzip.GzipFile(fileobj=output,mode='wb',mtime=0) as archive:
+                for line in source:
+                    try:event=json.loads(line)
+                    except (ValueError,TypeError):continue
+                    safe=_public_scan_event(event,aliases)
+                    if safe:
+                        archive.write((json.dumps(safe,separators=(',',':'),allow_nan=False)+'\n').encode());count+=1
+                    if output.tell()>8_000_000:
+                        status('GitHub logs not uploaded: sanitized log exceeds upload size limit. Full log retained locally.');return
+            if not count:
+                status('GitHub logs not uploaded: no scan events found.');return
+            data=output.getvalue()
+            if len(data)>8_000_000:
+                status('GitHub logs not uploaded: size limit. Full log retained locally.');return
+            name='scan-diagnostics/'+datetime.now().strftime('%Y-%m-%d')+'/'+uuid.uuid4().hex+'.jsonl.gz'
+            url='https://api.github.com/repos/chrisbrook0127/CaseNumberOCR-Updates/contents/'+name
+            body=json.dumps({'message':'Add sanitized MFCase scan diagnostics','content':base64.b64encode(data).decode(),'branch':'main'}).encode()
+            request=urllib.request.Request(url,data=body,method='PUT',headers={
+                'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json',
+                'Content-Type':'application/json','User-Agent':'MFCase-Diagnostics','X-GitHub-Api-Version':'2022-11-28'})
+            with urllib.request.urlopen(request,timeout=30) as response:
+                if response.status!=201:raise RuntimeError('Unexpected upload response')
+            status('Sanitized scan diagnostics uploaded to GitHub: '+name)
+        except urllib.error.HTTPError as exc:
+            status(f'GitHub logs not uploaded (HTTP {exc.code}). Check token permissions. Full log retained locally.')
+        except Exception:
+            # Never display exception text: it may include paths or credentials.
+            status('GitHub logs not uploaded: connection or credential error. Full log retained locally.')
+
 
     def _diag_start_run(self):
         """Create a fresh, time-stamped run in local-only diagnostic storage."""
@@ -2595,6 +2761,10 @@ class App:
         retained=[best]
         for hit in hits:
             if hit is best:
+                continue
+            if (_same_physical_case_box(chosen_rect,hit.get("box_rect") or hit.get("rect"))
+                    and float(hit.get("score") or 0.)<best_score):
+                # Lower confidence on the same ink cannot veto the winner.
                 continue
             if _case_identity(hit.get("number"))==best_case:
                 # Duplicate identity: selected field already has this value.
@@ -5459,23 +5629,29 @@ class App:
                 return False,"non_case_word_detected"
         return True,"visual_number_line_evidence"
 
+    def _prepare_printed_region(self, image, zones, quarter):
+        region,qx,qy=quarter
+        h,w=image.shape[:2]
+        allowed=[(qx,qy,qx+region.shape[1],qy+region.shape[0])]+[tuple(z['rect']) for z in zones]
+        x0=min(r[0] for r in allowed);y0=min(r[1] for r in allowed)
+        x1=max(r[2] for r in allowed);y1=max(r[3] for r in allowed)
+        canvas=np.full_like(image[y0:y1,x0:x1],255)
+        for a,b,c,d in allowed:
+            canvas[b-y0:d-y0,a-x0:c-x0]=image[b:d,a:c]
+        self._page_ocr_budget['printed_region']=(canvas,x0,y0)
+
     def _automatic_detections(self, region, x_offset, y_offset):
-        """Reuse the one quarter-page detector result inside learned crops."""
+        """One shared detector pass for the quarter and learned locations."""
         budget=getattr(self,"_page_ocr_budget",None)
-        quarter=budget.get("quarter") if budget and budget["thread"]==threading.get_ident() else None
-        if quarter is None:
+        shared=(budget.get("printed_region") or budget.get("quarter")) if budget and budget["thread"]==threading.get_ident() else None
+        if shared is None:
             return self._timed_easyocr_readtext(region,detail=1,paragraph=False)
-        image,qx,qy=quarter
-        h,w=region.shape[:2];qh,qw=image.shape[:2]
-        if not (qx<=x_offset and qy<=y_offset and
-                x_offset+w<=qx+qw and y_offset+h<=qy+qh):
-            return self._timed_easyocr_readtext(region,detail=1,paragraph=False)
-        if "quarter_detections" not in budget:
-            budget["quarter_detections"]=self._timed_easyocr_readtext(image,detail=1,paragraph=False)
-        if (x_offset,y_offset,h,w)==(qx,qy,qh,qw):
-            return budget["quarter_detections"]
+        image,qx,qy=shared
+        if "shared_detections" not in budget:
+            budget["shared_detections"]=self._timed_easyocr_readtext(image,detail=1,paragraph=False)
+        h,w=region.shape[:2]
         result=[]
-        for box,text,score in budget["quarter_detections"]:
+        for box,text,score in budget["shared_detections"]:
             shifted=[[float(x)+qx-x_offset,float(y)+qy-y_offset] for x,y in box]
             if all(0<=x<=w and 0<=y<=h for x,y in shifted):
                 result.append((shifted,text,score))
@@ -5721,17 +5897,14 @@ class App:
             elif CASE_RE.fullmatch(number):
                 self._diag_event('trocr_default_value_rejected',
                     rect=[x0,y0,x1,y1],reading=number,reason='model negative controls')
-        # One unambiguous 95% handwriting result is enough: printed support
-        # is optional, not a gate.  Otherwise run the existing printed path
-        # WITHOUT another handwriting pass on the same crop.
-        if self._clear_localized_case(hits,95.0) is None:
-            with self._perf_measure('learned_printed'):
-                printed=self._automatic_handwritten_4x4(
-                    cropped,x0,y0,run_trocr=False)
-            for hit in printed:
-                hit=dict(hit,learned_location=True,
-                         learned_sample_count=zone['count'])
-                hits.append(hit)
+        # Always consider printed evidence; the shared pass is cached.
+        with self._perf_measure('learned_printed'):
+            printed=self._automatic_handwritten_4x4(cropped,x0,y0,run_trocr=False)
+        for hit in printed:
+            hits.append(dict(hit,learned_location=True,learned_sample_count=zone['count']))
+        if hits:
+            best=_select_primary_case_hit(hits,'learned',page_image.shape)
+            hits=self._resolve_ocr_alternates(hits,'learned',best)
         return self._diag_field_filter(hits,'learned')
 
     def _ocr_pdf(self,path):
@@ -5787,8 +5960,11 @@ class App:
                 self._diag_event('learned_scan_map',page=page_index+1,
                     examples=sum(z['count'] for z in zones),
                     zones=[dict(rect=list(z['rect']),count=z['count']) for z in zones])
+                self._prepare_printed_region(image,zones,(region,offset_x,0))
+                printed_hits=self._automatic_handwritten_4x4(region,offset_x,0,run_trocr=False)
+                printed_complete=self._clear_localized_case(printed_hits,95.0) is not None
                 learned_complete=False
-                for zone in zones:
+                for zone in ([] if printed_complete else zones):
                     if self._page_ocr_budget["handwriting"]>=2:
                         break
                     if getattr(self,'stop_event',None) is not None and self.stop_event.is_set():
@@ -5808,7 +5984,8 @@ class App:
                     self._diag_event("ocr_label_pass",page=page_index+1,
                                      region=[offset_x,0,width,side],labels=[])
                     with self._perf_measure("bounded_upper_right_quarter"):
-                        hits=self._automatic_handwritten_4x4(region,offset_x,0)
+                        hits=(printed_hits if printed_complete else
+                              self._automatic_handwritten_4x4(region,offset_x,0))
                     if hits:
                         incident=[h for h in hits if h.get("label_type")=="incident"]
                         case=[h for h in hits if h.get("label_type")=="case"]
@@ -6756,6 +6933,9 @@ class App:
                     self._rescan_force_iids.clear()
                     self._save_state()
                     self._audit_event("SCAN_STOPPED",processed=msg[1])
+                elif kind == "diagnostic_upload_status":
+                    self._log("%s",msg[1])
+                    if not self.busy:self.status.config(text=msg[1])
                 elif kind == "done":
                     self._loader_finish("ocr")
                     self._loader_finish("model")
@@ -6782,7 +6962,7 @@ class App:
                     if bool(self.auto_send_var.get()):
                         self.root.after_idle(lambda:self.export(automatic=True))
                     self._schedule_post_scan_learning()
-                    threading.Thread(target=self._diag_sync_shared,daemon=True).start()
+                    threading.Thread(target=self._diag_sync_shared,args=(self._diag_file,),daemon=True).start()
                     self._log("Scan-run summary: %s", json.dumps(self._run_outcomes, sort_keys=True))
                     self._schedule_auto_export()
         except queue.Empty:

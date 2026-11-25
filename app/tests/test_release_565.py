@@ -32,10 +32,10 @@ class MFCase565Tests(unittest.TestCase):
         false=hit('08-2009',99.2,(1074,139,1203,173),'incident','TrOCR')
         extra=hit('08-357',66,(1080,60,1200,104),'incident','TrOCR')
         result=self.read([false,strong,extra]);self.assertEqual(result[0],'08-0367');self.assertNotIn('conflicting',result[2])
-    def test_genuine_two_95pct_models_on_same_box_remain_review(self):
+    def test_same_box_higher_confidence_wins(self):
         first=hit('08-287',97,(1090,55,1220,105),'incident','TrOCR')
         second=hit('08-297',97.5,(1092,56,1218,106),'incident','EasyOCR')
-        result=self.read([first,second]);self.assertIn('conflicting OCR reads',result[2]);self.assertIn('08-287',result[2]);self.assertIn('08-297',result[2])
+        result=self.read([first,second]);self.assertEqual(result[0],'08-297');self.assertNotIn('conflicting OCR reads',result[2])
     def test_95_literal_printed_quashes_model_only_alternative(self):
         real=hit('08-0367',98.6,(1085,55,1215,108),'incident','EasyOCR')
         bad=hit('08-357',97.9,(1085,55,1215,108),'incident','TrOCR')

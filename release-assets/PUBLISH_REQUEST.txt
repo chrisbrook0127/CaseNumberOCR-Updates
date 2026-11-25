@@ -1,1 +1,1 @@
-Publish tested MFCase v5.6.13 approved learning and OCR budget changes.
+Publish tested MFCase v5.6.14 printed-reading fixes and sanitized post-scan diagnostics.

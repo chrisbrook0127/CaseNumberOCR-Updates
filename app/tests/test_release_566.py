@@ -58,12 +58,12 @@ class SimplifiedOCRTests(unittest.TestCase):
         bad=hit('08-78',55,(1090,60,1201,100),'EasyOCR')
         self.assertEqual(m.App._clear_localized_case([bad,good])['number'],'08-87')
 
-    def test_two_95_percent_same_field_conflict(self):
+    def test_two_95_percent_same_field_higher_score_wins(self):
         a=hit('08-375',96.1,(1090,65,1215,111),'EasyOCR')
         b=hit('08-376',98.2,(1091,65,1215,111),'EasyOCR-joined')
         self.assertIsNone(m.App._clear_localized_case([a,b]))
         # Actual _ocr_pdf conflict depends on same-field alternate policy.
-        result=self.scan([a,b]);self.assertIn('conflicting OCR reads',result[2])
+        result=self.scan([a,b]);self.assertEqual(result[0],'08-376');self.assertNotIn('conflicting OCR reads',result[2])
 
     def test_invalid_or_outside_quarter_goes_review(self):
         for candidate,rect in [('08-32',(200,80,300,105)),

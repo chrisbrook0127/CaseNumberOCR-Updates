@@ -1,0 +1,11 @@
+MFCase V5.6.14 — printed-reading fixes and authorized diagnostic uploads
+Baseline: locked V5.6.13. Existing examples, models and PDF contents preserved.
+- For the same physical case field, keep the strongest complete 08- reading instead of a taller weak crop. Preserve case-field location priority over unrelated lower fields.
+- Printed evidence is evaluated before a learned handwriting early exit. One shared printed detection covers the upper-right quarter and learned locations; all other pixels are masked. No additional printed calls; at most three handwriting document reads.
+- SETTINGS > GITHUB LOG UPLOAD configures automatic sanitized diagnostics after a completed scan. No token means no upload. Windows protects the saved token with current-user DPAPI. MFCASE_GITHUB_LOG_TOKEN is an optional environment override.
+- Use a fine-grained GitHub token scoped to chrisbrook0127/CaseNumberOCR-Updates with Contents: read and write. Do not share the token in chat or logs.
+- Public uploads contain only allowlisted diagnostic events, per-run anonymous file/case identities, confidence values, box coordinates, timing and outcome data. No original filenames, case numbers, raw OCR text, PDF content, crops, network paths or credentials.
+- Uploads write compressed JSONL under scan-diagnostics/YYYY-MM-DD/ in the repository main branch. Upload failures are shown and retain local logs; scanning does not wait for upload.
+- SAVE REVIEW and training completion do not upload. Automatic uploads can be disabled in Settings.
+Validation: 99 automated tests; real prior candidate replay; updater preservation check. No new recognition-accuracy or Windows GUI claim.
+Known unchanged limitation: auto-approval still rejects learned locations outside the upper-right quarter. Approval for that separate change remains pending.
