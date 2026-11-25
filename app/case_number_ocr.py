@@ -252,7 +252,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.3"
+        self.app_version = "5.6.4"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -274,6 +274,7 @@ class App:
         self._audit_root = Path(os.getenv("LOCALAPPDATA") or str(Path(__file__).resolve().parent)) / "MFCase" / "logs"
         self._audit_file = self._audit_root / "MFCase_Work_Log.txt"
         self.auto_send_var = tk.BooleanVar(master=root, value=False)
+        self.show_all_files_var = tk.BooleanVar(master=root, value=True)
         self._load_user_settings()
         self.app_dir = Path(__file__).resolve().parent
         self.update_config_path = self.app_dir / "update_config.json"
@@ -689,9 +690,8 @@ class App:
                 state=state,style="MFCase.Action.TButton")
             button.grid(row=0,column=c,sticky="ew",padx=2)
             setattr(self,name,button)
-        self.show_all_files_var=tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.review_tab,text="Show all files",variable=self.show_all_files_var,
-                        command=self._rebuild_scan_list).pack(anchor="w")
+        ttk.Checkbutton(self.review_tab,text="Full list",variable=self.show_all_files_var,
+                        command=self._toggle_full_list).pack(anchor="w")
         self.scan_file_count_label=ttk.Label(self.review_tab,text="0 of 0 selected")
         self.scan_file_count_label.pack(anchor="e",pady=(0,2))
         self.folder_label=ttk.Label(self.review_tab,text="No folder selected")
@@ -1673,6 +1673,10 @@ class App:
                 (bool(record.get("case_draft")) or self._workflow_status(record)!="COMPLETED"
                  or bool(record.get("sequence_conflict")) or bool(record.get("export_error"))))
 
+    def _toggle_full_list(self):
+        self._save_user_settings()
+        self._rebuild_scan_list()
+
     def _rebuild_scan_list(self):
         # Batch all row changes; never sort/count the whole table per row.
         self._bulk_scan_rows=True
@@ -2484,8 +2488,10 @@ class App:
         try:
             cfg=json.loads(self._user_settings_file.read_text(encoding="utf-8"))
             self.auto_send_var.set(cfg.get("auto_send_completed") is True)
+            self.show_all_files_var.set(cfg.get("full_list",True) is not False)
         except (OSError,ValueError,TypeError):
             self.auto_send_var.set(False)
+            self.show_all_files_var.set(True)
 
     def _save_user_settings(self):
         path=self._user_settings_file
@@ -2493,7 +2499,8 @@ class App:
             path.parent.mkdir(parents=True,exist_ok=True)
             tmp=path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps({"version":1,
-                      "auto_send_completed":bool(self.auto_send_var.get())},indent=2),encoding="utf-8")
+                      "auto_send_completed":bool(self.auto_send_var.get()),
+                      "full_list":bool(self.show_all_files_var.get())},indent=2),encoding="utf-8")
             os.replace(tmp,path)
             self._audit_event("AUTO_SEND_SETTING",enabled=bool(self.auto_send_var.get()))
         except OSError as exc:

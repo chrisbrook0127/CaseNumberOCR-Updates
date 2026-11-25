@@ -1,0 +1,5 @@
+MFCase 5.6.4
+- Full list checkbox starts checked for users without a saved preference.
+- Uncheck to display only files needing review; the choice persists across restarts.
+- Switching views does not change the scan queue, approvals, OCR or learning rules.
+- Existing large-folder optimizations remain enabled.

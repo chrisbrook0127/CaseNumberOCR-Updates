@@ -1,1 +1,1 @@
-Publish v5.6.3: focused crop, digit joining, field conflict and anchor corrections.
+Publish v5.6.4: Full list enabled by default with saved preference.
