@@ -76,9 +76,8 @@ jobs:
           inc_old=legacy['_incremental_sequence_check']
           inc_new=current['_incremental_sequence_check']
           assert inc_old.count('        anchors=tuple(')==1
-          print('CURRENT_INCREMENTAL_METHOD',repr(inc_new[:1800]),flush=True)
-          assert inc_new.count('        order = self._sequence_order_with_sent_history()')==1
-          beginning=inc_new.index('        order = self._sequence_order_with_sent_history()')
+          assert inc_new.count('        order=self._sequence_order_with_sent_history()')==1
+          beginning=inc_new.index('        order=self._sequence_order_with_sent_history()')
           finish=inc_new.index('        if changed_iid is None:',beginning)
           signature=inc_new[beginning:finish]
           merged_inc=(inc_old[:inc_old.index('        anchors=tuple(')]+signature+
