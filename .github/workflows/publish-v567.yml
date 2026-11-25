@@ -1,0 +1,120 @@
+name: Publish MFCase v5.6.7 default-bias OCR safeguard
+on:
+  push:
+    branches:
+      - publish/v5.6.7
+    paths:
+      - .github/workflows/publish-v567.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-publish-v567
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install GUI and image tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Retrieve official v5.6.6 release, never an older repository source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p baseline stage dist verify
+          gh release download v5.6.6 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.6.6_Full_Online_Install.zip --dir baseline
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          from hashlib import sha256
+          p=Path('baseline/MFCase_Number_OCR_V5.6.6_Full_Online_Install.zip')
+          assert sha256(p.read_bytes()).hexdigest()=='cabd30333b43e1ab18ccffd320546163968253284ddf0efb2426b89e74adefac', 'Unexpected release content'
+          with ZipFile(p) as z:
+              assert z.testzip() is None
+              assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              z.extractall('stage')
+          apps=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(apps)==1
+          current=sha256(apps[0].read_bytes()).hexdigest()
+          print('OFFICIAL_BASELINE_SOURCE_SHA',current)
+          assert current=='cd1ca979623aacf23adef99b38861f6a424cc7f634ce8d706cf0817de97da03d', 'Official source differs from locally tested source: stop rather than regress'
+          PY
+      - name: Apply exact verified source patch and preserve existing features
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python - <<'PY'
+          import base64,zlib
+          from hashlib import sha256
+          from pathlib import Path
+          encoded=Path('tools/v567_patch.b64').read_text('ascii').strip()
+          assert len(encoded)==4356
+          data=zlib.decompress(base64.b64decode(encoded,validate=True))
+          assert sha256(data).hexdigest()=='d053699fe99023c544eb0af75f7a107ae7cd3cf6c415f8619273f0d798a3f20d'
+          Path('stage/patch_567.diff').write_bytes(data)
+          print('PASS source patch integrity')
+          PY
+          (cd "$APP" && patch --batch --fuzz=0 -p1 < ../patch_567.diff)
+          python - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          src=app/'case_number_ocr.py'
+          actual=sha256(src.read_bytes()).hexdigest()
+          assert actual=='258b56f8ef60bc8402cab84d4981c6b81e33ab76c864a3342c61e83893860dc8',actual
+          setup=app/'SETUP.bat'
+          text=setup.read_text('utf8')
+          text=text.replace('Setup V5.6.0','Setup V5.6.7').replace('OCR V5.6.0 - INSTALL','OCR V5.6.7 - INSTALL')
+          setup.write_text(text,encoding='utf8')
+          (app/'CHANGELOG_V5_6_7.txt').write_text(Path('tools/CHANGELOG_V5_6_7.txt').read_text('utf8'),encoding='utf8')
+          (app/'tests').mkdir(exist_ok=True)
+          (app/'tests/test_release_567.py').write_text(Path('tools/test_release_567.py').read_text('utf8'),encoding='utf8')
+          print('PASS official baseline + verified changes')
+          PY
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+      - name: Run all 27 OCR regressions and graphical startup
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP" python -m unittest discover -s "$APP/tests" -p 'test_release_*.py' -v
+          MFCASE_SKIP_STARTUP_MAINTENANCE=1 PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import tkinter as tk
+          from case_number_ocr import App
+          root=tk.Tk()
+          app=App(root)
+          root.update_idletasks()
+          assert app.app_version=='5.6.7'
+          assert 'V5.6.7' in root.title()
+          assert app.tree.winfo_exists()
+          root.destroy()
+          print('PASS GUI startup')
+          PY
+      - name: Package installer and updater; verify no personal data is included
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python tools/build_release_567.py "$APP" dist
+          test -s dist/CaseNumberOCR_Update.zip
+          test -s dist/MFCase_Number_OCR_V5.6.7_Full_Online_Install.zip
+      - name: Publish to GitHub and verify downloaded updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.6.7
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.6.7" --notes-file "$APP/CHANGELOG_V5_6_7.txt"
+          fi
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.6.7_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
