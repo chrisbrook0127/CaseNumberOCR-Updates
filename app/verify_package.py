@@ -1,7 +1,7 @@
 from pathlib import Path
 import hashlib
 ROOT=Path(__file__).resolve().parent
-EXPECTED={'case_number_ocr.py': '4cfc7bab03582e19d9f6275e79b0b69da1e6c9d7174da6e22ecf06d728cf18de', 'updater_apply.py': '293701a5f4566162e705ecc93eb593144199b8ccd045f626fb5b25f9e33af211'}
+EXPECTED={'case_number_ocr.py': '827368eedea98c922f9db05a782eb1f825ab5e445b3efcdfedc87f033d0e6acf', 'updater_apply.py': '293701a5f4566162e705ecc93eb593144199b8ccd045f626fb5b25f9e33af211'}
 for name,expected in EXPECTED.items():
     assert hashlib.sha256((ROOT/name).read_bytes()).hexdigest()==expected, name
-print("PASS: V5.6.2 application and updater integrity")
+print("PASS: V5.6.3 application and updater integrity")

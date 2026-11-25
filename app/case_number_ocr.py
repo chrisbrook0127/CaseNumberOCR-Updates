@@ -252,7 +252,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.2"
+        self.app_version = "5.6.3"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -3454,68 +3454,33 @@ class App:
         return self._apply_sequence_consensus(affected_range=(left,right+1))
 
     def _sequence_consensus_plan(self, order, positions=None):
-        """Equivalent manual-first bracket ranking without quadratic anchor pairs.
+        """Use actual bounding anchors; never search past conflicts for a match.
 
-        For each case and each eligible interior file, only the nearest
-        left/right anchors of each *type* (human vs auto) can win the
-        (human endpoints, -distance) ranking. A farther same-type endpoint
-        can never beat the nearer one. Conflicting human anchors are barriers.
-        Preserves conflicts and protects every independent manual decision.
+        Two explicit human boundaries may correct automatic reads between them.
+        Otherwise use the nearest independent anchor on each side.
         """
         anchors=[self._sequence_case_number(r) for _,r in order]
-        manual={i for i,(_,r) in enumerate(order)
-                if anchors[i] and r.get("manual_approved") and not r.get("auto_labeled")}
-        grouped={}
-        for i,case in enumerate(anchors):
-            if case:
-                g=grouped.setdefault(_case_identity(case),[[],[]])
-                g[int(i in manual)].append(i)
-        allowed=set(positions) if positions is not None else None
-        manual_points=sorted(manual)
-        winners={}
-        tied=set()
-        for identity,(auto,human) in grouped.items():
-            all_points=sorted(auto+human)
-            if len(all_points)<2:
+        independent=[i for i,a in enumerate(anchors) if a]
+        human=[i for i in independent if order[i][1].get("manual_approved")
+               and not order[i][1].get("auto_labeled")]
+        human_set=set(human);plan={};conflicts=set()
+        for pos in (positions if positions is not None else range(len(order))):
+            if pos in human_set:continue
+            iid,r=order[pos];status=str(r.get("status") or "")
+            if (r.get("exported") or r.get("case_draft") or r.get("sequence_excluded") or
+                status in ("Not scanned","Scanning","Moved to BLANKS") or status.startswith("Scan error:")):
                 continue
-            # Only interior positions between the first and last SAME-case
-            # independent anchors are considered, regardless of 08 zero padding.
-            for pos in range(all_points[0]+1, all_points[-1]):
-                if (pos in manual or (allowed is not None and pos not in allowed)):
-                    continue
-                iid,r=order[pos]
-                status=str(r.get("status") or "")
-                if (r.get("exported") or r.get("case_draft") or r.get("sequence_excluded") or
-                    status in ("Not scanned","Scanning","Moved to BLANKS") or
-                    status.startswith("Scan error:")):
-                    continue
-                possible=[]
-                for left_type,arr_left in ((0,auto),(1,human)):
-                    left_idx=bisect_left(arr_left,pos)-1
-                    if left_idx<0:continue
-                    left=arr_left[left_idx]
-                    for right_type,arr_right in ((0,auto),(1,human)):
-                        right_idx=bisect_right(arr_right,pos)
-                        if right_idx>=len(arr_right):continue
-                        right=arr_right[right_idx]
-                        # Bisect the global independent-human anchors; any
-                        # different-case human BETWEEN endpoints forbids inference.
-                        hi=bisect_left(manual_points,right)
-                        lo=bisect_left(manual_points,left+1)
-                        if any(anchors[m]!=identity for m in manual_points[lo:hi]):
-                            continue
-                        rank=(left_type+right_type, -(right-left))
-                        possible.append((rank,identity,[order[left][0],order[right][0]]))
-                if not possible:continue
-                rank,case,pair=max(possible,key=lambda item:item[0])
-                previous=winners.get(pos)
-                if previous is None or rank>previous[0]:
-                    winners[pos]=(rank,case,pair)
-                    tied.discard(pos)
-                elif rank==previous[0] and case!=previous[1]:
-                    tied.add(pos)
-        return ({pos:(identity,pair) for pos,(rank,identity,pair) in winners.items()
-                 if pos not in tied}, tied)
+            hl=bisect_left(human,pos)-1;hr=bisect_right(human,pos)
+            if hl>=0 and hr<len(human) and anchors[human[hl]]==anchors[human[hr]]:
+                left,right=human[hl],human[hr]
+            else:
+                lo=bisect_left(independent,pos)-1;hi=bisect_right(independent,pos)
+                if lo<0 or hi>=len(independent):continue
+                left,right=independent[lo],independent[hi]
+            if anchors[left]!=anchors[right]:
+                conflicts.add(pos);continue
+            plan[pos]=(anchors[left],[order[left][0],order[right][0]])
+        return plan,conflicts
 
     def _apply_sequence_consensus(self, affected_range=None):
         with self._perf_measure("before_after"):
@@ -5137,14 +5102,14 @@ class App:
             # Ignore isolated specks and huge printed table rows. Keep all
             # four inches available, but prefer free handwriting to the right.
             if (cw < 38 or ch < 11 or cw > w*.88 or ch > 135 or
-                    x+cw < w*.43 or cw/ch < 0.85):
+                    cw/ch < 0.85):
                 continue
             # Widen to a complete field crop, like the green reviewer box.
             # Padding is asymmetric because digits after the hyphen are on
             # the RIGHT; a tight 08- detector rectangle is not a full field.
             pad_y=max(9, min(27, int(ch*.40)))
-            pad_left=max(85, min(150, int(ch*4.0)))
-            pad_right=max(50, min(130, int(ch*3.0)))
+            pad_left=max(6, min(30, int(ch*.5)))
+            pad_right=max(8, min(36, int(ch*.65)))
             x0=max(0, x-pad_left); y0=max(0, y-pad_y)
             x1=min(w, x+cw+pad_right); y1=min(h, y+ch+pad_y)
             if x1-x0<42 or y1-y0<16:
@@ -5160,7 +5125,7 @@ class App:
             for a0,b0,a1,b1 in kept:
                 intersect=max(0,min(x1,a1)-max(x0,a0))*max(0,min(y1,b1)-max(y0,b0))
                 smaller=min((x1-x0)*(y1-y0),(a1-a0)*(b1-b0))
-                if smaller and intersect/smaller>=.60:
+                if App._same_number_box(rect,(a0,b0,a1,b1)):
                     duplicate=True
                     break
             if not duplicate:
@@ -5169,117 +5134,129 @@ class App:
                     break
         return kept
 
-    def _automatic_handwritten_4x4(self, region, x_offset=0, y_offset=0):
-        """One printed pass and at most three handwriting crops per region.
+    @staticmethod
+    def _same_number_box(a,b):
+        """Similar extents on one line, not merely containment by a large crop."""
+        aw,ah=a[2]-a[0],a[3]-a[1];bw,bh=b[2]-b[0],b[3]-b[1]
+        if min(aw,ah,bw,bh)<=0:return False
+        intersection=max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]))
+        union=aw*ah+bw*bh-intersection
+        return (intersection/union>=.55 and min(aw,bw)/max(aw,bw)>=.5
+                and abs((a[1]+a[3]-b[1]-b[3])/2)<=.4*min(ah,bh))
 
-        Either engine may establish the literal 08- prefix. Never add it to
-        bare digits. Prefer the higher confidence reading of the SAME crop.
-        """
+    def _automatic_handwritten_4x4(self, region, x_offset=0, y_offset=0):
+        """Reuse one detector pass; spend at most three reads on ranked fields."""
         height,width=region.shape[:2]
         detections=(self._timed_easyocr_readtext(region,detail=1,paragraph=False)
                     if self.reader is not None else [])
         pieces=[]
         for box,text,confidence in detections:
             xs=[float(p[0]) for p in box];ys=[float(p[1]) for p in box]
-            if not all(math.isfinite(v) for v in xs+ys):
-                continue
+            if not all(math.isfinite(v) for v in xs+ys):continue
             rect=(max(0,int(min(xs))),max(0,int(min(ys))),
                   min(width,int(math.ceil(max(xs)))),min(height,int(math.ceil(max(ys)))))
             if rect[2]>rect[0] and rect[3]>rect[1]:
                 pieces.append((rect,normalize_case_number(text),float(confidence or 0)*100))
-        # Reuse the one detector pass for labels, complete fields, and crops.
-        labels=[]
-        printed=[]
+        self._diag_event("region_raw_reads",readings=[dict(rect=r,text=t,score=c) for r,t,c in pieces])
+        def adjacent(a,b):
+            h=min(a[3]-a[1],b[3]-b[1])
+            return (0<=b[0]-a[2]<=max(5,h*.6) and
+                    min(a[3],b[3])-max(a[1],b[1])>=.6*h)
+        def union(a,b):return (min(a[0],b[0]),min(a[1],b[1]),max(a[2],b[2]),max(a[3],b[3]))
+        # Join split printed labels using only nearby nonnumeric fragments.
+        expanded=list(pieces)
         for rect,text,score in pieces:
-            label=CASE_FIELD_LABEL_RE.search(text)
-            if label:
-                labels.append((rect,"incident" if INCIDENT_LABEL_RE.search(text) else "case"))
-                tail=normalize_case_number(text[label.end():].lstrip(" .:#"))
-                if CASE_RE.fullmatch(tail):
-                    printed.append((rect,tail,score))
+            if text.upper() not in ("INCIDENT","CASE"):continue
+            for other,token,conf in pieces:
+                if adjacent(rect,other) and re.fullmatch(r"(?:N[O0]\.?|NUMBER)",token,re.I):
+                    expanded.append((union(rect,other),text+" "+token,min(score,conf)))
+        labels=[];printed=[];numeric=[]
+        for rect,text,score in expanded:
+            match=CASE_FIELD_LABEL_RE.search(text)
+            if match:
+                kind="incident" if INCIDENT_LABEL_RE.search(text) else "case"
+                labels.append((rect,kind))
+                tail=normalize_case_number(text[match.end():].lstrip(" .:#"))
+                if CASE_RE.fullmatch(tail):printed.append((rect,tail,score))
                 continue
-            if not re.match(r"^08-(?:[0-9]|$)",text):
-                continue
-            x0,y0,x1,y1=rect
-            for other,token,conf in sorted(pieces,key=lambda p:p[0][0]):
-                if other==rect or not re.fullmatch(r"[0-9]+",token):
-                    continue
-                overlap=min(y1,other[3])-max(y0,other[1])
-                if (0<=other[0]-x1<=max(12,(y1-y0)*1.5)
-                        and overlap>=.5*min(y1-y0,other[3]-other[1])):
-                    text+=token;score=min(score,conf)
-                    x1=other[2];y0=min(y0,other[1]);y1=max(y1,other[3])
             if CASE_RE.fullmatch(text):
-                printed.append(((x0,y0,x1,y1),text,score))
-        def field_kind(rect):
-            for label,kind in sorted(labels,key=lambda item:item[1]!="incident"):
-                if rect==label:
-                    return kind
-                overlap=min(rect[3],label[3])-max(rect[1],label[1])
-                if (rect[0]>=label[2]-3 and rect[0]-label[2]<=max(60,(label[3]-label[1])*12)
-                        and overlap>=.4*min(rect[3]-rect[1],label[3]-label[1])):
-                    return kind
-            return None
-        def same_box(a,b):
-            intersection=max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]))
-            smaller=min((a[2]-a[0])*(a[3]-a[1]),(b[2]-b[0])*(b[3]-b[1]))
-            return smaller>0 and intersection/smaller>=.6
-        # Ink proposals are internal only; never display one until OCR returns
-        # a complete, explicitly prefixed case number.
-        if labels:
-            # Once a case label is found, unrelated boxes cannot override it.
-            printed=[p for p in printed if field_kind(p[0])]
-            boxes=[p[0] for p in printed]
-            for label,kind in sorted(labels,key=lambda item:item[1]!="incident"):
-                if any(field_kind(box)==kind and (box==label or same_box(box,label)) for box in boxes):
-                    continue
-                x0,y0,x1,y1=label
-                field=(x1,max(0,y0-3),min(width,x1+max(60,(y1-y0)*12)),min(height,y1+3))
-                if field[2]>field[0] and not any(same_box(field,b) for b in boxes):
-                    boxes.append(field)
-        else:
-            boxes=[p[0] for p in printed]
-            for box in self._automatic_case_crop_rects_4x4(region,max_regions=3):
-                # Do not reinterpret an explicitly detected word/checkbox label
-                # (such as OTHER) as a numeric field.
-                non_case_word=any(same_box(box,r) and re.search(r"[A-Za-z]{2,}",t)
-                                 and not CASE_RE.fullmatch(t) for r,t,c in pieces)
-                if not non_case_word and not any(same_box(box,b) for b in boxes):
-                    boxes.append(box)
-        boxes.sort(key=lambda box: {"incident":0,"case":1,None:2}[field_kind(box)])
-        candidates=[]
-        handwriting_calls=0
+                # A complete detector reading must NEVER acquire extra digits.
+                printed.append((rect,text,score));continue
+            if text in ("08-","08"):
+                joined=text;bounds=rect;confidence=score
+                for other,token,conf in sorted(pieces,key=lambda p:p[0][0]):
+                    if other==rect or not adjacent(bounds,other):continue
+                    if not re.fullmatch(r"-?[0-9]*",token) or not token:continue
+                    # A literal dash must exist in a detected fragment.
+                    if joined=="08" and not token.startswith("-"):continue
+                    if joined!="08" and token.startswith("-"):continue
+                    joined+=token;bounds=union(bounds,other);confidence=min(confidence,conf)
+                if CASE_RE.fullmatch(joined):printed.append((bounds,joined,confidence))
+            if re.fullmatch(r"[0-9Il| -]+",text) and re.search(r"[0-9]",text):
+                numeric.append(rect)
+        def relation(rect):
+            choices=[]
+            for label,kind in labels:
+                if rect==label:return kind,0.0
+                lh=label[3]-label[1]
+                dy=abs((rect[1]+rect[3]-label[1]-label[3])/2)
+                gap=rect[0]-label[2]
+                if -lh<=gap<=12*lh and dy<=max(lh,rect[3]-rect[1])*1.8:
+                    choices.append((0 if kind=="incident" else 1,dy+max(0,gap)*.1,kind))
+            if not choices:return None,float("inf")
+            _,distance,kind=min(choices);return kind,distance
+        def blocked(rect):
+            # Explicit nonnumeric form words are not number-crop evidence.
+            return any(self._same_number_box(rect,r) and re.fullmatch(r"[A-Za-z .]+",t)
+                       and re.search(r"[A-Za-z]{2,}",t) for r,t,c in pieces)
+        boxes=[p[0] for p in printed]
+        proposals=self._automatic_case_crop_rects_4x4(region,max_regions=12)
+        for box in numeric+proposals:
+            if blocked(box) or any(self._same_number_box(box,b) for b in boxes):continue
+            boxes.append(box)
+        for label,kind in labels:
+            if any(relation(b)[0]==kind for b in boxes):continue
+            x0,y0,x1,y1=label;h=y1-y0
+            field=(x1,max(0,int(y0-h)),min(width,int(x1+12*h)),min(height,int(y1+h)))
+            if field[2]>field[0] and not blocked(field):boxes.append(field)
+        def priority(box):
+            kind,distance=relation(box)
+            full=any(self._same_number_box(box,r) for r,n,c in printed)
+            numeric_hint=any(self._same_number_box(box,r) for r in numeric)
+            return (0 if kind=="incident" else 1 if kind=="case" else 2,
+                    not full,not numeric_hint,distance,box[1],-box[2])
+        boxes.sort(key=priority)
+        candidates=[];calls=0;seen=set()
         for rect in boxes:
+            if rect in seen:continue
+            seen.add(rect)
             if getattr(self,"stop_event",None) is not None and self.stop_event.is_set():
-                raise InterruptedError("Stopped during 4x4 OCR")
-            x0,y0,x1,y1=rect
-            choices=[(number,score,"EasyOCR") for box,number,score in printed if same_box(rect,box)]
-            if (handwriting_calls<3 and
-                    (self.trocr_model is not None or self.trocr_error=="")):
-                crop=region[max(0,y0-3):min(height,y1+3),max(0,x0-3):min(width,x1+3)]
-                text,score=self._trocr_read_scored(crop);handwriting_calls+=1
-                number=normalize_case_number(text)
-                label_match=CASE_FIELD_LABEL_RE.search(number)
-                if label_match:
-                    number=normalize_case_number(number[label_match.end():].lstrip(" .:#"))
-                if CASE_RE.fullmatch(number):
-                    choices.append((number,float(score or 0),"TrOCR"))
-            if not choices:
-                continue
-            number,score,engine=max(choices,key=lambda item:item[1])
+                raise InterruptedError("Stopped during quarter-page OCR")
+            choices=[(n,c,"EasyOCR") for r,n,c in printed if self._same_number_box(rect,r)]
+            x0,y0,x1,y1=rect;pad=max(3,int((y1-y0)*.2))
+            if calls<3 and (self.trocr_model is not None or self.trocr_error==""):
+                crop=region[max(0,y0-pad):min(height,y1+pad),max(0,x0-pad):min(width,x1+pad)]
+                if crop.size==0 or int(crop.max())-int(crop.min())<8:
+                    if not choices:continue
+                    raw,score="",0.0
+                else:
+                    raw,score=self._trocr_read_scored(crop);calls+=1
+                self._diag_event("crop_raw_read",rect=list(rect),engine="TrOCR",text=str(raw or ""),score=score)
+                number=normalize_case_number(raw)
+                label=CASE_FIELD_LABEL_RE.search(number)
+                if label:number=normalize_case_number(number[label.end():].lstrip(" .:#"))
+                if CASE_RE.fullmatch(number):choices.append((number,float(score or 0),"TrOCR"))
+            if not choices:continue
+            number,score,engine=max(choices,key=lambda c:c[1])
             scores={e:c for n,c,e in choices if _case_identity(n)==_case_identity(number)}
-            if len({_case_identity(n) for n,c,e in choices})>1:
-                self._diag_event("same_crop_ocr_disagreement",selected=number,
-                                 score=score,readings=[list(c) for c in choices])
+            self._diag_event("crop_read_selection",rect=list(rect),readings=[list(c) for c in choices],selected=number,score=score)
+            kind,distance=relation(rect)
             absolute=(x0+x_offset,y0+y_offset,x1+x_offset,y1+y_offset)
-            candidates.append(dict(number=number,score=score,
-                rect=absolute,box_rect=absolute,box_verified=True,
-                prefix_source=engine,engines=list(scores),engine_scores=scores,
-                label_type=field_kind(rect),label_context=bool(field_kind(rect)),
-                incident_label_context=field_kind(rect)=="incident",
-                label_distance=0.0 if field_kind(rect) else float("inf")))
+            candidates.append(dict(number=number,score=score,rect=absolute,box_rect=absolute,
+                box_verified=True,prefix_source=engine,engines=list(scores),engine_scores=scores,
+                label_type=kind,label_context=bool(kind),incident_label_context=kind=="incident",label_distance=distance))
         self._diag_event("bounded_ocr_pass",printed_calls=int(self.reader is not None),
-                         handwriting_calls=handwriting_calls,candidates=len(candidates))
+                         handwriting_calls=calls,candidates=len(candidates))
         return candidates
 
     def _ocr_pdf(self,path):
@@ -5331,7 +5308,7 @@ class App:
                 if hits:
                     incident=[h for h in hits if h.get("label_type")=="incident"]
                     case=[h for h in hits if h.get("label_type")=="case"]
-                    results.append((page_index,image,incident or case or hits,
+                    results.append((page_index,image,hits,
                                     "incident" if incident else "case" if case else "fallback"))
                 # Automatic OCR is restricted to the EXACT upper-right quarter
                 # rendered ROI on this page. No reviewer-learned or
@@ -5402,7 +5379,7 @@ class App:
                          f"upper-right quarter case read rejected",None,[]),
                          "No valid 08- case in the upper-right quarter search — MANUAL REVIEW",
                          False,0.0,[],False)
-            best=_select_primary_case_hit(hits,kind,image.shape)
+            best=max(hits,key=lambda h: (2 if h.get("label_type")=="incident" else 1 if h.get("label_type")=="case" else 0,float(h.get("score") or 0)))
             hits=self._resolve_ocr_alternates(hits,kind,best)
             number=best["number"]
             engines=list(best.get("engines") or [])
@@ -5432,12 +5409,9 @@ class App:
                 if source in ("header","fallback","incident","case")
                 for h in other_hits
                 if CASE_RE.fullmatch(normalize_case_number(h.get("number")))}
-            # Weak OCR variants do not automatically defeat one independently
-            # localized 95+ read. Two different 95+ case identities do.
-            ambiguous=(len(high_conf_cases)>1 if high_conf_cases
-                       else (len(numeric_keys(distinct))>1 or
-                             len(numeric_keys(across))>1 or
-                             len(all_region_cases)>1))
+            # Same-crop alternatives were resolved by confidence upstream.
+            # Different physical fields remain conflicts even below 95%.
+            ambiguous=len(all_region_cases)>1
             visuals=[]
             for h in hits:
                 rect=h.get("rect")

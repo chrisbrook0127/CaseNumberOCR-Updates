@@ -1,1 +1,1 @@
-Publish v5.6.2: large-folder review list and independent scan queue.
+Publish v5.6.3: focused crop, digit joining, field conflict and anchor corrections.

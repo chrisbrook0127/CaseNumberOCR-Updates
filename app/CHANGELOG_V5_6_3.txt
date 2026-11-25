@@ -1,0 +1,14 @@
+MFCase 5.6.3 — focused scanning corrections
+Baseline: latest published 5.6.2, verified before editing.
+- Complete detector case numbers no longer absorb neighboring digit boxes.
+- Prefix fragments join only when adjacent on one line, with a literal detected dash.
+- Reuses the single detector pass for split/combined labels; associates numbers slightly above/below them.
+- Ranks associated and numeric crops before generic ink; does not discard all handwriting merely because a label exists.
+- Uses similar extents and line alignment for crop deduplication instead of large-box containment.
+- Reduces oversized crop padding and rejects blank handwriting crops and detected nonnumeric form words.
+- Preserves every distinct case field for conflict review, even when only one is above 95%.
+- Same physical field still uses the higher engine score; no agreement requirement added.
+- Before/after uses real bounding anchors instead of searching past a conflicting anchor for a matching value. Matching explicit human boundaries may correct automatic middle reads; manual corrections remain protected.
+- One printed region call and at most three handwriting calls; raw readings and selections logged locally.
+Preserved: upper-right-quarter limit, strict complete 08-, review-only queue, SEND FILES, existing data/checkpoints and handwriting-category learning.
+Validation: 24 focused tests passed; three regressions reproduced against 5.6.2. No source case PDFs or complete trained OCR model were available, so real recognition accuracy was not measured.
