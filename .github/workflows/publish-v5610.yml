@@ -5,6 +5,8 @@ on:
       - publish/v5.6.10
     paths:
       - .github/workflows/publish-v5610.yml
+      - tools/refresh_tests_570.py
+      - tools/test_release_570.py
   workflow_dispatch:
 permissions:
   contents: write
