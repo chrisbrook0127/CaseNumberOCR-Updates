@@ -1,0 +1,23 @@
+name: Verify and publish MFCase v5.6.12 draft
+on:
+  push:
+    branches: [publish/v5.6.12]
+    paths: [.github/workflows/finalize-v5612.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify published files then finish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p verify
+          gh release download v5.6.12 --repo "$GITHUB_REPOSITORY" --pattern '*.zip' --dir verify
+          echo "1089ce749e358a19ae5741bcb2731c8de7e059748cae8530c14af50c3170e245  verify/CaseNumberOCR_Update.zip" | sha256sum -c -
+          echo "a26117258cd8aab1f252beb7e1c38294fe58db13c6104ce09e866c5a341f9069  verify/MFCase_Number_OCR_V5.6.12_Full_Online_Install.zip" | sha256sum -c -
+          gh release edit v5.6.12 --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release view v5.6.12 --repo "$GITHUB_REPOSITORY" --json url,assets
