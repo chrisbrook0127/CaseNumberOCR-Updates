@@ -94,11 +94,16 @@ jobs:
               original=z.read(next(n for n in z.namelist() if n.endswith('/case_number_ocr.py'))).decode()
           changed=path.read_text('utf8')
           def methods(s):
-              return {n.name:ast.dump(n,include_attributes=False)
-                      for n in ast.walk(ast.parse(s)) if isinstance(n,ast.FunctionDef)}
+              tree=ast.parse(s)
+              result={n.name:ast.dump(n,include_attributes=False)
+                      for n in tree.body if isinstance(n,ast.FunctionDef)}
+              app=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='App')
+              result.update({'App.'+n.name:ast.dump(n,include_attributes=False)
+                      for n in app.body if isinstance(n,ast.FunctionDef)})
+              return result
           old,new=methods(original),methods(changed)
           affected={name for name in old if old[name]!=new[name]}
-          assert affected=={'_select_primary_case_hit','_automatic_handwritten_4x4'},affected
+          assert affected=={'_select_primary_case_hit','App._automatic_handwritten_4x4','App.__init__'},affected
           assert old.keys()==new.keys()
           assert 'self.app_version = "5.6.11"' in changed
           assert 'root.title("M.F. Case Number OCR — V5.6.11")' in changed
