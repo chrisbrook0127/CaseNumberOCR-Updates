@@ -1,0 +1,10 @@
+MFCase 5.6.2 — large-folder loading
+- Default scan list displays only files needing review. Show all files restores the full unsent list.
+- SCAN processes all pending records independently of visible rows/checkbox selection; explicit targeted rescans remain targeted.
+- Folder enumeration uses scandir, and row updates are batched instead of sorting/counting for every loaded record.
+- No thumbnails are generated for the unused hidden completed table.
+- UI summary counts avoid repeated per-file disk checks; SEND FILES still validates each source.
+- Scanned page pixels are released after processing; detection metadata and original PDFs remain available for on-demand review.
+- Completed and hidden records remain available to before/after and SEND FILES.
+- Existing OCR, upper-right-quarter, strict 08-, 95% threshold, learning, persistence and transfer rules preserved.
+Validation: eight focused tests including 6,000-record mocked-UI loading. Windows/network drive speed not benchmarked.

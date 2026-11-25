@@ -252,7 +252,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.1"
+        self.app_version = "5.6.2"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -384,10 +384,10 @@ class App:
                 except Exception:
                     logging.exception("Could not read saved job state; rebuilding queue")
                     state_error = True
-            pdfs=sorted(
-                (p for p in folder.iterdir()
-                 if p.is_file() and p.suffix.lower()==".pdf"),
-                key=self._natural_pdf_sort_key)
+            with os.scandir(folder) as entries:
+                pdfs=sorted((Path(entry.path) for entry in entries
+                             if entry.name.lower().endswith(".pdf") and entry.is_file()),
+                            key=self._natural_pdf_sort_key)
             self.queue.put(("folder_load_result", generation, year, saved, pdfs, state_error))
         except Exception as exc:
             self.queue.put(("folder_load_error", generation, str(exc)))
@@ -534,6 +534,7 @@ class App:
             messagebox.showwarning(
                 "Saved queue could not be read",
                 "The saved queue file could not be read. The PDFs are still intact; the queue will be rebuilt.")
+        self._bulk_scan_rows=True
         for pdf in pdfs:
             old=saved.get(pdf.name,{})
             sent=False  # A PDF still in the selected root has not been sent to COMPLETED.
@@ -600,21 +601,17 @@ class App:
             if iid in self.records:
                 iid=f"pdf::COMPLETED::{pdf.name}"
             self.records[iid] = item
-            if item["scan_selected"]:
-                self.scan_checked_iids.add(iid)
+            item["scan_selected"]=False  # Selection is for review/rescan, not the scan queue.
             if item["confirmed"] and not item["exported"]:
                 self._insert_completed_row(iid,item)
                 item["completed_iid"]=iid
             else:
                 item["completed_iid"]=None
             self._insert_scan_row(iid,item)
+        self._bulk_scan_rows=False
         self._load_sent_history(saved)
         self.status.config(
-            text=f"Found {len(pdfs)} PDF(s) in this folder. Saved review/export progress restored where available.")
-        pending_files = any(
-            not item.get("exported") and not item.get("confirmed")
-            and item.get("status") != "Moved to BLANKS" and Path(item["path"]).is_file()
-            for item in self.records.values())
+            text=f"{len(pdfs):,} PDFs queued. SCAN processes pending files; the list shows items needing review.")
         self._refresh_scan_button()
         self._refresh_learning_button_state()
         self._refresh_review_controls()
@@ -692,6 +689,9 @@ class App:
                 state=state,style="MFCase.Action.TButton")
             button.grid(row=0,column=c,sticky="ew",padx=2)
             setattr(self,name,button)
+        self.show_all_files_var=tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.review_tab,text="Show all files",variable=self.show_all_files_var,
+                        command=self._rebuild_scan_list).pack(anchor="w")
         self.scan_file_count_label=ttk.Label(self.review_tab,text="0 of 0 selected")
         self.scan_file_count_label.pack(anchor="e",pady=(0,2))
         self.folder_label=ttk.Label(self.review_tab,text="No folder selected")
@@ -1253,7 +1253,9 @@ class App:
             label.config(text=f"{checked:,} of {len(visible):,} selected")
             footer=getattr(self,"scan_displayed_count_label",None)
             if footer is not None:
-                footer.config(text=f"{len(visible):,} files displayed")
+                footer.config(text=f"{len(visible):,} files displayed • {len(self.records):,} in folder • "
+                              f"{sum(1 for r in self.records.values() if r.get('status')=='Not scanned' and not r.get('exported')):,} pending • "
+                              f"{sum(1 for r in self.records.values() if r.get('confirmed') and r.get('manual_approved') and not r.get('exported')):,} completed")
             self._refresh_scan_checkbox_heading()
         except (tk.TclError, AttributeError):
             pass
@@ -1267,6 +1269,9 @@ class App:
         as diagnostic data but never appear as candidate boxes in the UI.
         """
         snippet = record.get("snippet") if record else None
+        if not snippet and record and record.get("preview_meta"):
+            meta=record["preview_meta"]
+            snippet=(meta.get("page_num",0),None,meta.get("label",""),meta.get("rect"),meta.get("candidates",[]))
         if not snippet or len(snippet) < 5 or not isinstance(snippet[4], list):
             return []
         valid = []
@@ -1382,9 +1387,11 @@ class App:
     def _make_scan_preview(self,iid,record):
         from PIL import Image,ImageDraw,ImageFont,ImageTk
         cache_path=self._scan_preview_cache_file(record)
+        if not record.get("snippet") and record.get("preview_meta") and not cache_path.is_file():
+            self._ensure_preview(record)
         snippet=record.get("snippet")
         existing=self._scan_preview_keys.get(iid)
-        key=(str(cache_path),id(snippet),record.get("confirmed"),record.get("candidate"),str(record.get("manual_crop_rect")),record.get("sequence_inferred"))
+        key=(str(cache_path),str(record.get("preview_meta")),record.get("confirmed"),record.get("candidate"),str(record.get("manual_crop_rect")),record.get("sequence_inferred"))
         if existing==key and iid in self._scan_preview_photos:
             return self._scan_preview_photos[iid]
         tile=None
@@ -1441,6 +1448,7 @@ class App:
         photo=ImageTk.PhotoImage(tile)
         self._scan_preview_photos[iid]=photo
         self._scan_preview_keys[iid]=key
+        self._release_page_pixels(record)
         return photo
 
     def _schedule_scan_preview_refresh(self):
@@ -1655,12 +1663,62 @@ class App:
     def _open_preview_review(self,iid):
         return self._open_review_iid(iid)
 
+    def _show_in_scan_list(self, record):
+        if record.get("exported") or record.get("status")=="Moved to BLANKS":
+            return False
+        option=getattr(self,"show_all_files_var",None)
+        if option is not None and option.get():
+            return True
+        return (record.get("status")!="Not scanned" and
+                (bool(record.get("case_draft")) or self._workflow_status(record)!="COMPLETED"
+                 or bool(record.get("sequence_conflict")) or bool(record.get("export_error"))))
+
+    def _rebuild_scan_list(self):
+        # Batch all row changes; never sort/count the whole table per row.
+        self._bulk_scan_rows=True
+        try:
+            for iid,record in self.records.items():
+                self._insert_scan_row(iid,record)
+        finally:
+            self._bulk_scan_rows=False
+        if self._table_sort_state.get("scan"):
+            self._apply_table_sort("scan")
+        self._update_scan_file_count()
+        self._schedule_scan_preview_refresh()
+
+    def _pending_scan_items(self, only_iids=None):
+        """The scan queue is independent of visible rows and selection."""
+        force=getattr(self,"_rescan_force_iids",set())
+        return [(iid,rec) for iid,rec in self.records.items()
+                if (only_iids is None or iid in only_iids)
+                and (not rec.get("confirmed") or iid in force)
+                and not rec.get("exported") and rec.get("status")!="Moved to BLANKS"
+                and (iid in force or rec.get("status")=="Not scanned"
+                     or str(rec.get("status","")).startswith("Scan error:"))
+                and Path(rec["path"]).parent==Path(self.folder)]
+
+    @staticmethod
+    def _release_page_pixels(record):
+        snippet=record.get("snippet")
+        if snippet:
+            record["preview_meta"]={"page_num":snippet[0],"label":snippet[2],
+                "rect":list(snippet[3]) if snippet[3] else None,
+                "candidates":snippet[4] if len(snippet)>4 else []}
+            record["snippet"]=None
+
     def _insert_scan_row(self, iid, record, candidate_override=None, score_override=None):
         """Keep case number and PDF visible until explicit user transfer."""
         if not hasattr(self,"tree"):return
         if self.folder and Path(record["path"]).parent != Path(self.folder):
             if self.tree.exists(iid):
                 self.tree.delete(iid)
+            return
+        if not self._show_in_scan_list(record):
+            if self.tree.exists(iid):
+                self.tree.delete(iid)
+                self._schedule_scan_preview_refresh()
+            if not getattr(self,"_bulk_scan_rows",False):
+                self._update_scan_file_count()
             return
         proposed=(record.get("case_draft") or
                   (record.get("confirmed") if record.get("manual_approved") and record.get("confirmed")
@@ -1682,9 +1740,11 @@ class App:
         else:
             self.tree.insert("","end",iid=iid,values=values,
                              tags=("scanning_now",) if iid==getattr(self,"_active_scan_iid",None) else ())
-        if iid in self.scan_checked_iids and iid not in self.tree.selection():
+        if not getattr(self,"_bulk_scan_rows",False) and iid in self.scan_checked_iids and iid not in self.tree.selection():
             self.tree.selection_add(iid)
 
+        if getattr(self,"_bulk_scan_rows",False):
+            return
         btn=getattr(self,"send_selected_btn",None)
         if btn is not None:
             allowed=(not self.busy and not self.export_busy and not self._training_blocks_work()
@@ -1963,7 +2023,7 @@ class App:
             if path.suffix.lower()!=".pdf":
                 continue
             try:
-                if path.is_file() and path.parent.resolve()==root.resolve() and self.tree.exists(iid):
+                if path.parent==root:
                     items.append(iid)
             except OSError:
                 pass
@@ -2020,14 +2080,7 @@ class App:
         if not self._startup_ready:
             self.scan_btn.config(state="disabled")
             return
-        candidates = any(
-            iid in self.scan_checked_iids and self.tree.exists(iid)
-            and not rec.get("confirmed") and not rec.get("exported")
-            and rec.get("status") != "Moved to BLANKS"
-            and (rec.get("status") == "Not scanned"
-                 or str(rec.get("status", "")).startswith("Scan error:"))
-            and Path(rec["path"]).is_file()
-            for iid, rec in self.records.items())
+        candidates = bool(self._pending_scan_items())
         self.scan_btn.config(state="normal" if candidates or getattr(self,"_sequence_review_pending",False) else "disabled")
         self._refresh_rescan_button()
         button=getattr(self,"send_selected_btn",None)
@@ -4375,11 +4428,6 @@ class App:
         if not self.folder or not self.records:
             self._scan_blocked("Click SELECT FILES and choose a folder containing PDFs first.")
             return
-        # Read the selection now; do not depend on a queued TreeviewSelect event.
-        selected=set(self.tree.selection())
-        self.scan_checked_iids=selected
-        for iid,rec in self.records.items():
-            rec["scan_selected"]=iid in selected
         self.scan_year_prefix = self._year_prefix()
         if pymupdf is None or easyocr is None or np is None:
             messagebox.showerror(
@@ -4393,19 +4441,7 @@ class App:
                 encoding="utf-8")
         except Exception:
             self._log("Could not save case-year setting")
-        self.scan_items = [
-            (iid, rec) for iid, rec in self.records.items()
-            if iid in self.scan_checked_iids
-            and (only_iids is None or iid in only_iids)
-            and self.tree.exists(iid)
-            and (not rec.get("confirmed") or iid in self._rescan_force_iids)
-            and not rec.get("exported")
-            and rec.get("status") != "Moved to BLANKS"
-            and (iid in self._rescan_force_iids or rec.get("status") == "Not scanned"
-                 or str(rec.get("status", "")).startswith("Scan error:"))
-            and Path(rec["path"]).is_file()
-            and Path(rec["path"]).parent.resolve() == self.folder.resolve()
-        ]
+        self.scan_items = self._pending_scan_items(only_iids)
         self.scan_items.sort(key=lambda pair: self._natural_pdf_sort_key(pair[1]["path"]))
         if not self.scan_items:
             if getattr(self,"_sequence_review_pending",False):
@@ -6055,13 +6091,13 @@ class App:
                          status=r.get("status"),candidate=normalized_candidate,
                          score=float(score or 0),auto_approved=auto_done,
                          source=r.get("scan_source"),ambiguous=r.get("scan_ambiguous"))
-                    if not auto_done and self.tree.exists(iid):
-                        self._insert_scan_row(iid, r)
+                    self._insert_scan_row(iid, r)
                     self._scan_progress_update(idx,"SCANNING")
                     self.status.config(text=f"Scanned {idx} of {len(self.scan_items)} PDF(s): {Path(r['path']).name}")
                     self._incremental_sequence_check(iid)
                     self._refresh_review_controls()
                     self._update_completed_count()
+                    self._release_page_pixels(r)
                     self._save_state()
                 elif kind == "export_result":
                     _, iid, source_name, destination, error = msg
@@ -6733,6 +6769,10 @@ class App:
                 "☑" if iid in self.completed_checked_iids else "☐")
 
     def _insert_completed_row(self, iid, record):
+        # This legacy table is hidden in the unified UI. Export uses records,
+        # so do not render thousands of invisible completed-page thumbnails.
+        if hasattr(self,"show_all_files_var"):
+            return
         if self.completed_tree.exists(iid):
             stale = self._completed_thumbnail_path(record)
             if stale and stale.exists():
@@ -7100,13 +7140,11 @@ class App:
     def _update_completed_count(self):
         approved = sum(
             1 for r in self.records.values()
-            if r.get("confirmed") and r.get("manual_approved") and not r.get("exported")
-            and r["path"].is_file())
+            if r.get("confirmed") and r.get("manual_approved") and not r.get("exported"))
         needs_review = sum(
             1 for r in self.records.values()
             if r.get("confirmed") and r.get("auto_labeled")
-            and not r.get("manual_approved") and not r.get("exported")
-            and r["path"].is_file())
+            and not r.get("manual_approved") and not r.get("exported"))
         self._refresh_completed_checkbox_heading()
         selected_count = len(self.completed_checked_iids)
         self.completed_count.config(

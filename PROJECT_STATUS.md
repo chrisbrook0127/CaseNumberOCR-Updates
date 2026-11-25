@@ -1,6 +1,7 @@
 # MFCase status
-Baseline: published 5.6.0 installer. Development/release: 5.6.1.
-Scope: upper-right quarter scanning and case-label priority within bounded OCR calls.
-Preserved: either-engine literal 08-, 95% approval, before/after, learning and rename/send workflows.
-Validation: 16 focused rules, call limits, PDF preservation and region tests; package and updater checks.
-Limitations: no claim of perfect recognition; actual Windows UI and trained-model screenshot recognition not tested here.
+Baseline: 5.6.1. Release: 5.6.2.
+Completed: review-only default display, independent scan queue, batched list updates, no hidden completed thumbnails, bounded retained page pixels, fewer UI disk checks.
+Preserved: upper-right-quarter OCR, 08- validation, 95% approval, before/after, learning, saved state and SEND FILES safety checks.
+Validation: eight focused tests; 6,000-record mocked-UI load; Python syntax and update integrity.
+Limitations: actual Windows/network-drive load time not measured. OCR throughput and full state-file writes remain separate costs.
+Next: assess a real large-folder work log.
