@@ -1,0 +1,9 @@
+MFCase v5.6.5 — strict header-case-field OCR and 95% automatic approvals
+- Correct high-confidence primary case selections ahead of unrelated OCR.
+- Ignore weak or different-line 08- guesses when evaluating conflicts.
+- Retain manual review for multiple >=95% credible competing values in the same physical field.
+- Literal printed 08- reads at >=95% outrank hallucinated model-only variants of the same box.
+- Only OCR readings of complete 08- followed by 1–7 digits qualify.
+- Both printed and handwritten OCR remain active inside the strict automatic quarter-page region.
+- Full-page manual review, learning, SEND FILES and file trace history remain unchanged.
+- No private PDFs, model data or work logs are included in the release.

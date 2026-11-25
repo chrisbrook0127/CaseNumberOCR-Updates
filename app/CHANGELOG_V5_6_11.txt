@@ -1,0 +1,4 @@
+MFCase v5.6.11 — location-selection adjustment only.
+- Prioritize the complete case-number field immediately right of INCIDENT NO./NUMBER/#.
+- Keep unlabeled printed/handwritten 08- candidates and the strict upper-right quarter.
+- Do not change OCR engines, model training, 95% approval, before/after, review, or SEND FILES.

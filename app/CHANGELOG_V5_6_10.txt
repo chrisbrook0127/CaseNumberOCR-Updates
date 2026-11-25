@@ -1,0 +1,6 @@
+MFCase v5.6.10 — restored v5.6.5 before/after anchor strategy.
+- Matching manually confirmed boundaries may correct conflicting automatic approvals between them.
+- Mixed manual/automatic and automatic/automatic boundaries remain supported.
+- Inferred numbers never serve as new anchors.
+- Keep v5.6.9 automatic-anchor recognition and sent-file-history cache.
+- No OCR, learning, review, sending, file-history, or UI behavior changed.

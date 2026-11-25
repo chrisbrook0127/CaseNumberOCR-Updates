@@ -1,0 +1,9 @@
+MFCase V5.6.13 — approved learning and OCR-budget update
+Baseline: user-designated V5.6.12 full installer.
+- Top circular training indicator for manual and automatic runs, including stopping.
+- Unchanged, unambiguous automatic 95%+ completions contribute location-only observations after successful SEND FILES.
+- Automatic observations are separate from handwriting labels and cannot override manual crop geometry.
+- One printed-region call and three handwriting document reads per page across learned and fallback locations; reuse identical images and quarter detections.
+- Existing one-time model negative-control checks remain separate from document reads.
+- Existing examples, crops, models, PDF content and approval/sequence thresholds are preserved.
+Validation: 88 automated tests passed. No real-model recognition accuracy or Windows GUI validation claimed.

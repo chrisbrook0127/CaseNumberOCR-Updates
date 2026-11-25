@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title M.F. Case Number OCR - Setup V5.6.0
+title M.F. Case Number OCR - Setup V5.6.7
 set "PYTHON_EXE="
 set "APP_HOME=%~dp0"
-echo M.F. CASE NUMBER OCR V5.6.0 - INSTALL / REPAIR
+echo M.F. CASE NUMBER OCR V5.6.7 - INSTALL / REPAIR
 echo.
 if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
 if not defined PYTHON_EXE (

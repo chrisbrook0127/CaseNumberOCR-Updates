@@ -1,0 +1,10 @@
+MFCase v5.6.6 — simpler upper-right-quarter automatic OCR
+- Search only the right half and upper half; manual review remains full-page.
+- Printed EasyOCR OR handwritten TrOCR at >=95% can complete independently.
+- INCIDENT NO./NUMBER/# is an optional location clue, not an approval gate.
+- Remove top-24%/right-82% artificial subregion preferences.
+- Do not let weak variants veto one verified high-confidence reading.
+- Preserve same-field high-confidence conflict review and literal 08- requirement.
+- Run SCAN without requiring the separate learning storage to be connected.
+- Preserve latest full-list option, all scan UI, SEND FILES, before/after and learning data.
+- No private PDFs, model files, training data, or logs are included.

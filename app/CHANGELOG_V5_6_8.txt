@@ -1,0 +1,7 @@
+MFCase v5.6.9 — interchangeable manual/automatic anchors
+- Use exactly the nearest independently COMPLETED file before and after.
+- Manual and automatic completions have identical boundary priority.
+- Never skip over a nearer conflicting completed case for a farther manual match.
+- Independently confirmed auto and manual records cannot be overwritten by inference.
+- Inferred results cannot serve as new anchors.
+- Preserve long gaps, sent-file history, OCR, learning and SEND FILES.

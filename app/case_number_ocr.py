@@ -6,7 +6,7 @@ The program NEVER silently renames an uncertain case number.
 from __future__ import annotations
 import os, re, shutil, threading, queue, json, logging, time, math, hashlib
 import sys, subprocess, tempfile, urllib.request, urllib.error, zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from bisect import bisect_left, bisect_right
 from time import perf_counter
 from pathlib import Path
@@ -69,40 +69,30 @@ INCIDENT_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9|])(08\s*-\s*[0-9]{1,7})(?![A-Za
 
 
 def _select_primary_case_hit(hits, source, image_shape):
-    """Choose a physical case-number location before scoring OCR variants.
+    """Choose the strongest complete, physically located 08- field read.
 
-    The true handwritten upper-right margin is right of fax page counters,
-    such as '122 P.005/015'. A high-confidence fax interpretation cannot
-    beat the real case-number box merely by having a greater OCR score.
+    A nearby INCIDENT NO./NUMBER/# is a tie-breaking clue, never a gate.
+    Neither EasyOCR nor TrOCR must agree with the other engine.
     """
     if not hits:
-        raise ValueError("Cannot select a candidate from an empty list")
-    height,width=image_shape[:2]
-    def engine_quality(hit):
-        engines={str(v) for v in hit.get("engines") or []}
-        raw=any(v=="EasyOCR" or
-                (v.startswith("EasyOCR-") and "enhanced" not in v.lower())
-                for v in engines)
-        agree=any(v.startswith("TrOCR") for v in engines) and raw
-        return (bool(hit.get("box_verified") and hit.get("box_rect")),
-                float(hit.get("score") or 0),agree,raw)
-    if source in ("fallback","header"):
-        margin=[]
-        for h in hits:
-            rect=h.get("rect")
-            if not rect:
-                continue
-            x0,y0,x1,y1=map(float,rect)
-            # Printed fax counters and body numbers are left of the
-            # hand-marked case number at the very top-right edge.
-            if ((x0+x1)/2>=width*0.82 and y0<=height*0.24
-                    and 0<=y0<y1):
-                margin.append(h)
-        if margin:
-            return max(margin,key=lambda h:(
-                engine_quality(h),
-                (float(h["rect"][0])+float(h["rect"][2]))/(2*width)))
-    return max(hits,key=engine_quality)
+        raise ValueError("Cannot select from an empty candidate list")
+    def ranking(hit):
+        case=normalize_case_number(hit.get("number"))
+        rect=hit.get("box_rect") or hit.get("rect")
+        located=bool(hit.get("box_verified") and rect and len(rect)==4)
+        try: score=float(hit.get("score") or 0)
+        except (ValueError,TypeError): score=0.0
+        if not math.isfinite(score):score=0.0
+        label=hit.get("label_type") in ("incident","case")
+        # Inside the upper-right quarter, the number immediately right of
+        # INCIDENT NO./NUMBER/# is the preferred PHYSICAL field.  A detected
+        # label is optional, but where present its verified number comes
+        # before OCR of unrelated page text or form fields.
+        return (bool(located and CASE_RE.fullmatch(case)),
+                bool(located and label),
+                -float(rect[1]) if located else float('-inf'),
+                score>=95.0, score)
+    return max(hits,key=ranking)
 
 
 def _original_pdf_sequence_key(path):
@@ -165,10 +155,117 @@ def _mfcase_export_case_name(value):
     return f"{year}-{case_digits}"
 
 
+
+
+def _learned_crop_clusters(learning_data):
+    """Cluster ALL retained verified crop boxes in normalized full-page space.
+
+    Historical field_regions used a physical upper-right 4-inch square rather
+    than full-page coordinates.  New crops are full-page normalized.  Preserve
+    both; never rewrite or discard legacy examples to build this index.
+    """
+    data=learning_data if isinstance(learning_data,dict) else {}
+    full=data.get("field_regions_full_page",[]) or []
+    old=data.get("field_regions",[]) or []
+    source_has_full={str(x.get("source_pdf") or "") for x in full if isinstance(x,dict)
+                     and x.get("source_pdf")}
+    samples=[]
+    seen_for_source=set()
+    for collection,legacy in ((full,False),(old,True)):
+        for item in collection:
+            if not isinstance(item,dict):continue
+            if legacy and item.get("source_pdf") in source_has_full:
+                continue  # The same manual box is already stored precisely.
+            coords=item.get("rect_norm")
+            if not isinstance(coords,(list,tuple)) or len(coords)!=4:continue
+            try:x0,y0,x1,y1=(float(v) for v in coords)
+            except (TypeError,ValueError):continue
+            if not all(math.isfinite(v) for v in (x0,y0,x1,y1)):continue
+            if not (0<=x0<x1<=1 and 0<=y0<y1<=1):continue
+            if legacy:
+                # Old coordinates refer to a 4 x 4 inch window on the upper
+                # right of a standard 8.5 x 11 inch scanned report.  This is
+                # a best-effort migration; old records did not save page size.
+                rw=min(1.,4./8.5);rh=min(1.,4./11.)
+                x0,x1=1.-rw+rw*x0,1.-rw+rw*x1
+                y0,y1=rh*y0,rh*y1
+            cx,cy=(x0+x1)/2,(y0+y1)/2
+            width,height=x1-x0,y1-y0
+            if width<.007 or height<.004 or width>.9 or height>.55:continue
+            # Saving a correction repeatedly for one PDF must not skew the
+            # learned mean by duplicating the same selection.
+            source=str(item.get("source_pdf") or "")
+            if source:
+                key=(source,round(cx,2),round(cy,2))
+                if key in seen_for_source:continue
+                seen_for_source.add(key)
+            samples.append((cx,cy,width,height,source))
+    # Deterministic nearest-center grouping: all examples contribute, not just
+    # the most recent one.  Different form types produce different clusters.
+    groups=[]
+    for sample in samples:
+        cx,cy,w,h,_=sample
+        choices=[]
+        for index,group in enumerate(groups):
+            mx=sum(x[0] for x in group)/len(group)
+            my=sum(x[1] for x in group)/len(group)
+            mw=sorted(x[2] for x in group)[len(group)//2]
+            mh=sorted(x[3] for x in group)[len(group)//2]
+            delta=((cx-mx)**2+(cy-my)**2)**.5
+            similar=(max(w,mw)/max(.001,min(w,mw)) <= 3.0 and
+                     max(h,mh)/max(.001,min(h,mh)) <= 3.0)
+            if delta<=.08 and similar:choices.append((delta,index))
+        if choices:groups[min(choices)[1]].append(sample)
+        else:groups.append([sample])
+    output=[]
+    for group in groups:
+        # Trim extreme sizes inside a group, without throwing away positions
+        # or counting only a sample subset.
+        def stable_average(values):
+            ordered=sorted(values)
+            cut=int(len(ordered)*.10) if len(ordered)>=10 else 0
+            trimmed=ordered[cut:len(ordered)-cut] if cut else ordered
+            return sum(trimmed)/len(trimmed)
+        x=stable_average([v[0] for v in group])
+        y=stable_average([v[1] for v in group])
+        w=stable_average([v[2] for v in group])
+        h=stable_average([v[3] for v in group])
+        rect=(max(0.,x-w/2),max(0.,y-h/2),min(1.,x+w/2),min(1.,y+h/2))
+        compact=sum((v[0]-x)**2+(v[1]-y)**2 for v in group)/len(group)
+        output.append(dict(rect_norm=rect,count=len(group),variance=compact))
+    output.sort(key=lambda v:(-v['count'],v['variance'],v['rect_norm'][1]))
+    automatic=data.get("auto_field_regions_full_page",[]) or []
+    if automatic:
+        auto_groups=_learned_crop_clusters({"field_regions_full_page":automatic})
+        # Manual crop geometry always leads; automatic observations never
+        # shift its average or outvote it by volume.
+        for item in auto_groups:
+            a,b,c,d=item['rect_norm']
+            if not any(abs((a+c-r['rect_norm'][0]-r['rect_norm'][2])/2)<.08
+                       and abs((b+d-r['rect_norm'][1]-r['rect_norm'][3])/2)<.08
+                       for r in output):
+                output.append(item)
+    return output
+
+
+def _learned_crop_rectangles(learning_data,width,height):
+    """Translate every ranked crop cluster into a padded full-page scan box."""
+    boxes=[]
+    for item in _learned_crop_clusters(learning_data):
+        a,b,c,d=item['rect_norm']
+        dx=max(8.,(c-a)*width*.10)
+        dy=max(5.,(d-b)*height*.18)
+        rect=(max(0,int(a*width-dx)),max(0,int(b*height-dy)),
+              min(width,int(math.ceil(c*width+dx))),
+              min(height,int(math.ceil(d*height+dy))))
+        if rect[2]-rect[0]>=35 and rect[3]-rect[1]>=10:
+            boxes.append(dict(rect=rect,count=item['count'],rect_norm=item['rect_norm']))
+    return boxes
+
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.6.0")
+        root.title("M.F. Case Number OCR — V5.6.13")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -252,7 +349,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.4"
+        self.app_version = "5.6.13"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -560,6 +657,7 @@ class App:
                 "original_path": old.get("original_path",""),
                 "export_name": old.get("export_name", ""),
                 "preview_meta": old.get("preview_meta", {}),
+                "pending_auto_location": old.get("pending_auto_location"),
                 "manual_crop_rect": tuple(old.get("manual_crop_rect", [])) if old.get("manual_crop_rect") else None,
                 "manual_crop_origin": old.get("manual_crop_origin",""),
                 "training_type": old.get("training_type", "unsure"),
@@ -646,10 +744,13 @@ class App:
         self.settings_nav_btn.pack(side="right",padx=(6,0))
         # The local training spinner never covers or disables the file list.
         self.learning_activity = ttk.Frame(header)
-        ttk.Label(self.learning_activity, text="LOCAL LEARNING", font=("Segoe UI",9,"bold")).pack(side="left",padx=(0,6))
-        self.learning_activity_bar = ttk.Progressbar(self.learning_activity,
-            mode="indeterminate", length=70)
-        self.learning_activity_bar.pack(side="left")
+        self.learning_activity_label = ttk.Label(self.learning_activity,
+            text="LOCAL LEARNING", font=("Segoe UI",9,"bold"))
+        self.learning_activity_label.pack(side="left",padx=(0,6))
+        self.learning_spinner = tk.Canvas(self.learning_activity,width=22,height=22,
+            highlightthickness=0)
+        self.learning_spinner.pack(side="left")
+        self._learning_spinner_job = None
         ttk.Separator(main, orient="horizontal").pack(fill="x", pady=(8, 7))
 
         self.view_container = ttk.Frame(main)
@@ -882,17 +983,35 @@ class App:
         """Only deliberate/manual training may block a competing task."""
         return bool(self.trocr_training and not getattr(self,"_learning_auto_run",False))
 
+    def _spin_learning_indicator(self):
+        self._learning_spinner_job = None
+        if not getattr(self, "_learning_indicator_active", False):
+            return
+        angle=(getattr(self,"_learning_spinner_angle",0)+30)%360
+        self._learning_spinner_angle=angle
+        self.learning_spinner.delete("all")
+        self.learning_spinner.create_arc(3,3,19,19,start=angle,extent=260,
+            style="arc",outline="#168447",width=3)
+        stopping=getattr(self,"learning_stop_event",None)
+        self.learning_activity_label.config(text="LEARNING STOPPING" if
+            stopping is not None and stopping.is_set() else "LOCAL LEARNING")
+        self._learning_spinner_job=self.root.after(80,self._spin_learning_indicator)
+
     def _set_background_learning_indicator(self, enabled):
-        """Small non-modal spinner; tkinter widgets are updated on the UI thread."""
+        """Show the same UI-thread animation for manual and idle training."""
         frame=getattr(self,"learning_activity",None)
         if frame is None:
             return
+        self._learning_indicator_active=bool(enabled)
+        job=getattr(self,"_learning_spinner_job",None)
+        if job is not None:
+            self.root.after_cancel(job)
+            self._learning_spinner_job=None
         if enabled:
             if not frame.winfo_manager():
                 frame.pack(side="right",padx=8)
-            self.learning_activity_bar.start(80)
+            self._spin_learning_indicator()
         else:
-            self.learning_activity_bar.stop()
             frame.pack_forget()
 
     def _yield_background_learning(self, reason="user work"):
@@ -907,7 +1026,7 @@ class App:
         self._auto_learning_interrupted=True
         self.learning_stop_event.set()
         self.learning_pause_event.set()
-        self._set_background_learning_indicator(False)
+        # Keep the spinner visible until the worker reports completion.
         self._log("Background learning yielding to %s; saved examples retained",reason)
         return True
 
@@ -2203,6 +2322,7 @@ class App:
             payload["files"][path.name] = {
                 "sequence_review_pending": bool(getattr(self,"_sequence_review_pending",False)),
                 "candidate": rec.get("candidate", ""),
+                "pending_auto_location": rec.get("pending_auto_location"),
                 "case_draft": rec.get("case_draft", ""),
                 "confirmed": rec.get("confirmed", ""),
                 "status": rec.get("status", ""),
@@ -2407,17 +2527,11 @@ class App:
 
     @staticmethod
     def _is_corner_case_rect(rect,image):
-        """Require the physical upper-right handwritten case-number zone."""
-        if rect is None or image is None:
-            return False
-        try:
-            h,w=image.shape[:2]
-            x0,y0,x1,y1=map(float,rect)
-            return (x0>=0 and y0>=0 and x1>x0 and y1>y0
-                    and (x0+x1)/2>=w*.82
-                    and y0<=h*.24 and x1<=w+6)
-        except (TypeError,ValueError,AttributeError):
-            return False
+        """Compatibility name: the complete upper-right QUARTER qualifies.
+
+        Do not reimpose the earlier 82% x / 24% y extra restriction.
+        """
+        return App._is_in_4x4_rect(rect,image)
 
     @staticmethod
     def _is_in_4x4_rect(rect,image):
@@ -2456,10 +2570,61 @@ class App:
         return strong_margin
 
     def _resolve_ocr_alternates(self,hits,kind,best):
-        """Retain competing reads inside the selected physical case field."""
-        # Physical-location filtering already occurred. Preserve all different
-        # readings here so engine disagreement cannot silently authorize a case.
-        return hits
+        """Conflicts require credible competing OCR of the *same* case field.
+
+        OCR can hallucinate case-shaped strings from unrelated text elsewhere
+        in the allowed 4x4. Those are diagnostic candidates, not vetoes of a
+        physically located, high-confidence header number. A genuine second
+        95%+ reading in the same field remains a manual-review conflict.
+        """
+        if not best:
+            return hits
+        chosen_rect=best.get("box_rect") or best.get("rect")
+        if not chosen_rect or len(chosen_rect)!=4:
+            return [best]
+        x0,y0,x1,y1=map(float,chosen_rect)
+        height=max(1.,y1-y0)
+        best_case=_case_identity(best.get("number"))
+        best_score=float(best.get("score") or 0.)
+        primary_engines=set(best.get("engines") or [])
+        # One verified literal printed 08- read at the locked 95% threshold
+        # outranks a model-only alternative from exactly the same ink. Do not
+        # make this shortcut for handwritten or inferred printed readings.
+        exact_printed=(best_score>=95.0 and any(e in
+            ("EasyOCR","EasyOCR-joined") for e in primary_engines))
+        retained=[best]
+        for hit in hits:
+            if hit is best:
+                continue
+            if _case_identity(hit.get("number"))==best_case:
+                # Duplicate identity: selected field already has this value.
+                continue
+            rect=hit.get("box_rect") or hit.get("rect")
+            if (not hit.get("box_verified") or not rect or len(rect)!=4 or
+                    float(hit.get("score") or 0.)<95.):
+                continue
+            ax0,ay0,ax1,ay1=map(float,rect)
+            another_h=max(1.,ay1-ay0)
+            common_h=max(0.,min(y1,ay1)-max(y0,ay0))
+            same_line=(common_h/min(height,another_h)>=.5)
+            x_gap=max(0.,max(x0,ax0)-min(x1,ax1))
+            # An independent form field below the case number is not an OCR
+            # alternative. Similar or overlapping numbered ink on the SAME
+            # physical line is a real conflict if both are high-confidence.
+            same_field=same_line and x_gap<=max(18.,.8*max(height,another_h))
+            if not same_field:
+                continue
+            alt_engines=set(hit.get("engines") or [])
+            if exact_printed and not any(e in
+                   ("EasyOCR","EasyOCR-joined") for e in alt_engines):
+                self._diag_event("printed_shortcut_ignored_model_variant",
+                                 chosen=best.get("number"),alternative=hit.get("number"))
+                continue
+            retained.append(hit)
+        if len(retained)<len(hits):
+            self._diag_event("case_field_alternates_filtered",source=kind,
+                original=self._diag_hits(hits),kept=self._diag_hits(retained))
+        return retained
 
     def _diag_field_filter(self,hits,source):
         """Keep valid 08- candidates without discarding competing readings."""
@@ -2853,7 +3018,12 @@ class App:
                     if key not in known_full:
                         stored_full.append(entry)
                         known_full.add(key)
-                self.learning_data["field_regions_full_page"]=stored_full[-200:]
+                self.learning_data["field_regions_full_page"]=stored_full
+                auto={x["source_id"]:x for x in previous.get("auto_field_regions_full_page",[])
+                      if isinstance(x,dict) and x.get("source_id")}
+                auto.update({x["source_id"]:x for x in self.learning_data.get("auto_field_regions_full_page",[])
+                             if isinstance(x,dict) and x.get("source_id")})
+                self.learning_data["auto_field_regions_full_page"]=list(auto.values())
                 self.learning_data["corrections"] = {**previous.get("corrections", {}), **self.learning_data.get("corrections", {})}
                 for field in ("trocr_v3_attempted_ids", "trocr_v3_trained_ids"):
                     self.learning_data[field] = sorted(set(previous.get(field, [])) | set(self.learning_data.get(field, [])))
@@ -2898,6 +3068,7 @@ class App:
                 "trocr_v2_validation": loaded.get("trocr_v2_validation", {}),
                 "field_regions": loaded.get("field_regions", []),
                 "field_regions_full_page": loaded.get("field_regions_full_page", []),
+                "auto_field_regions_full_page": loaded.get("auto_field_regions_full_page", []),
                 "training_type_validation": loaded.get("training_type_validation", {}),
                 "last_training_summary": loaded.get("last_training_summary", {}),
                 "trocr_v3_attempted_ids": list(loaded.get("trocr_v3_attempted_ids", [])),
@@ -3178,28 +3349,27 @@ class App:
                 with self.data_lock:
                     regions = self.learning_data.setdefault("field_regions", [])
                     regions.append(region)
-                    # Bound the spatial memory file while preserving recent variety.
-                    self.learning_data["field_regions"] = regions[-200:]
+                    # Keep every verified crop: spatial planning groups them
+                    # instead of discarding history after 200 examples.
+                    self.learning_data["field_regions"] = regions
 
-        # Remember any reviewer-verified crop OUTSIDE the default 4x4.
-        # Normalize to the entire page and limit the stored coordinates.
+        # Preserve EVERY verified manual crop, both inside and outside the
+        # default upper-right quarter, normalized to the ENTIRE original page.
+        # This is coordinate learning only; neural model training stays separate.
         if (snippet and snippet[1] is not None and field_rect
                 and record.get("manual_crop_origin")=="drawn"):
             ph,pw=snippet[1].shape[:2]
-            sx=pw-min(pw,int(round(4*72*2.2)))
-            sh=min(ph,int(round(4*72*2.2)))
             bx0,by0,bx1,by1=map(float,field_rect)
-            if bx0<sx or by1>sh:
-                region={"rect_norm":[round(max(0,min(1,bx0/pw)),6),
-                            round(max(0,min(1,by0/ph)),6),
-                            round(max(0,min(1,bx1/pw)),6),
-                            round(max(0,min(1,by1/ph)),6)],
+            if 0<=bx0<bx1<=pw and 0<=by0<by1<=ph:
+                region={"rect_norm":[round(bx0/pw,6),round(by0/ph,6),
+                                      round(bx1/pw,6),round(by1/ph,6)],
+                        "source_pdf":record.get("path").name if record.get("path") else "",
                         "confirmed_case_number":confirmed_number,
-                        "saved_at":datetime.now().isoformat(timespec="seconds")}
+                        "saved_at":datetime.now().isoformat(timespec="seconds"),
+                        "source":"reviewer-confirmed-manual-crop"}
                 with self.data_lock:
                     regions=self.learning_data.setdefault("field_regions_full_page",[])
                     regions.append(region)
-                    self.learning_data["field_regions_full_page"]=regions[-200:]
 
         example = {
             "image": image_rel,
@@ -3325,16 +3495,35 @@ class App:
         return self._auto_label_block_reason(score, engine_agreement, candidate) is None
 
     def _sequence_case_number(self, record):
-        """Only independently confirmed cases can anchor; inference never chains."""
+        """Independent manual and machine completions have equal anchor priority."""
         if (not record or record.get("sequence_inferred") or
-                record.get("case_draft") or record.get("sequence_excluded") or record.get("scan_ambiguous") or
-                record.get("sequence_conflict") or
+                record.get("case_draft") or
                 str(record.get("status") or "").startswith("Unverified")):
             return None
-        if not (record.get("auto_labeled") or record.get("manual_approved")):
+        status=str(record.get("status") or "").lower()
+        human_verified=(bool(record.get("manual_approved")) and
+                        not bool(record.get("auto_labeled")))
+        # Older verified automatic records may lack manual_approved=True.
+        # A merely suggested/unapproved OCR number is never an anchor.
+        machine_verified=bool(record.get("auto_labeled")) and (
+            bool(record.get("manual_approved")) or
+            bool(record.get("exported")) or
+            "auto verified" in status or
+            "automatically approved" in status or
+            "ocr approved" in status or
+            status.startswith("completed"))
+        if not (human_verified or machine_verified):
             return None
-        case = normalize_case_number(record.get("confirmed") or "")
-        return _case_identity(case)
+        # Human corrections override stale OCR ambiguity flags. Machine
+        # results must have no unresolved OCR conflicts or exclusions.
+        if not human_verified and (record.get("scan_ambiguous") or
+                                   record.get("sequence_conflict") or
+                                   record.get("sequence_excluded")):
+            return None
+        number=normalize_case_number(record.get("confirmed") or "")
+        if not CASE_RE.fullmatch(number):
+            return None
+        return _case_identity(number)
 
     @staticmethod
     def _initial_review_reading(record, candidate_values, sequence_values, sequence_message):
@@ -3426,9 +3615,9 @@ class App:
         """
         if not self.folder:
             return 0
-        anchors=tuple(sorted((iid,self._sequence_case_number(r),
-                    bool(r.get("manual_approved") and not r.get("auto_labeled")))
-                    for iid,r in self.records.items() if self._sequence_case_number(r)))
+        order=self._sequence_order_with_sent_history()
+        anchors=tuple((iid,self._sequence_case_number(rec))
+                      for iid,rec in order if self._sequence_case_number(rec))
         if anchors==getattr(self,"_last_sequence_signature",None):
             return 0
         self._last_sequence_signature=anchors
@@ -3440,7 +3629,7 @@ class App:
             return self._apply_sequence_consensus()
         case=self._sequence_case_number(order[index][1])
         if not case:
-            return 0
+            return self._apply_sequence_consensus()
         humans=[j for j,(_iid,r) in enumerate(order)
                 if self._sequence_case_number(r) and r.get("manual_approved")
                 and not r.get("auto_labeled")]
@@ -3835,9 +4024,26 @@ class App:
     def _trocr_read(self, image):
         return self._trocr_read_scored(image)[0]
 
+    def _budgeted_ocr(self, engine, image, callback, empty):
+        budget=getattr(self,"_page_ocr_budget",None)
+        if budget is None or budget["thread"]!=threading.get_ident():
+            return callback()
+        arr=np.asarray(image)
+        key=(engine,arr.shape,str(arr.dtype),hashlib.sha256(arr.tobytes()).digest())
+        if key in budget["cache"]:
+            return budget["cache"][key]
+        limit=1 if engine=="printed" else 3
+        if budget[engine]>=limit:
+            return empty
+        budget[engine]+=1
+        result=callback()
+        budget["cache"][key]=result
+        return result
+
     def _trocr_read_scored(self, image):
         with self._perf_measure("trocr"):
-            return self._trocr_read_scored_impl(image)
+            return self._budgeted_ocr("handwriting",image,
+                lambda:self._trocr_read_scored_impl(image),("",0.0))
 
     def _trocr_read_scored_impl(self, image):
         if self.trocr_error:
@@ -4037,8 +4243,7 @@ class App:
         if not automatic:
             self.scan_btn.config(state="disabled")
             self._open_training_progress()
-        else:
-            self._set_background_learning_indicator(True)
+        self._set_background_learning_indicator(True)
         self.finish_batch_btn.config(state="disabled")
         self._update_training_progress(0, "Preparing the new examples...")
         training_dir = Path(self.learning_dir)
@@ -4379,9 +4584,6 @@ class App:
         if not self._startup_ready or self.reader is None or self.trocr_model is None:
             self._scan_blocked("OCR models are not ready. Wait for startup to finish or check the startup error before scanning.")
             return
-        if not self.learning_dir:
-            self._scan_blocked("Learning storage is unavailable. Restore access before scanning.")
-            return
         if self.busy or self._training_blocks_work() or self.export_busy:
             self._scan_blocked("An operation is already running. Finish scanning or sending before starting another scan.")
             return
@@ -4641,6 +4843,7 @@ class App:
             dark_fraction = float(np.count_nonzero(content < 245)) / float(content.size)
             return dark_fraction <= 0.00002
         finally:
+            self._page_ocr_budget=None
             doc.close()
 
     def _get_learned_field_regions(self, width, height, limit=3):
@@ -5023,24 +5226,26 @@ class App:
         return valid
 
     @staticmethod
+    @staticmethod
     def _clear_localized_case(hits, threshold=95.0):
-        """Return one independently located case, or None if evidence conflicts.
+        """One complete, verified >=95% read from EITHER engine is sufficient.
 
-        Case confidence comes from real EasyOCR detector evidence; model-only
-        guesses, unverified rectangles and partial 08 prefixes never qualify.
-        The caller retains all normal fallback paths when evidence is uncertain.
+        Weaker model variants cannot veto a clear high-confidence reading.
+        Independent 95%+ conflicts still go to review.
         """
-        verified=[]
-        for hit in hits:
-            case=normalize_case_number(hit.get("number"))
-            box=hit.get("box_rect")
-            if (CASE_RE.fullmatch(case) and hit.get("box_verified")
-                    and isinstance(box,(list,tuple)) and len(box)==4):
-                verified.append(hit)
-        if not verified or len({_case_identity(h["number"]) for h in verified}) != 1:
+        high=[]
+        for h in hits:
+            case=normalize_case_number(h.get("number"))
+            box=h.get("box_rect")
+            try: score=float(h.get("score") or 0)
+            except (TypeError,ValueError): continue
+            if (CASE_RE.fullmatch(case) and h.get("box_verified")
+                and isinstance(box,(tuple,list)) and len(box)==4
+                and math.isfinite(score) and score>=threshold):
+                high.append(h)
+        if len({_case_identity(h["number"]) for h in high})!=1:
             return None
-        high=[h for h in verified if float(h.get("score") or 0)>=threshold]
-        return max(high,key=lambda h:float(h.get("score") or 0)) if high else None
+        return max(high,key=lambda h:float(h.get("score") or 0))
 
     @contextmanager
     def _perf_measure(self, stage):
@@ -5056,7 +5261,8 @@ class App:
 
     def _timed_easyocr_readtext(self,*args,**kwargs):
         with self._perf_measure("easyocr"):
-            return self.reader.readtext(*args,**kwargs)
+            return self._budgeted_ocr("printed",args[0],
+                lambda:self.reader.readtext(*args,**kwargs),[])
 
     def _timed_easyocr_recognize(self,*args,**kwargs):
         with self._perf_measure("easyocr"):
@@ -5151,10 +5357,134 @@ class App:
         return (intersection/union>=.55 and min(aw,bw)/max(aw,bw)>=.5
                 and abs((a[1]+a[3]-b[1]-b[3])/2)<=.4*min(ah,bh))
 
-    def _automatic_handwritten_4x4(self, region, x_offset=0, y_offset=0):
+    def _probe_trocr_default_bias(self):
+        """One-time local negative controls for a degenerate trained decoder.
+
+        If a handwriting model invents the SAME complete 08- case from both
+        a blank image and unrelated printed words, its confidence is not
+        dependable for that value. No scan PDF is used or transmitted.
+        """
+        if getattr(self,"_trocr_bias_checked",False):
+            return
+        self._trocr_bias_checked=True
+        self._trocr_bias_values=set()
+        page_budget=getattr(self,"_page_ocr_budget",None)
+        self._page_ocr_budget=None
+        try:
+            from PIL import Image,ImageDraw,ImageFont
+            controls=[]
+            white=Image.new("RGB",(320,85),"white")
+            controls.append(np.asarray(white))
+            words=Image.new("RGB",(480,105),"white")
+            pen=ImageDraw.Draw(words)
+            pen.text((38,37),"OFFENSE DESCRIPTION",fill="black")
+            controls.append(np.asarray(words))
+            predictions=[]
+            for negative in controls:
+                raw,score=self._trocr_read_scored(negative)
+                normalized=normalize_case_number(raw)
+                predictions.append((normalized,float(score or 0.)))
+            if (len(predictions)==2 and
+                    predictions[0][0]==predictions[1][0] and
+                    CASE_RE.fullmatch(predictions[0][0]) and
+                    min(v[1] for v in predictions)>=75.):
+                value=_case_identity(predictions[0][0])
+                self._trocr_bias_values.add(value)
+                self._diag_event("trocr_default_bias_detected",
+                    repeated_case=predictions[0][0],
+                    confidence=[round(v[1],2) for v in predictions],
+                    warning="Handwriting model repeated a case on blank and non-case controls")
+                self._log("TrOCR default-bias safeguard: model-only %s reads need manual review",value)
+        except Exception as exc:
+            self._diag_event("trocr_bias_probe_error",error=str(exc))
+
+        finally:
+            self._page_ocr_budget=page_budget
+
+    @staticmethod
+    def _plausible_case_ink_crop(region, rect, detected_words=()):
+        """Reject model-only hallucinations from non-number ink before TrOCR.
+
+        A neural decoder's token likelihood is NOT visual proof that the pixels
+        contain `08-...`. A complete number needs plausible *physical* ink
+        extent; neither EasyOCR recognition nor an INCIDENT label is required.
+        The printed detector's verified literal case readings stay eligible
+        separately even when a handwritten geometry heuristic is inconclusive.
+        """
+        try:
+            height,width=region.shape[:2]
+            x0,y0,x1,y1=map(int,rect)
+        except (TypeError,ValueError,AttributeError):
+            return False,"invalid_box"
+        if not (0<=x0<x1<=width and 0<=y0<y1<=height):
+            return False,"out_of_roi"
+        cw,ch=x1-x0,y1-y0
+        # The old OCR path accepted 28x24 boxes and near-full-width rules as
+        # complete seven-character case numbers. They are not whole fields.
+        ratio=cw/max(1,ch)
+        if cw<35 or ch<11 or ratio<1.85 or ratio>10.5:
+            return False,"implausible_number_line_dimensions"
+        gray=np.asarray(region[y0:y1,x0:x1])
+        if gray.ndim==3:
+            gray=np.asarray(np.dot(gray[:,:,:3],[.299,.587,.114]),dtype=np.uint8)
+        # A single noisy pixel or a dark photographic block is not a number.
+        bg=float(np.percentile(gray,80))
+        ink=gray < min(205.,bg-26.)
+        density=float(ink.mean())
+        if density<.006 or density>.59:
+            return False,"insufficient_or_saturated_ink"
+        if int((ink.sum(axis=0)>1).sum())<max(12,min(30,int(cw*.13))):
+            return False,"insufficient_horizontal_glyph_ink"
+        if int((ink.sum(axis=1)>1).sum())<6:
+            return False,"insufficient_vertical_glyph_ink"
+        # A full-width horizontal rule masquerading as a number line should
+        # not receive an invented OCR case number.
+        wide_rows=(ink.sum(axis=1)>=cw*.77)
+        if wide_rows.sum()>=max(2,int(ch*.09)):
+            return False,"ruled_form_line"
+        for word_rect,token,confidence in detected_words:
+            value=str(token or '').strip()
+            if CASE_RE.fullmatch(normalize_case_number(value)) or CASE_FIELD_LABEL_RE.search(value):
+                continue
+            # High-confidence ordinary words already recognized by EasyOCR
+            # must never be relabelled as handwritten case numbers by TrOCR.
+            # Uncertain O/0 substitutions and mixed digits are not blocked.
+            if (not re.search(r'[A-Za-z]{4,}',value) or
+                re.search(r'[0-9]',value) or float(confidence or 0)<60.):
+                continue
+            ax0,ay0,ax1,ay1=map(int,word_rect)
+            overlap=max(0,min(x1,ax1)-max(x0,ax0))*max(0,min(y1,ay1)-max(y0,ay0))
+            word_area=max(1,(ax1-ax0)*(ay1-ay0))
+            if overlap/word_area>=.62:
+                return False,"non_case_word_detected"
+        return True,"visual_number_line_evidence"
+
+    def _automatic_detections(self, region, x_offset, y_offset):
+        """Reuse the one quarter-page detector result inside learned crops."""
+        budget=getattr(self,"_page_ocr_budget",None)
+        quarter=budget.get("quarter") if budget and budget["thread"]==threading.get_ident() else None
+        if quarter is None:
+            return self._timed_easyocr_readtext(region,detail=1,paragraph=False)
+        image,qx,qy=quarter
+        h,w=region.shape[:2];qh,qw=image.shape[:2]
+        if not (qx<=x_offset and qy<=y_offset and
+                x_offset+w<=qx+qw and y_offset+h<=qy+qh):
+            return self._timed_easyocr_readtext(region,detail=1,paragraph=False)
+        if "quarter_detections" not in budget:
+            budget["quarter_detections"]=self._timed_easyocr_readtext(image,detail=1,paragraph=False)
+        if (x_offset,y_offset,h,w)==(qx,qy,qh,qw):
+            return budget["quarter_detections"]
+        result=[]
+        for box,text,score in budget["quarter_detections"]:
+            shifted=[[float(x)+qx-x_offset,float(y)+qy-y_offset] for x,y in box]
+            if all(0<=x<=w and 0<=y<=h for x,y in shifted):
+                result.append((shifted,text,score))
+        return result
+
+    def _automatic_handwritten_4x4(self, region, x_offset=0, y_offset=0, run_trocr=True):
         """Reuse one detector pass; spend at most three reads on ranked fields."""
         height,width=region.shape[:2]
-        detections=(self._timed_easyocr_readtext(region,detail=1,paragraph=False)
+        detections=(self._automatic_detections(region,x_offset,y_offset)
                     if self.reader is not None else [])
         pieces=[]
         for box,text,confidence in detections:
@@ -5199,7 +5529,8 @@ class App:
                     if joined!="08" and token.startswith("-"):continue
                     joined+=token;bounds=union(bounds,other);confidence=min(confidence,conf)
                 if CASE_RE.fullmatch(joined):printed.append((bounds,joined,confidence))
-            if re.fullmatch(r"[0-9Il| -]+",text) and re.search(r"[0-9]",text):
+            if (re.fullmatch(r"[0-9Il| -]+",text) and
+                    (text.startswith("08") or text.startswith("-"))):
                 numeric.append(rect)
         def relation(rect):
             choices=[]
@@ -5208,7 +5539,9 @@ class App:
                 lh=label[3]-label[1]
                 dy=abs((rect[1]+rect[3]-label[1]-label[3])/2)
                 gap=rect[0]-label[2]
-                if -lh<=gap<=12*lh and dy<=max(lh,rect[3]-rect[1])*1.8:
+                box_h=max(1,rect[3]-rect[1])
+                if (-0.65*lh<=gap<=max(125,9*lh) and
+                        dy<=max(lh,box_h)*1.05 and box_h<=3.0*lh):
                     choices.append((0 if kind=="incident" else 1,dy+max(0,gap)*.1,kind))
             if not choices:return None,float("inf")
             _,distance,kind=min(choices);return kind,distance
@@ -5221,17 +5554,27 @@ class App:
         for box in numeric+proposals:
             if blocked(box) or any(self._same_number_box(box,b) for b in boxes):continue
             boxes.append(box)
-        for label,kind in labels:
-            if any(relation(b)[0]==kind for b in boxes):continue
-            x0,y0,x1,y1=label;h=y1-y0
-            field=(x1,max(0,int(y0-h)),min(width,int(x1+12*h)),min(height,int(y1+h)))
-            if field[2]>field[0] and not blocked(field):boxes.append(field)
+        for label,kind in labels[:4]:
+            # No extra EasyOCR detector pass: reuse the 4x4 region and draw
+            # the same tight number crop the operator would place to the
+            # RIGHT of the existing label. Do not OCR the label itself.
+            x0,y0,x1,y1=label;h=max(8,y1-y0)
+            field=(min(width,int(x1+2)),max(0,int(y0-h*.48)),
+                   min(width,int(x1+max(145,10*h))),
+                   min(height,int(y1+h*.48)))
+            if (field[2]>field[0]+35 and field[3]>field[1]+11 and
+                    not any(self._same_number_box(field,r) and
+                            relation(r)[0]==kind and c>=95.
+                            for r,n,c in printed)):
+                boxes.append(field)
         def priority(box):
             kind,distance=relation(box)
             full=any(self._same_number_box(box,r) for r,n,c in printed)
             numeric_hint=any(self._same_number_box(box,r) for r in numeric)
+            # A physically located INCIDENT number is searched before
+            # non-case text above/below it. Unlabeled 08- crops still follow.
             return (0 if kind=="incident" else 1 if kind=="case" else 2,
-                    not full,not numeric_hint,distance,box[1],-box[2])
+                    not full, not numeric_hint, distance,box[1],-box[2])
         boxes.sort(key=priority)
         candidates=[];calls=0;seen=set()
         for rect in boxes:
@@ -5241,18 +5584,32 @@ class App:
                 raise InterruptedError("Stopped during quarter-page OCR")
             choices=[(n,c,"EasyOCR") for r,n,c in printed if self._same_number_box(rect,r)]
             x0,y0,x1,y1=rect;pad=max(3,int((y1-y0)*.2))
-            if calls<3 and (self.trocr_model is not None or self.trocr_error==""):
-                crop=region[max(0,y0-pad):min(height,y1+pad),max(0,x0-pad):min(width,x1+pad)]
-                if crop.size==0 or int(crop.max())-int(crop.min())<8:
-                    if not choices:continue
-                    raw,score="",0.0
+            # One complete printed read >=95% already qualifies; do not
+            # spend another model pass manufacturing a contradictory value.
+            printed_complete=any(score>=95. for _n,score,_engine in choices)
+            if (run_trocr and not printed_complete and calls<3 and
+                    (self.trocr_model is not None or self.trocr_error=="")):
+                viable,reason=self._plausible_case_ink_crop(region,rect,pieces)
+                if not viable:
+                    self._diag_event("model_crop_rejected",rect=list(rect),
+                                     reason=reason,printed_available=bool(choices))
                 else:
-                    raw,score=self._trocr_read_scored(crop);calls+=1
-                self._diag_event("crop_raw_read",rect=list(rect),engine="TrOCR",text=str(raw or ""),score=score)
-                number=normalize_case_number(raw)
-                label=CASE_FIELD_LABEL_RE.search(number)
-                if label:number=normalize_case_number(number[label.end():].lstrip(" .:#"))
-                if CASE_RE.fullmatch(number):choices.append((number,float(score or 0),"TrOCR"))
+                    crop=region[max(0,y0-pad):min(height,y1+pad),max(0,x0-pad):min(width,x1+pad)]
+                    if crop.size and int(crop.max())-int(crop.min())>=8:
+                        self._probe_trocr_default_bias()
+                        raw,score=self._trocr_read_scored(crop);calls+=1
+                        self._diag_event("crop_raw_read",rect=list(rect),engine="TrOCR",
+                                         text=str(raw or ""),score=score)
+                        number=normalize_case_number(raw)
+                        label=CASE_FIELD_LABEL_RE.search(number)
+                        if label:number=normalize_case_number(number[label.end():].lstrip(" .:#"))
+                        if CASE_RE.fullmatch(number):
+                            if _case_identity(number) in getattr(self,"_trocr_bias_values",set()):
+                                self._diag_event("trocr_default_value_rejected",
+                                    rect=list(rect),reading=number,
+                                    reason="Identical high-confidence predictions from blank and unrelated text")
+                            else:
+                                choices.append((number,float(score or 0),"TrOCR"))
             if not choices:continue
             number,score,engine=max(choices,key=lambda c:c[1])
             scores={e:c for n,c,e in choices if _case_identity(n)==_case_identity(number)}
@@ -5265,6 +5622,117 @@ class App:
         self._diag_event("bounded_ocr_pass",printed_calls=int(self.reader is not None),
                          handwriting_calls=calls,candidates=len(candidates))
         return candidates
+
+
+    def _stage_auto_location(self, record):
+        record.pop("pending_auto_location",None)
+        if (not record.get("auto_labeled") or record.get("sequence_inferred")
+                or record.get("scan_ambiguous") or record.get("sequence_conflict")):
+            return
+        value=normalize_case_number(record.get("confirmed"))
+        score=float(record.get("score") or 0)
+        snippet=record.get("snippet")
+        if (not CASE_RE.fullmatch(value) or not math.isfinite(score) or score<95
+                or not snippet or len(snippet)<5 or snippet[1] is None):
+            return
+        hit=next((h for h in snippet[4] if h.get("box_verified")
+                  and _case_identity(h.get("number"))==_case_identity(value)
+                  and float(h.get("score") or 0)>=95),None)
+        if not hit or not hit.get("rect"):
+            return
+        h,w=snippet[1].shape[:2]
+        a,b,c,d=map(float,hit["rect"])
+        if not (0<=a<c<=w and 0<=b<d<=h):
+            return
+        original=str(record.get("original_path") or record.get("path") or "")
+        identity=str(Path(original).absolute())+"#"+str(snippet[0])
+        record["pending_auto_location"]={
+            "rect_norm":[a/w,b/h,c/w,d/h],"source_id":identity,
+            "source_pdf":identity,"confirmed_case_number":value,
+            "source":"uncorrected-auto95-sent","score":score}
+
+    def _commit_auto_location(self, record):
+        entry=record.get("pending_auto_location")
+        if (not entry or not record.get("exported") or not record.get("auto_labeled")
+                or record.get("sequence_inferred") or record.get("scan_ambiguous")
+                or record.get("sequence_conflict")
+                or _case_identity(record.get("confirmed"))!=_case_identity(entry.get("confirmed_case_number"))):
+            return
+        try:
+            with self.data_lock:
+                entries=self.learning_data.setdefault("auto_field_regions_full_page",[])
+                if not any(x.get("source_id")==entry["source_id"] for x in entries):
+                    entries.append(dict(entry))
+                self._persist_learning_data()
+            record.pop("pending_auto_location",None)
+        except Exception as exc:
+            self._log("Sent file retained; automatic location save pending: %s",exc)
+
+    def _ranked_learned_scan_zones(self, width, height):
+        data=getattr(self,"learning_data",{}) or {}
+        lock=getattr(self,"data_lock",None)
+        with lock if lock is not None else nullcontext():
+            snapshot={key:list(data.get(key,[]) or [])
+                      for key in ("field_regions_full_page","field_regions","auto_field_regions_full_page")}
+        full=snapshot.get("field_regions_full_page",[])
+        old=snapshot.get("field_regions",[])
+        automatic=snapshot.get("auto_field_regions_full_page",[])
+        # The same set of human selections is reused across thousands of
+        # PDFs; recompute the clustering only when the saved crop list changes.
+        key=(width,height,id(data),len(full),len(old),len(automatic),
+             str(automatic[-1]) if automatic else "",
+             str(full[-1]) if full else "",str(old[-1]) if old else "")
+        if getattr(self,"_learned_zone_cache_key",None)==key:
+            return list(self._learned_zone_cache)
+        zones=_learned_crop_rectangles(snapshot,width,height)
+        self._learned_zone_cache_key=key
+        self._learned_zone_cache=tuple(zones)
+        return zones
+
+    def _scan_one_learned_zone(self, page_image, zone):
+        """Read one reviewer-confirmed *physical* field, handwriting first."""
+        x0,y0,x1,y1=zone['rect']
+        cropped=page_image[y0:y1,x0:x1].copy()
+        if cropped.size==0 or int(cropped.max())-int(cropped.min())<8:
+            return []
+        hits=[]
+        def add_hit(number,score,engine,rect):
+            number=normalize_case_number(number)
+            try:score=float(score or 0.)
+            except (TypeError,ValueError):return
+            if (not CASE_RE.fullmatch(number) or not math.isfinite(score)
+                    or score<0 or score>100):return
+            hits.append(dict(number=number,score=score,
+                rect=rect,box_rect=rect,box_verified=True,
+                prefix_source=engine,engines=[engine],
+                engine_scores={engine.split('-',1)[0]:score},
+                label_type=None,label_context=False,
+                learned_location=True,learned_sample_count=zone['count']))
+        # Check the handwriting engine before EasyOCR as requested.  Reject
+        # model-default predictions already caught by negative-control probes.
+        if getattr(self,'trocr_model',None) is not None:
+            self._probe_trocr_default_bias()
+            with self._perf_measure('learned_handwriting'):
+                raw,score=self._trocr_read_scored(cropped)
+            number=normalize_case_number(raw)
+            bias=getattr(self,'_trocr_bias_values',set())
+            if _case_identity(number) not in bias:
+                add_hit(number,score,'TrOCR-learned',(x0,y0,x1,y1))
+            elif CASE_RE.fullmatch(number):
+                self._diag_event('trocr_default_value_rejected',
+                    rect=[x0,y0,x1,y1],reading=number,reason='model negative controls')
+        # One unambiguous 95% handwriting result is enough: printed support
+        # is optional, not a gate.  Otherwise run the existing printed path
+        # WITHOUT another handwriting pass on the same crop.
+        if self._clear_localized_case(hits,95.0) is None:
+            with self._perf_measure('learned_printed'):
+                printed=self._automatic_handwritten_4x4(
+                    cropped,x0,y0,run_trocr=False)
+            for hit in printed:
+                hit=dict(hit,learned_location=True,
+                         learned_sample_count=zone['count'])
+                hits.append(hit)
+        return self._diag_field_filter(hits,'learned')
 
     def _ocr_pdf(self,path):
         """Search only each page's upper-right quarter for automatic OCR.
@@ -5283,6 +5751,8 @@ class App:
             results=[]
             pages=[]
             any_label=False
+            if getattr(self,"trocr_model",None) is not None:
+                self._probe_trocr_default_bias()
             for page_index,page in enumerate(doc):
                 stop=getattr(self,"stop_event",None)
                 pause=getattr(self,"pause_event",None)
@@ -5302,21 +5772,48 @@ class App:
                     image=np.frombuffer(pix.samples,dtype=np.uint8).reshape(
                         pix.height,pix.width,pix.n).copy()
                 pages.append(image)
+                self._page_ocr_budget={"thread":threading.get_ident(),
+                    "printed":0,"handwriting":0,"cache":{}}
                 height,width=image.shape[:2]
                 side=height//2
                 crop_width=width-width//2
                 offset_x=width-crop_width
                 region=image[:side,offset_x:].copy()
-                # Single region pass. No label/enhancement/margin rescans.
-                self._diag_event("ocr_label_pass",page=page_index+1,
-                                 region=[offset_x,0,width,side],labels=[])
-                with self._perf_measure("bounded_upper_right_quarter"):
-                    hits=self._automatic_handwritten_4x4(region,offset_x,0)
-                if hits:
-                    incident=[h for h in hits if h.get("label_type")=="incident"]
-                    case=[h for h in hits if h.get("label_type")=="case"]
-                    results.append((page_index,image,hits,
-                                    "incident" if incident else "case" if case else "fallback"))
+                self._page_ocr_budget["quarter"]=(region,offset_x,0)
+                # Every saved manual crop contributes to the ranked spatial
+                # clusters.  More examples sharpen the standard size/position;
+                # separate form styles retain separate candidate locations.
+                zones=self._ranked_learned_scan_zones(width,height)
+                self._diag_event('learned_scan_map',page=page_index+1,
+                    examples=sum(z['count'] for z in zones),
+                    zones=[dict(rect=list(z['rect']),count=z['count']) for z in zones])
+                learned_complete=False
+                for zone in zones:
+                    if self._page_ocr_budget["handwriting"]>=2:
+                        break
+                    if getattr(self,'stop_event',None) is not None and self.stop_event.is_set():
+                        raise InterruptedError('Stopped during learned-zone OCR')
+                    with self._perf_measure('learned_zone'):
+                        candidates=self._scan_one_learned_zone(image,zone)
+                    if candidates:
+                        # All of these candidates have a physical location
+                        # backed by a human-verified historical crop.
+                        results.append((page_index,image,candidates,'learned'))
+                    if self._clear_localized_case(candidates,95.0) is not None:
+                        learned_complete=True
+                        break
+                if not learned_complete:
+                    # The unchanged upper-right-quarter search is the fallback
+                    # when none of the learned locations produces a clear read.
+                    self._diag_event("ocr_label_pass",page=page_index+1,
+                                     region=[offset_x,0,width,side],labels=[])
+                    with self._perf_measure("bounded_upper_right_quarter"):
+                        hits=self._automatic_handwritten_4x4(region,offset_x,0)
+                    if hits:
+                        incident=[h for h in hits if h.get("label_type")=="incident"]
+                        case=[h for h in hits if h.get("label_type")=="case"]
+                        results.append((page_index,image,hits,
+                                        "incident" if incident else "case" if case else "fallback"))
                 # Automatic OCR is restricted to the EXACT upper-right quarter
                 # rendered ROI on this page. No reviewer-learned or
                 # whole-page fallback may inspect pixels outside that square.
@@ -5327,7 +5824,9 @@ class App:
                     if source_page != page_index:
                         bounded.append((source_page,source_image,source_hits,source_kind))
                         continue
-                    eligible=self._localized_case_hits(source_hits,roi)
+                    eligible=(self._localized_case_hits(source_hits,(0,0,width,height))
+                              if source_kind=='learned' else
+                              self._localized_case_hits(source_hits,roi))
                     if eligible:
                         bounded.append((source_page,source_image,eligible,source_kind))
                     elif source_hits:
@@ -5339,7 +5838,7 @@ class App:
                 # >=95%, with no conflicting candidates on the inspected page.
                 # Never use an inferred/TrOCR-only position to skip later pages.
                 matches=[r for r in results if r[0]==page_index and r[3] in
-                         ("incident","case","header","fallback")]
+                         ("incident","case","header","fallback","learned")]
                 candidate_cases={_case_identity(h.get("number")) for _idx,_im,hh,_kind in matches
                                  for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))}
                 if (len(candidate_cases)==1 and matches and
@@ -5361,7 +5860,7 @@ class App:
                 return ("",(index,pages[-1],"Upper-right quarter case field not read",None,[]),
                         why,False,0.0,[],False)
             results=[(idx,img,self._diag_field_filter(hits,kind),kind)
-                     for idx,img,hits,kind in results if kind!="learned"]
+                     for idx,img,hits,kind in results]
             results=[item for item in results if item[2]]
             if not results:
                 return ("",(0,pages[0],"No valid 08- crop",None,[]),
@@ -5371,7 +5870,7 @@ class App:
                 verified=max((float(h.get("score") or 0) for h in hits
                     if h.get("box_verified") and h.get("box_rect")),default=0.0)
                 return (verified>=95.0,verified,
-                        {"header":5,"incident":4,"case":3,"fallback":2,"learned":1}[kind])
+                        {"learned":6,"header":5,"incident":4,"case":3,"fallback":2}[kind])
             index,image,hits,kind=max(results,key=rank)
             self._diag_event("ocr_candidates",page=index+1,source=kind,
                  all_candidates=self._diag_hits(hits),
@@ -5386,7 +5885,7 @@ class App:
                          f"upper-right quarter case read rejected",None,[]),
                          "No valid 08- case in the upper-right quarter search — MANUAL REVIEW",
                          False,0.0,[],False)
-            best=max(hits,key=lambda h: (2 if h.get("label_type")=="incident" else 1 if h.get("label_type")=="case" else 0,float(h.get("score") or 0)))
+            best=_select_primary_case_hit(hits,kind,image.shape)
             hits=self._resolve_ocr_alternates(hits,kind,best)
             number=best["number"]
             engines=list(best.get("engines") or [])
@@ -5407,18 +5906,21 @@ class App:
             numeric_keys=lambda values: {_case_identity(value) for value in values}
             high_conf_cases={_case_identity(h.get("number"))
                 for _pg,_img,hh,_source in results
-                if _source in ("header","fallback","incident","case")
+                if _source in ("header","fallback","incident","case","learned")
                 for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))
                 and h.get("box_verified") and h.get("box_rect")
                 and float(h.get("score") or 0)>=95.0}
             all_region_cases={_case_identity(h.get("number"))
                 for _idx,_im,other_hits,source in results
-                if source in ("header","fallback","incident","case")
+                if source in ("header","fallback","incident","case","learned")
                 for h in other_hits
                 if CASE_RE.fullmatch(normalize_case_number(h.get("number")))}
-            # Same-crop alternatives were resolved by confidence upstream.
-            # Different physical fields remain conflicts even below 95%.
-            ambiguous=len(all_region_cases)>1
+            # Only independently verified, >=95% competing readings of the
+            # selected physical field can block automatic approval. A weak
+            # variant or unrelated lower-page number cannot cause REVIEW.
+            ambiguous=len({_case_identity(h.get("number")) for h in hits
+                           if h.get("box_verified") and h.get("box_rect") and
+                           float(h.get("score") or 0.)>=95.0})>1
             visuals=[]
             for h in hits:
                 rect=h.get("rect")
@@ -5432,18 +5934,20 @@ class App:
                     "engine_scores":dict(h.get("engine_scores") or {}),
                     "label_type":h.get("label_type"),
                     "label_distance":0.0,
-                    "learned_location":False})
+                    "learned_location":bool(h.get("learned_location"))})
             self._diag_event("ocr_decision",page=index+1,source=kind,
                  primary=number,score=float(best.get("score") or 0),
                  ambiguous=ambiguous,conflicting=sorted(distinct),
                  engines=engines,selected_bbox=best.get("rect"),
                  outcome="manual_review" if ambiguous else "candidate_ready")
             if ambiguous:
-                all_conflicts=sorted({h.get("number") for _i,_im,hh,source in results
-                        if source in ("header","fallback","incident","case")
-                        for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))})
+                all_conflicts=sorted({h.get("number") for h in hits
+                        if CASE_RE.fullmatch(normalize_case_number(h.get("number")))
+                        and float(h.get("score") or 0.)>=95.0})
                 note=(f"upper-right quarter case field has conflicting OCR reads: "
                       + ", ".join(all_conflicts)+" — MANUAL REVIEW")
+            elif kind=="learned":
+                note="Verified manual-crop location — handwriting-first OCR; 95% required for auto-completion"
             elif kind=="incident":
                 note="Case field right-of-label full number — Upper-right quarter labeled printed OCR"
             elif kind=="case":
@@ -5461,6 +5965,7 @@ class App:
                     "TrOCR" in engine_names,float(best.get("score") or 0),
                     engines,agree)
         finally:
+            self._page_ocr_budget=None
             doc.close()
             self._perf_file_report(path,total_start)
 
@@ -5959,6 +6464,7 @@ class App:
                         self._scan_progress_update(idx,"SCANNING")
                         self._save_state()
                         continue
+                    r.pop("pending_auto_location",None)
                     r.update(confirmed="",manual_approved=False,auto_labeled=False)
                     if self.completed_tree.exists(iid):
                         self.completed_tree.delete(iid)
@@ -6014,13 +6520,16 @@ class App:
                         and snip[3] is not None
                         and self._is_in_4x4_rect(snip[3],snip[1])
                     )
-                    localized_complete_08=any(
-                        h.get("box_verified") and h.get("rect") and
-                        _case_identity(h.get("number"))==_case_identity(normalized_candidate)
-                        for h in self._valid_ocr_box_candidates(r))
-                    if (normalized_candidate and localized_complete_08
-                            and ((labeled or positioned_header) and strong
-                                 or fallback_95)
+                    localized_complete_08=bool(snip is not None and len(snip)>1
+                        and snip[1] is not None and any(
+                            h.get("box_verified") and
+                            _case_identity(h.get("number"))==_case_identity(normalized_candidate)
+                            and self._is_in_4x4_rect(
+                                h.get("box_rect") or h.get("rect"),snip[1])
+                            for h in self._valid_ocr_box_candidates(r)))
+                    # One unambiguous located 08- reading at >=95% completes.
+                    # Source label and other model's confidence are irrelevant.
+                    if (normalized_candidate and localized_complete_08 and strong
                             and not r["scan_ambiguous"]):
                         block_reason=self._auto_label_block_reason(
                             score,agreement,normalized_candidate,r["engine_scores"])
@@ -6041,6 +6550,7 @@ class App:
                                 file=Path(r["path"]).name,outcome="auto_approved",
                                 rule=rule,case=normalized_candidate,
                                 score=float(score or 0),source=r["scan_source"])
+                            self._stage_auto_location(r)
                             self._move_to_completed(iid)
                             auto_done=True
                             self._run_outcomes["auto_approved"]=(
@@ -7475,6 +7985,13 @@ class App:
                 controls, text="Clear Manual Box",
                 command=clear_selection).grid(row=31, column=0, sticky="ew")
 
+            learned_overlay_var=tk.BooleanVar(value=False)
+            learned_overlay_zones=self._ranked_learned_scan_zones(original.width,original.height)
+            overlay_label=(f"Show learned scan areas ({sum(z['count'] for z in learned_overlay_zones)} crops, "
+                           f"{len(learned_overlay_zones)} locations)")
+            ttk.Checkbutton(controls,text=overlay_label,variable=learned_overlay_var,
+                            command=lambda: redraw()).grid(row=33,column=0,sticky="w",pady=(5,0))
+
             crop_preview_row = ttk.Frame(controls)
             crop_preview_row.grid(row=32, column=0, sticky="ew", pady=(8, 0))
             crop_preview_label = ttk.Label(
@@ -7503,6 +8020,17 @@ class App:
                 canvas.create_image(0, 0, image=photo, anchor="nw")
                 canvas.configure(scrollregion=(0, 0, w, h))
 
+                # Optional cyan overlays show the exact prioritized crop
+                # locations learned from all verified manual selections.
+                if learned_overlay_var.get():
+                    for rank, zone in enumerate(learned_overlay_zones,1):
+                        zx0,zy0,zx1,zy1=zone['rect']
+                        canvas.create_rectangle(zx0*scale,zy0*scale,
+                            zx1*scale,zy1*scale,outline="#00a5e5",width=2,
+                            dash=(6,3))
+                        canvas.create_text(zx0*scale,max(10,zy0*scale-8),
+                            anchor="sw",text=f"{rank}: {zone['count']} crops",
+                            fill="#0077aa",font=("Segoe UI",9,"bold"))
                 # Red = one real, independently localized full 08- OCR box
                 # per physical field. Green = reviewer-selected training crop.
                 if visual_candidates:
@@ -8084,6 +8612,7 @@ class App:
             rec["original_path"] = rec.get("original_path") or str(rec["path"])
             rec["path"] = target
             rec["exported"] = True
+            self._commit_auto_location(rec)
             rec["send_after_manual_approval"] = False
             rec["export_error"] = ""
             rec["export_name"] = target.name

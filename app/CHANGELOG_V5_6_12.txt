@@ -1,0 +1,9 @@
+MFCase v5.6.12 — learn scanning locations from ALL verified manual crops.
+- Save every newly confirmed drawn manual crop as full-page normalized coordinates, not just outside-quarter examples; no 200-sample cap.
+- Include all retained legacy crop locations without deleting or altering the existing learning records.
+- Cluster crops by position and scale; use robust average box dimensions and count to rank common form locations first.
+- Scan EVERY distinct ranked location first, trying TrOCR handwriting then EasyOCR printed OCR when needed. A valid independent 95%+ result is sufficient; do not require engine agreement.
+- Previously verified crop locations outside the upper-right quarter may be scanned automatically. If learned areas fail, use the established upper-right quarter OCR fallback.
+- Add optional blue learned-area overlay in the existing review screen (labels show rank and crop count).
+- Keep the mandatory 08- prefix, auto-approval safeguards, anchors, completed-file sending, and manual full-page review unchanged.
+- Location learning changes do not retrain TrOCR weights or require background neural training.
