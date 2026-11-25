@@ -36,4 +36,12 @@ def run(root):
         ("        self.assertEqual(a._apply_sequence_consensus_impl(),0)\n        self.assertFalse(a.records['i1']['confirmed'])\n        self.assertFalse(a.records['i3']['confirmed'])",
          "        self.assertEqual(a._apply_sequence_consensus_impl(),3)\n        for iid in ('i1','i2','i3'):\n            self.assertEqual(m._case_identity(a.records[iid]['confirmed']),'08-56')\n            self.assertTrue(a.records[iid]['sequence_inferred'])")
     ])
+    # The official v5.6.9 installer has a shorter anchor fixture than
+    # the locally reconstructed source; align that one superseded assertion.
+    change(root/'test_release_569.py',[
+        ('def test_nearest_conflicting_auto_blocks_farther_manual(self):',
+         'def test_matching_manual_pair_corrects_conflicting_auto(self):'),
+        ('        self.assertNotIn(1,p);self.assertNotIn(3,p)',
+         "        self.assertEqual(p[1],('08-56',['i0','i4']))\n        self.assertEqual(p[3],('08-56',['i0','i4']))")
+    ])
 if __name__=='__main__':run(sys.argv[1])
