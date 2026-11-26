@@ -1,0 +1,11 @@
+MFCase v5.6.18 — seven approved handwriting OCR corrections
+Baseline: official published v5.6.17. Learned crop coordinates, clustering, scan location, before/after, sending and VCR UI preserved.
+- Isolate the handwritten 08- number from full labeled fields before neural recognition or training.
+- Audit existing labels without deleting examples; quarantine conflicts and weak evidence from model training.
+- Review incomplete trailing digits; use padding and contrast alternatives on inconclusive OCR.
+- Permit up to five handwriting reads when earlier results are inconclusive; retain three-read fast path.
+- Relax overly restrictive geometry/line filters without disabling blank/word hallucination guards.
+- Back up learning metadata, examples, active and previous models before manually retraining.
+- Compare trained model against existing and offline original Microsoft baseline on independent source-grouped validation examples; only activate improvement.
+- UPDATE LEARNING manually controls training; no idle automatic retraining.
+Privacy: model/document processing remains local. No PDF, crops, metadata or learning files are uploaded by this release.
