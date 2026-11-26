@@ -1,0 +1,144 @@
+name: MFCase v6.0.3 performance-only verified release
+on:
+  push:
+    branches:
+      - publish/v6.0.3
+    paths:
+      - .github/workflows/publish-v603.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-v603-release
+  cancel-in-progress: false
+jobs:
+  linux_validation:
+    name: Linux full regressions and 5k GUI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install OCR test and headless GUI dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Verify staged asset digests and unchanged OCR/learning source
+        run: python tools/verify_v603.py prepare
+      - name: Run complete inherited and performance regressions
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP:$APP/tests" python -m unittest discover -s "$APP/tests" -p 'test_release_*.py' -q
+      - name: Run Tk GUI with a 5000-PDF queue
+        env:
+          MFCASE_SKIP_STARTUP_MAINTENANCE: '1'
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import pathlib, tempfile, time, tkinter as tk
+          from case_number_ocr import App
+          with tempfile.TemporaryDirectory() as td:
+              root=tk.Tk()
+              app=App(root)
+              root.update()
+              assert app.app_version=='6.0.3'
+              assert app.show_all_files_var.get()
+              assert set(app.pie_transport.actions)=={'folder','scan','pause','stop'}
+              assert app.tree.winfo_exists()
+              app.folder=pathlib.Path(td)
+              paths=[pathlib.Path(td)/f'Image{i:05d}.pdf' for i in range(5000)]
+              start=time.perf_counter()
+              app._apply_folder_load('08',{},paths,None)
+              duration=time.perf_counter()-start
+              root.update()
+              assert len(app.records)==5000
+              assert len(app.tree.get_children())==5000
+              assert len(app._scan_preview_widgets)<160
+              start=time.perf_counter()
+              for _ in range(20):app._refresh_review_controls()
+              controls=time.perf_counter()-start
+              print(f'PASS GUI 5000 rows, load={duration:.3f}s, review controls 20x={controls:.4f}s')
+              root.destroy()
+          PY
+      - name: Verify actual in-place updater and file preservation
+        run: python tools/verify_v603.py updater
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mfcase-v603-verified-assets
+          path: |
+            dist/CaseNumberOCR_Update.zip
+            dist/MFCase_Number_OCR_V6.0.3_Full_Online_Install.zip
+          if-no-files-found: error
+          retention-days: 30
+  windows_validation:
+    name: Windows OCR, GUI logic and updater regressions
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install required test dependencies
+        run: python -m pip install numpy pillow "pymupdf<2.0" opencv-python-headless
+      - name: Verify exact sources and unmodified OCR/learning functions
+        run: python tools/verify_v603.py prepare
+      - name: Test OCR equivalence, STOP, sequence, batch, and Windows filesystem
+        shell: pwsh
+        run: |
+          $app=(Get-ChildItem -Path stage -Filter case_number_ocr.py -Recurse | Select-Object -First 1).Directory.FullName
+          $env:PYTHONPATH="$app;$app\tests"
+          python -m unittest discover -s "$app\tests" -p "test_release_*.py" -q
+      - name: Verify existing Windows updater preserves all case files
+        run: python tools/verify_v603.py updater
+  release:
+    name: Publish only after Linux and Windows pass
+    runs-on: ubuntu-latest
+    needs: [linux_validation, windows_validation]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mfcase-v603-verified-assets
+          path: dist
+      - name: Compare validated asset SHA256 digests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          expected={
+            'CaseNumberOCR_Update.zip':'2f2fdec1d19d26720a4e622f632d3678f1c914272403961c2e21fef410d22a76',
+            'MFCase_Number_OCR_V6.0.3_Full_Online_Install.zip':'25c59ded15c502a9fdf087a9c933e822c5531bd849b090bfe0b19a53a762e3ca',
+          }
+          for name,h in expected.items():
+              p=Path('dist')/name
+              assert sha256(p.read_bytes()).hexdigest()==h,name
+              print('PASS',name,h)
+          PY
+      - name: Archive full tested application source on release branch
+        run: |
+          python tools/verify_v603.py prepare
+          python tools/verify_v603.py archive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add versions/v6.0.3
+          git commit -m "Archive tested v6.0.3 performance-only source and regressions"
+          git push origin HEAD:publish/v6.0.3
+      - name: Publish two verified assets and verify download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v6.0.3
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft \
+              --target "$(git rev-parse HEAD)" --title "MFCase v6.0.3 - scan performance" \
+              --notes "Performance-only release built from the verified v6.0.2 source. Reduces 5,000-file network/UI overhead, reuses PDF handles, bounds image queues and thumbnail widgets; exact OCR, learning, before/after and approvals remain unchanged. 244 automated regressions plus Linux 5,000-row GUI and Windows updater tests."
+          fi
+          gh release upload "$TAG" dist/CaseNumberOCR_Update.zip dist/MFCase_Number_OCR_V6.0.3_Full_Online_Install.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp verify/CaseNumberOCR_Update.zip dist/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
