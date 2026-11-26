@@ -1,0 +1,24 @@
+MFCase v6.0.3 - scanning and large-queue performance only
+BASELINE: Verified full v6.0.2 installer.
+
+PERFORMANCE:
+- Review controls check network file existence for only the selected row(s), not the entire queue on every refresh.
+- Blank detection and OCR use ONE shared open PDF handle per file. The 1x grayscale blank image, 2.2x OCR raster, and exact OCR pipeline are unchanged.
+- Bound pending scan results to six queue messages; the producer yields until Tk catches up. STOP cancels a waiting worker.
+- Reuse the already-scanned page for visible-case thumbnails before releasing its pixels. Offscreen thumbnails remain lazy.
+- Use an eight-second display-only PDF stat cache to avoid repeated network metadata calls when Tk repaints thumbnails; always reverify actual files before opening, reviewing or sending.
+- Limit offscreen Tk widget/image retention to a bounded cache after heavy scrolling.
+- Defer large-table resort until scanning ends, rather than sorting thousands of rows on each result.
+- Avoid repeating a full-queue send eligibility walk for each scan row.
+- Coalesce 500+ row footer counts to about once a second; full order/recovery state persists unchanged.
+- Preserve the historical PDF-open stage label in the per-file timing reports.
+
+UNCHANGED:
+- Printed OCR, TrOCR handwriting, image preprocessing, 2.2x scan resolution, candidate scoring, learned field locations, handwriting training, confidence slider, before/after rules, red locks, order popup, filename policy, SEND FILES, full-list default, recovery journal, offline privacy and updater allowlist.
+- No background uploads of case records or PDFs are added.
+
+VERIFICATION:
+- Original 235 regressions + 9 v6.0.3 tests passed locally.
+- 5,000-row GUI smoke and in-place updater preservation test included.
+- The original ZIP remains available as the v6.0.2 rollback release.
+- Real-world OCR inference speed remains GPU/CPU limited. This release does not promise acceleration of the neural engines.
