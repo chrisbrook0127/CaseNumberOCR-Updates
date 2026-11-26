@@ -3460,11 +3460,13 @@ class App:
             stored=cfg.get('ocr_approval_threshold',95)
             try: stored=int(stored)
             except (ValueError,TypeError):stored=95
-            self.auto_threshold_var.set(str(max(90,min(99,stored))))
+            if hasattr(self,'auto_threshold_var'):
+                self.auto_threshold_var.set(str(max(90,min(99,stored))))
         except (OSError,ValueError,TypeError):
             self.auto_send_var.set(False)
             self.show_all_files_var.set(False)
-            self.auto_threshold_var.set('95')
+            if hasattr(self,'auto_threshold_var'):
+                self.auto_threshold_var.set('95')
 
     def _save_user_settings(self):
         path=self._user_settings_file
