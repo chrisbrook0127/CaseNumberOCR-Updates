@@ -1,0 +1,11 @@
+MFCase V5.6.15 — low-confidence carry-forward and saved upload credentials
+Based on V5.6.14. V5.6.13 remains the user-designated reference baseline.
+- After the authoritative before/after plan, eligible reads at 75% or below may inherit the nearest preceding independently confirmed 95%+ case number.
+- Matching two-sided anchors take priority. Conflicting boundaries, manual corrections/drafts, excluded files and unscanned files remain protected. Never skip a nearer independent boundary. Inferred results never become anchors.
+- Inferred cases retain their real OCR score and are labeled as inferred. Rechecks revoke unsupported inference or upgrade single-sided provenance when matching two-sided support arrives.
+- Persist source scores in sent history so sent 95%+ anchors work across sessions.
+- Apply the existing physical-ink check to learned handwriting crops, and reject isolated specks without substantial connected strokes. Printed OCR remains independent. No model accuracy guarantee.
+- Saved GitHub credentials are visibly acknowledged and reused after each completed scan. Replacement entry is hidden until requested or required. Uploads default enabled; users can disable them.
+- Expiration metadata or HTTP 401 prompts for a replacement; the form opens the token entry and provides a GitHub token-creation button. A new saved token retries the failed upload. HTTP 403/rate-limit/network errors do not erase saved credentials.
+- Only sanitized diagnostic data is uploaded. PDFs, crops, actual case numbers, filenames, paths and secrets remain local. Existing learning/model data unchanged.
+Validation: 113 automated tests, including carry-forward boundaries, speck rejection, repeated credential reuse and expired/rejected-token behavior. Live Windows DPAPI/UI testing and actual-PDF recognition were not performed here.

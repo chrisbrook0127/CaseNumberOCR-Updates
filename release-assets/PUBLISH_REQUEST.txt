@@ -1,1 +1,1 @@
-Publish tested MFCase v5.6.14 printed-reading fixes and sanitized post-scan diagnostics.
+Publish tested MFCase v5.6.15 carry-forward, ink validation and saved GitHub credentials.

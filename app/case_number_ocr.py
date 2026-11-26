@@ -283,6 +283,7 @@ def _public_scan_event(event, aliases):
         'label_type':{'incident','case'},
         'outcome':{'candidate_ready','manual_review','auto_approved'},
         'engine':{'EasyOCR','TrOCR'},
+        'inference_method':{'carry_forward','before_after'},
         'reason':{'non_case_word_detected','visual_number_line_evidence'}}
     numbers={'score','confidence','page','count','ms','calls','total_ms','handwriting_calls','printed_calls',
              'candidates','auto_approved','manual_review','no_case_number','scan_error',
@@ -356,10 +357,34 @@ def _read_github_log_settings():
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def _github_token_is_expired(settings):
+    if settings.get('token_rejected'):return True
+    value=settings.get('token_expires_at')
+    if not value:return False
+    try:
+        from datetime import timezone
+        expiry=datetime.fromisoformat(str(value).replace('Z','+00:00'))
+        if expiry.tzinfo is None:expiry=expiry.replace(tzinfo=timezone.utc)
+        return expiry<=datetime.now(timezone.utc)
+    except (ValueError,TypeError):return False
+
+
+def _save_github_log_settings(settings, enabled, token=''):
+    import base64
+    data=dict(settings,enabled=bool(enabled))
+    if token.strip():
+        data['protected_token']=base64.b64encode(_protect_github_token(token.strip().encode())).decode()
+        data.pop('token_expires_at',None);data.pop('token_rejected',None)
+    path=_github_log_settings_path();path.parent.mkdir(parents=True,exist_ok=True)
+    temp=path.with_suffix('.tmp')
+    temp.write_text(json.dumps(data),encoding='utf-8');os.replace(temp,path)
+    return data
+
+
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.6.14")
+        root.title("M.F. Case Number OCR — V5.6.15")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -443,7 +468,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.14"
+        self.app_version = "5.6.15"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -701,6 +726,7 @@ class App:
                  "auto_labeled":bool(row.get("auto_labeled",False)),
                  "sequence_inferred":False,"sequence_conflict":False,
                  "scan_ambiguous":False,"exported":True,
+                 "score":float(row.get("score",95. if row.get("auto_labeled") else 0.) or 0.),
                  "status":"Sent to COMPLETED (history)"}
             order.append(("sent-history::"+original,rec))
         return sorted(order,key=lambda item:self._natural_pdf_sort_key(
@@ -2504,33 +2530,51 @@ class App:
             except Exception: pass
 
 
-    def _configure_github_logs(self):
-        import base64
+    def _configure_github_logs(self, replacement=False, retry_log=None):
         try:settings=_read_github_log_settings()
         except Exception:
             messagebox.showerror('GitHub logs','Could not read GitHub log settings.');return
-        win=tk.Toplevel(self.root);win.title('GitHub scan diagnostics');win.transient(self.root)
+        existing=getattr(self,'_github_log_dialog',None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift();return
+        win=tk.Toplevel(self.root);self._github_log_dialog=win
+        win.title('GitHub scan diagnostics');win.transient(self.root)
         panel=ttk.Frame(win,padding=18);panel.pack(fill='both',expand=True)
         enabled=tk.BooleanVar(value=bool(settings.get('enabled',True)))
-        ttk.Checkbutton(panel,text='Upload sanitized diagnostics after each scan',variable=enabled).pack(anchor='w')
+        ttk.Checkbutton(panel,text='Upload sanitized diagnostics after EVERY scan',variable=enabled).pack(anchor='w')
+        saved=bool(settings.get('protected_token') or os.environ.get('MFCASE_GITHUB_LOG_TOKEN'))
+        needs_token=replacement or _github_token_is_expired(settings) or not saved
+        ttk.Label(panel,text=('Token expired or rejected. Create a replacement below.' if replacement or _github_token_is_expired(settings)
+                  else 'Token saved securely — reused automatically; no re-entry needed.' if saved
+                  else 'One-time setup: save a GitHub token to enable uploads.'),wraplength=480).pack(pady=10)
         ttk.Label(panel,text='Public repository: chrisbrook0127/CaseNumberOCR-Updates\n'
-            'Uploads omit filenames, case numbers, paths, OCR text and documents.\n'
-            'Full work logs remain local. No upload occurs without a credential.\n\n'
-            'Use a fine-grained GitHub token limited to this repository,\n'
-            'with Contents: Read and write. Saved encrypted for this Windows user.',justify='left').pack(pady=10)
-        ttk.Label(panel,text='GitHub token (leave blank to retain saved credential):').pack(anchor='w')
-        token=tk.StringVar();ttk.Entry(panel,textvariable=token,show='*',width=60).pack(fill='x')
+            'Only sanitized diagnostics upload. Documents and full logs stay local.\n'
+            'Use a fine-grained token for this repository with Contents: Read and write.',justify='left').pack(pady=6)
+        def create_token():
+            import webbrowser
+            webbrowser.open('https://github.com/settings/personal-access-tokens/new?name=MFCase+Scan+Logs&target_name=chrisbrook0127&expires_in=90&contents=write')
+        ttk.Button(panel,text='CREATE REPLACEMENT TOKEN',command=create_token).pack(anchor='w',pady=5)
+        editor=ttk.Frame(panel)
+        token=tk.StringVar()
+        ttk.Label(editor,text='New GitHub token:').pack(anchor='w')
+        entry=ttk.Entry(editor,textvariable=token,show='*',width=60);entry.pack(fill='x')
+        def show_editor():
+            editor.pack(fill='x',pady=8);entry.focus_set()
+        if needs_token:show_editor()
+        else:ttk.Button(panel,text='CHANGE SAVED TOKEN',command=show_editor).pack(anchor='w')
         def save():
+            if (replacement or _github_token_is_expired(settings)) and not token.get().strip():
+                messagebox.showerror('GitHub logs','Enter the replacement token before saving.',parent=win);return
             try:
-                data=dict(settings,enabled=enabled.get())
-                if token.get().strip():data['protected_token']=base64.b64encode(_protect_github_token(token.get().strip().encode())).decode()
-                path=_github_log_settings_path();path.parent.mkdir(parents=True,exist_ok=True)
-                temp=path.with_suffix('.tmp');temp.write_text(json.dumps(data),encoding='utf-8');os.replace(temp,path)
-                token.set('');win.destroy()
-                self.status.config(text='GitHub diagnostic settings saved. Uploads run after scans; no document data is uploaded.')
+                _save_github_log_settings(settings,enabled.get(),token.get())
+                token.set('');win.destroy();self._github_log_dialog=None
+                self.status.config(text='GitHub token/settings saved. Saved credentials will be reused after every scan.')
+                if retry_log and enabled.get():
+                    threading.Thread(target=self._diag_sync_shared,args=(retry_log,),daemon=True).start()
             except Exception:
-                messagebox.showerror('GitHub logs','Could not save the protected credential/settings. No upload was started.',parent=win)
+                messagebox.showerror('GitHub logs','Could not save the protected credential/settings. Existing credential retained.',parent=win)
         ttk.Button(panel,text='SAVE',command=save).pack(pady=10)
+
 
     def _diag_sync_shared(self, logfile=None):
         """Authorized post-scan upload of an allowlisted, anonymous snapshot."""
@@ -2543,9 +2587,17 @@ class App:
         try:
             settings=_read_github_log_settings()
             if not settings.get('enabled',True):return
-            token=os.environ.get('MFCASE_GITHUB_LOG_TOKEN','').strip()
-            if not token and settings.get('protected_token'):
-                token=_protect_github_token(base64.b64decode(settings['protected_token']),decrypt=True).decode()
+            if _github_token_is_expired(settings):
+                status('GitHub token expired or rejected. Enter a replacement to resume uploads.')
+                self.queue.put(('diagnostic_token_needed',str(logfile)));return
+            token=''
+            if settings.get('protected_token'):
+                try:
+                    token=_protect_github_token(base64.b64decode(settings['protected_token']),decrypt=True).decode()
+                except Exception:
+                    status('Saved GitHub token cannot be unlocked for this Windows user. Enter a replacement.')
+                    self.queue.put(('diagnostic_token_needed',str(logfile)));return
+            if not token:token=os.environ.get('MFCASE_GITHUB_LOG_TOKEN','').strip()
             if not token:
                 status('GitHub logs not uploaded: configure a token in Settings > GITHUB LOG UPLOAD.');return
             aliases={};output=io.BytesIO();count=0
@@ -2571,9 +2623,27 @@ class App:
                 'Content-Type':'application/json','User-Agent':'MFCase-Diagnostics','X-GitHub-Api-Version':'2022-11-28'})
             with urllib.request.urlopen(request,timeout=30) as response:
                 if response.status!=201:raise RuntimeError('Unexpected upload response')
+                expiry=response.headers.get('GitHub-Authentication-Token-Expiration')
+            if isinstance(expiry,str) and expiry:
+                try:
+                    current=_read_github_log_settings()
+                    if current.get('protected_token')==settings.get('protected_token'):
+                        current['token_expires_at']=expiry
+                        _save_github_log_settings(current,current.get('enabled',True))
+                except Exception:pass  # A successful upload is not a credential-save failure.
             status('Sanitized scan diagnostics uploaded to GitHub: '+name)
         except urllib.error.HTTPError as exc:
-            status(f'GitHub logs not uploaded (HTTP {exc.code}). Check token permissions. Full log retained locally.')
+            if exc.code==401:
+                try:
+                    current=_read_github_log_settings()
+                    if current.get('protected_token')==settings.get('protected_token'):
+                        current['token_rejected']=True
+                        _save_github_log_settings(current,current.get('enabled',True))
+                except Exception:pass
+                status('GitHub token expired or rejected. Enter a replacement; full log retained locally.')
+                self.queue.put(('diagnostic_token_needed',str(logfile)))
+            else:
+                status(f'GitHub logs not uploaded (HTTP {exc.code}). Check permissions or rate limits; saved token retained.')
         except Exception:
             # Never display exception text: it may include paths or credentials.
             status('GitHub logs not uploaded: connection or credential error. Full log retained locally.')
@@ -3846,6 +3916,23 @@ class App:
             if anchors[left]!=anchors[right]:
                 conflicts.add(pos);continue
             plan[pos]=(anchors[left],[order[left][0],order[right][0]])
+        for pos in (positions if positions is not None else range(len(order))):
+            if pos in plan or pos in conflicts or pos in human_set:continue
+            iid,r=order[pos];status=str(r.get("status") or "")
+            if (r.get("exported") or r.get("case_draft") or r.get("sequence_excluded")
+                    or r.get("scan_ambiguous") or anchors[pos]
+                    or status in ("Not scanned","Scanning","Moved to BLANKS")
+                    or status.startswith("Scan error:")):
+                continue
+            score=float(r.get("sequence_original_score",r.get("score",0)) or 0)
+            if not math.isfinite(score) or score>75:continue
+            prior=bisect_left(independent,pos)-1
+            if prior<0:continue
+            left=independent[prior];anchor=order[left][1]
+            strength=float(anchor.get("score") or 0)
+            if not math.isfinite(strength) or strength<95:continue
+            # Never skip a nearer conflicting/manual anchor or chain guesses.
+            plan[pos]=(anchors[left],[order[left][0]])
         return plan,conflicts
 
     def _apply_sequence_consensus(self, affected_range=None):
@@ -3887,9 +3974,10 @@ class App:
                 changed+=1
             if pos in conflicted or not desired:
                 continue
-            if r.get("sequence_inferred") and wanted==_case_identity(r.get("confirmed")):
+            if (r.get("sequence_inferred") and wanted==_case_identity(r.get("confirmed"))
+                    and (not r.get("sequence_anchors") or r.get("sequence_anchors")==desired[1])):
                 continue
-            if current==wanted and r.get("manual_approved"):
+            if current==wanted and r.get("manual_approved") and not r.get("sequence_inferred"):
                 continue
             if not r.get("sequence_inferred"):
                 r["sequence_original_candidate"]=r.get("candidate", "")
@@ -3902,10 +3990,12 @@ class App:
                      sequence_anchors=desired[1],manual_approved=True,
                      auto_labeled=True,approval_rule_version="5.3.2")
             self._move_to_completed(iid,batch=True)
-            r["status"]=(f"Before/after {case}; replaced {prior} — ready for SEND FILES")
+            method="Previous 95%+ anchor" if len(desired[1])==1 else "Before/after"
+            r["status"]=(f"{method} {case}; replaced {prior} — ready for SEND FILES (inferred)")
             self._insert_scan_row(iid,r)
             self._diag_event("sequence_update",file=str(r["path"]),original=prior,
-                             confirmed=case,anchors=desired[1])
+                             confirmed=case,anchors=desired[1],score=float(r.get("score") or 0),
+                             inference_method="carry_forward" if len(desired[1])==1 else "before_after")
             changed+=1
         if changed:
             self._refresh_review_controls()
@@ -5607,6 +5697,18 @@ class App:
             return False,"insufficient_horizontal_glyph_ink"
         if int((ink.sum(axis=1)>1).sum())<6:
             return False,"insufficient_vertical_glyph_ink"
+        # Scattered specks can satisfy total density without containing any
+        # digit-height strokes. Require substantial connected glyph ink.
+        try:
+            import cv2
+            _,_,stats,_=cv2.connectedComponentsWithStats(ink.astype(np.uint8),8)
+            substantial=[r for r in stats[1:] if r[cv2.CC_STAT_HEIGHT]>=max(5,int(ch*.20))
+                         and r[cv2.CC_STAT_AREA]>=max(6,int(ch*.30))]
+            if (len(substantial)<2 and not any(r[cv2.CC_STAT_WIDTH]>=cw*.25
+                    and r[cv2.CC_STAT_HEIGHT]>=max(6,int(ch*.25)) for r in substantial)):
+                return False,"specks_without_number_strokes"
+        except ImportError:
+            pass  # Preserve the existing density gates if OpenCV is unavailable.
         # A full-width horizontal rule masquerading as a number line should
         # not receive an invented OCR case number.
         wide_rows=(ink.sum(axis=1)>=cw*.77)
@@ -5886,7 +5988,10 @@ class App:
                 learned_location=True,learned_sample_count=zone['count']))
         # Check the handwriting engine before EasyOCR as requested.  Reject
         # model-default predictions already caught by negative-control probes.
-        if getattr(self,'trocr_model',None) is not None:
+        viable,reason=self._plausible_case_ink_crop(page_image,(x0,y0,x1,y1))
+        if not viable:
+            self._diag_event('model_crop_rejected',rect=[x0,y0,x1,y1],reason=reason,source='learned')
+        if viable and getattr(self,'trocr_model',None) is not None:
             self._probe_trocr_default_bias()
             with self._perf_measure('learned_handwriting'):
                 raw,score=self._trocr_read_scored(cropped)
@@ -6933,6 +7038,8 @@ class App:
                     self._rescan_force_iids.clear()
                     self._save_state()
                     self._audit_event("SCAN_STOPPED",processed=msg[1])
+                elif kind == "diagnostic_token_needed":
+                    self._configure_github_logs(replacement=True,retry_log=Path(msg[1]))
                 elif kind == "diagnostic_upload_status":
                     self._log("%s",msg[1])
                     if not self.busy:self.status.config(text=msg[1])
@@ -8806,6 +8913,7 @@ class App:
                     "ocr_candidate":normalize_case_number(rec.get("sequence_original_candidate") or rec.get("candidate")),
                     "manual_approved":bool(rec.get("manual_approved")),
                     "auto_labeled":bool(rec.get("auto_labeled")),
+                    "score":float(rec.get("score") or 0),
                     "sequence_inferred":bool(rec.get("sequence_inferred")),
                     "source":"mfcase_send", "sent_at":datetime.now().isoformat(timespec="seconds")}
                 self._save_sent_history()
