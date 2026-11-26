@@ -1,0 +1,226 @@
+name: Publish MFCase v5.6.18 handwritten OCR safety
+on:
+  push:
+    branches:
+      - publish/v5.6.18
+    paths:
+      - .github/workflows/publish-v5618.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-release-5618
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install OCR test and headless GUI dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Verify and unpack official v5.6.17 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p baseline stage transfer dist verify
+          gh release download v5.6.17 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.6.17_Full_Online_Install.zip --dir baseline
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          from hashlib import sha256
+          f=Path('baseline/MFCase_Number_OCR_V5.6.17_Full_Online_Install.zip')
+          assert sha256(f.read_bytes()).hexdigest()=='7f98b839433adee2f9d1dfe381028d4263ab19f92d0b3097dcc152021ace1325'
+          with ZipFile(f) as z:
+              assert z.testzip() is None
+              assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              z.extractall('stage')
+          files=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(files)==1
+          s=files[0].read_text('utf8')
+          assert 'self.app_version = "5.6.17"' in s
+          assert 'sequence_previous_prefill' in s
+          assert 'class MFCasePieTransport' in s
+          print('PASS: official 5.6.17 UI, prefill safety and archive verified')
+          PY
+      - name: Decode approved handwriting-only delta
+        run: |
+          python - <<'PY'
+          import base64,hashlib
+          from io import BytesIO
+          from pathlib import Path
+          from zipfile import ZipFile
+          encoded=Path('tools/transfer_5618.b64').read_text('ascii').strip()
+          data=base64.b64decode(encoded,validate=True)
+          assert hashlib.sha256(data).hexdigest()=='ce1d3b105d60b5770bb934364a3ddf4963ce21b6179705ed839de79b00f190de'
+          with ZipFile(BytesIO(data)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())=={'patch_v5618.py','handwriting_safety.py','test_release_5618.py'}
+              assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              z.extractall('transfer')
+          print('PASS: approved v5.6.18 delta and tests verified')
+          PY
+      - name: Apply seven approved changes without touching location learning
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python transfer/patch_v5618.py "$APP/case_number_ocr.py" transfer/handwriting_safety.py
+          cp transfer/test_release_5618.py "$APP/tests/"
+          python - <<'PY'
+          import ast,hashlib
+          from pathlib import Path
+          source=next(Path('stage').rglob('case_number_ocr.py'))
+          code=source.read_text('utf8')
+          assert 'self.app_version = "5.6.18"' in code
+          assert 'class MFCasePieTransport' in code
+          assert 'sequence_previous_prefill' in code
+          assert 'def _ranked_learned_scan_zones' in code
+          assert 'def _learned_crop_rectangles' in code
+          assert 'def _sequence_consensus_plan' in code
+          assert 'return 95.0' in code
+          assert 'self._maybe_train_trocr(automatic=True)' not in code
+          compile(code,str(source),'exec')
+          app=source.parent
+          for name in ('case_number_ocr.py','updater_apply.py','handwriting_safety.py'):
+              compile((app/name).read_text('utf8'),name,'exec')
+          # Offline setup must explicitly verify the now-required OpenCV.
+          setup=app/'SETUP.bat'
+          setup_src=setup.read_text('utf8')
+          setup_src=setup_src.replace('import torch,torchvision,transformers,easyocr,pymupdf,numpy,PIL;',
+                                      'import torch,torchvision,transformers,easyocr,pymupdf,numpy,PIL,cv2;')
+          setup.write_text(setup_src,encoding='utf8')
+          notes=app/'CHANGELOG_V5_6_18.txt'
+          notes.write_text("""MFCase v5.6.18 — seven approved handwriting OCR corrections
+          Baseline: official published v5.6.17. Learned crop coordinates, clustering, scan location, before/after, sending and VCR UI preserved.
+          - Isolate the handwritten 08- number from full labeled fields before neural recognition or training.
+          - Audit existing labels without deleting examples; quarantine conflicts and weak evidence from model training.
+          - Review incomplete trailing digits; use padding and contrast alternatives on inconclusive OCR.
+          - Permit up to five handwriting reads when earlier results are inconclusive; retain three-read fast path.
+          - Relax overly restrictive geometry/line filters without disabling blank/word hallucination guards.
+          - Back up learning metadata, examples, active and previous models before manually retraining.
+          - Compare trained model against existing and offline original Microsoft baseline on independent source-grouped validation examples; only activate improvement.
+          - UPDATE LEARNING manually controls training; no idle automatic retraining.
+          Privacy: model/document processing remains local. No PDF, crops, metadata or learning files are uploaded by this release.
+          """.replace('          ','').lstrip(),encoding='utf8')
+          # Regenerate integrity manifest after intentional source modifications.
+          expected={n:hashlib.sha256((app/n).read_bytes()).hexdigest()
+                    for n in ('case_number_ocr.py','updater_apply.py','handwriting_safety.py')}
+          verify=app/'verify_package.py'
+          verify.write_text("from pathlib import Path\nimport hashlib\nROOT=Path(__file__).resolve().parent\nEXPECTED="+repr(expected)+
+              "\nfor n,h in EXPECTED.items():\n    assert hashlib.sha256((ROOT/n).read_bytes()).hexdigest()==h,n\nprint('PASS: MFCase v5.6.18 application integrity')\n",encoding='utf8')
+          print('PASS: source and version guarded',hashlib.sha256(source.read_bytes()).hexdigest())
+          PY
+          python "$APP/verify_package.py"
+          python -m compileall -q "$APP"
+      - name: Run inherited OCR regressions and new handwriting safeguards
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP:$APP/tests" python -m unittest discover -s "$APP/tests" -p 'test_release_5*.py' -q
+          MFCASE_SKIP_STARTUP_MAINTENANCE=1 PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import tkinter as tk
+          from case_number_ocr import App
+          root=tk.Tk()
+          app=App(root)
+          root.update()
+          assert app.app_version=='5.6.18'
+          assert not app.show_all_files_var.get()
+          assert app.tree.winfo_exists()
+          assert app.pie_transport.winfo_exists()
+          assert set(app.pie_transport.actions)=={'folder','scan','pause','stop'}
+          assert app.scan_run_time_label.winfo_exists()
+          root.destroy()
+          print('PASS: original v5.6.17 GUI preserved')
+          PY
+      - name: Build complete installer and in-place updater
+        run: |
+          python - <<'PY'
+          import hashlib,importlib.util,shutil,subprocess,sys,tempfile
+          from pathlib import Path
+          from zipfile import ZipFile,ZIP_DEFLATED
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          out=Path('dist')
+          out.mkdir(exist_ok=True)
+          updater_files=['case_number_ocr.py','handwriting_safety.py','updater_apply.py',
+            'SETUP.bat','RUN_CASE_OCR.bat','RUN_CASE_OCR_DEBUG.bat',
+            'Launch_Case_OCR.vbs','MF.ico','CREATE_DESKTOP_SHORTCUT.bat',
+            'Create_Desktop_Shortcut.vbs','README_FIRST.txt',
+            'verify_package.py','update_config.json','CHANGELOG_V5_6_18.txt']
+          full_files=updater_files[:]
+          full_files += [p.name for p in app.glob('CHANGELOG_V5_*.txt')]
+          full_files += [str(p.relative_to(app)) for p in (app/'tests').glob('test_*.py')]
+          full_files += ['MFCase_Combine_And_Trace.py']
+          assert all((app/p).is_file() for p in set(updater_files+full_files))
+          products=[]
+          for name,names,prefix in (
+             ('CaseNumberOCR_Update.zip',updater_files,''),
+             ('MFCase_Number_OCR_V5.6.18_Full_Online_Install.zip',
+                full_files,'MFCase_Number_OCR_V5.6.18_Full_Online_Install/')):
+              target=out/name
+              with ZipFile(target,'w',ZIP_DEFLATED,compresslevel=9) as z:
+                  for entry in sorted(set(names)):
+                      z.write(app/entry,prefix+entry)
+              with ZipFile(target) as z:
+                  assert z.testzip() is None
+                  assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              print('PASS',name,hashlib.sha256(target.read_bytes()).hexdigest())
+              products.append(target)
+          # Run the real updater against a fixture with sensitive PDFs, original
+          # state, learning, model checkpoint and work log. None may change.
+          spec=importlib.util.spec_from_file_location('updater',app/'updater_apply.py')
+          updater=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(updater)
+          with tempfile.TemporaryDirectory() as tmp:
+              root=Path(tmp)
+              for name in ('case_number_ocr.py','SETUP.bat','README_FIRST.txt'):
+                  (root/name).write_text('old')
+              original={'private.pdf':b'secret pdf','learning_examples_v3.json':b'secret learning',
+                '.case_ocr_state.json':b'secret state','logs/worklog.txt':b'secret work log',
+                'models/checkpoint.pt':b'secret model'}
+              for name,data in original.items():
+                  f=root/name
+                  f.parent.mkdir(parents=True,exist_ok=True)
+                  f.write_bytes(data)
+              archive=root/'update.zip'
+              shutil.copy2(products[0],archive)
+              updater.apply_update(root,archive)
+              assert all((root/n).read_bytes()==data for n,data in original.items())
+              subprocess.run([sys.executable,str(root/'verify_package.py')],check=True)
+              assert 'self.app_version = "5.6.18"' in (root/'case_number_ocr.py').read_text()
+          print('PASS in-place updating preserves all private case/learning/model fixtures')
+          PY
+      - name: Persist releasable source in tagged branch
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          mkdir -p "versions/v5.6.18"
+          cp "$APP/case_number_ocr.py" "$APP/handwriting_safety.py" "$APP/verify_package.py" "$APP/CHANGELOG_V5_6_18.txt" "versions/v5.6.18/"
+          cp "$APP/tests/test_release_5618.py" "versions/v5.6.18/test_release_5618.py"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "versions/v5.6.18"
+          git commit -m "Archive tested v5.6.18 standalone source for future releases"
+          git push origin HEAD:publish/v5.6.18
+      - name: Publish v5.6.18 with complete verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.6.18
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          test -s dist/CaseNumberOCR_Update.zip
+          test -s dist/MFCase_Number_OCR_V5.6.18_Full_Online_Install.zip
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$HEAD_SHA" --title "MFCase v5.6.18" --notes-file "$APP/CHANGELOG_V5_6_18.txt"
+          fi
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.6.18_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
