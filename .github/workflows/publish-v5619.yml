@@ -1,0 +1,233 @@
+name: Publish MFCase v5.6.19 compact list and adaptive OCR threshold
+on:
+  push:
+    branches:
+      - publish/v5.6.19
+    paths:
+      - .github/workflows/publish-v5619.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-release-5619
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install OCR regression dependencies and headless GUI
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Load and verify published v5.6.18 baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p baseline stage dist verify
+          gh release download v5.6.18 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.6.18_Full_Online_Install.zip --dir baseline
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          from zipfile import ZipFile
+          file=Path('baseline/MFCase_Number_OCR_V5.6.18_Full_Online_Install.zip')
+          assert sha256(file.read_bytes()).hexdigest()=='0d17081daddc0862eeb930d68e993956cb7885901d6bce590f717e76faa074b1'
+          with ZipFile(file) as archive:
+              assert archive.testzip() is None
+              assert all('..' not in Path(n).parts and not n.startswith('/') for n in archive.namelist())
+              archive.extractall('stage')
+          sources=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(sources)==1
+          assert 'self.app_version = "5.6.18"' in sources[0].read_text('utf8')
+          print('PASS official v5.6.18 release baseline')
+          PY
+      - name: Install staged v5.6.19 app and preserve crop-location code exactly
+        run: |
+          python - <<'PY'
+          import ast,hashlib,shutil
+          from pathlib import Path
+          old=next(Path('stage').rglob('case_number_ocr.py'))
+          app=old.parent
+          new=Path('versions/v5.6.19/case_number_ocr.py')
+          original=old.read_text('utf8')
+          changed=new.read_text('utf8')
+          assert 'self.app_version = "5.6.18"' in original
+          assert 'self.app_version = "5.6.19"' in changed
+          assert 'class MFCasePieTransport' in changed
+          assert 'trailing_digit_uncertain' in changed
+          assert "self._schedule_post_scan_learning(after_send=True)" in changed
+          def definitions(src):
+              tree=ast.parse(src)
+              text=src.splitlines(keepends=True)
+              out={}
+              for item in ast.walk(tree):
+                  if isinstance(item,(ast.FunctionDef,ast.AsyncFunctionDef)):
+                      block=''.join(text[item.lineno-1:item.end_lineno])
+                      out[item.name]=block
+              return out
+          old_f=definitions(original)
+          new_f=definitions(changed)
+          # Location learning, spatial clustering, ROI selection and manual crop
+          # coordinates must remain byte-identical to the released baseline.
+          keep=('_learned_crop_clusters','_learned_crop_rectangles',
+                '_ranked_learned_scan_zones','_get_learned_field_regions',
+                '_automatic_case_crop_rects_4x4')
+          for method in keep:
+              assert method in old_f and old_f[method]==new_f[method],method
+          assert 'self.app_version = "5.6.19"' in changed
+          assert 'return str(folder)' in changed
+          compile(changed,str(new),'exec')
+          shutil.copy2(new,old)
+          shutil.copy2('versions/v5.6.19/test_release_5619.py',
+                       app/'tests/test_release_5619.py')
+          # Remove obsolete version-only expectation from v5.6.17 UI tests.
+          test=app/'tests/test_release_5617.py'
+          t=test.read_text('utf8')
+          before='self.app_version = "5.6.17"'
+          assert t.count(before)==1
+          test.write_text(t.replace(before,'self.app_version = "5.6.19"',1),encoding='utf8')
+          # Two earlier v5.6.18 tests specifically mandated manual-only learning,
+          # which is now reversed. Replace them with equivalent automatic guards.
+          test=app/'tests/test_release_5618.py'
+          t=test.read_text('utf8')
+          start=t.index('    def test_learning_never_starts_automatically(self):')
+          end=t.index('    def test_budget_retains_fast_path(self):',start)
+          replacement="""    def test_automatic_training_starts_only_when_idle(self):
+              a=m.App.__new__(m.App);a._stop_all_requested=False;a._startup_ready=True
+              a.busy=False;a.export_busy=False;a.trocr_training=False
+              a._pending_learning_examples=Mock(return_value=[{'id':1}])
+              a._maybe_train_trocr=Mock(return_value=True)
+              self.assertTrue(a._start_automatic_learning_if_ready())
+              a._maybe_train_trocr.assert_called_once_with(automatic=True)
+          def test_schedule_installs_90_second_idle_timer(self):
+              a=m.App.__new__(m.App);a.root=Mock();a._post_scan_learning_after=None
+              a._stop_all_requested=False
+              a._schedule_post_scan_learning()
+              self.assertEqual(a.root.after.call_args.args[0],90000)
+          """
+          # Keep matching four-space class indentation after dedent.
+          import textwrap
+          replacement=textwrap.dedent(replacement)
+          replacement=textwrap.indent(replacement,'    ')
+          test.write_text(t[:start]+replacement+t[end:],encoding='utf8')
+          print('PASS v5.6.19 local-source checks and retained crop-location logic')
+          PY
+      - name: Compile and test original regressions plus new threshold checks
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py" "$APP/tests/test_release_5619.py"
+          PYTHONPATH="$APP:$APP/tests" python -m unittest discover -s "$APP/tests" -p 'test_release_5*.py' -q
+          MFCASE_SKIP_STARTUP_MAINTENANCE=1 PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import tkinter as tk
+          from case_number_ocr import App
+          root=tk.Tk()
+          app=App(root)
+          root.update()
+          assert app.app_version=='5.6.19'
+          assert app.tree.winfo_exists()
+          assert app.pie_transport.winfo_exists()
+          assert set(app.pie_transport.actions)=={'folder','scan','pause','stop'}
+          assert len(app.pie_transport._hitboxes)==4
+          assert app.dashboard.winfo_height() < root.winfo_height()*.25
+          assert app.lower_panel.winfo_height() > app.dashboard.winfo_height()*3
+          app._open_settings_window()
+          root.update()
+          assert app.threshold_scale.winfo_exists()
+          assert int(app.threshold_scale.cget('from'))==90
+          assert int(app.threshold_scale.cget('to'))==99
+          root.destroy()
+          print('PASS compact dashboard, four round controls and live settings slider')
+          PY
+      - name: Build both packages and test existing in-place updater
+        run: |
+          python - <<'PY'
+          import hashlib,importlib.util,json,shutil,subprocess,sys,tempfile
+          from pathlib import Path
+          from zipfile import ZipFile,ZIP_DEFLATED
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          notes=app/'CHANGELOG_V5_6_19.txt'
+          notes.write_text("""MFCASE V5.6.19 — COMPACT REVIEW LAYOUT AND CONFIGURABLE HANDWRITING
+          Based on the published v5.6.18 release; crop-location learning remains unchanged.
+          - Four separate glossy circular folder, scan, pause and stop buttons inside a compact rectangular panel.
+          - Review table occupies most of the screen; file actions and toolbar are smaller while still legible.
+          - Compact yellow list control and RESCAN ALL; toolbar SELECT ALL removed, table selection unchanged.
+          - Show the full selected folder path instead of shortening it to the final directory.
+          - SETTINGS contains a persistent 90–99% OCR auto-approval slider (95% default).
+          - Handwritten and printed complete 08- reads are eligible at the same selected threshold; no forced 94% confidence cap.
+          - Potentially clipped final digits remain in REVIEW regardless of slider choice.
+          - Guarded background UPDATE LEARNING returns after SEND FILES or 90 seconds of idle time.
+          - Existing TrOCR quarantine, backups, independent baseline validation, offline behavior, STOP, before/after, model checks and file moves retained.
+          """.replace('          ','').lstrip(),encoding='utf8')
+          expected={n:hashlib.sha256((app/n).read_bytes()).hexdigest()
+            for n in ('case_number_ocr.py','updater_apply.py')}
+          (app/'verify_package.py').write_text(
+            'from pathlib import Path\nimport hashlib\nROOT=Path(__file__).resolve().parent\nEXPECTED='+repr(expected)+
+            '\nfor n,h in EXPECTED.items():\n    assert hashlib.sha256((ROOT/n).read_bytes()).hexdigest()==h,n\nprint("PASS: MFCase v5.6.19 integrity")\n',
+            encoding='utf8')
+          updater=['case_number_ocr.py','updater_apply.py','SETUP.bat',
+            'RUN_CASE_OCR.bat','RUN_CASE_OCR_DEBUG.bat','Launch_Case_OCR.vbs',
+            'MF.ico','CREATE_DESKTOP_SHORTCUT.bat','Create_Desktop_Shortcut.vbs',
+            'README_FIRST.txt','verify_package.py','update_config.json',
+            'CHANGELOG_V5_6_19.txt']
+          full=updater[:]
+          full += [p.name for p in app.glob('CHANGELOG_V5_*.txt')]
+          full += [str(p.relative_to(app)) for p in (app/'tests').glob('test_*.py')]
+          full += ['MFCase_Combine_And_Trace.py']
+          assert all((app/n).is_file() for n in set(full+updater))
+          out=Path('dist');out.mkdir(exist_ok=True)
+          for name,files,prefix in (
+            ('CaseNumberOCR_Update.zip',updater,''),
+            ('MFCase_Number_OCR_V5.6.19_Full_Online_Install.zip',
+             full,'MFCase_Number_OCR_V5.6.19_Full_Online_Install/')):
+              destination=out/name
+              with ZipFile(destination,'w',ZIP_DEFLATED,compresslevel=9) as z:
+                  for n in sorted(set(files)):
+                      z.write(app/n,prefix+n)
+              with ZipFile(destination) as z:
+                  assert z.testzip() is None
+                  assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              print('PASS:',name,destination.stat().st_size,hashlib.sha256(destination.read_bytes()).hexdigest())
+          spec=importlib.util.spec_from_file_location('updater',app/'updater_apply.py')
+          mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+          with tempfile.TemporaryDirectory() as temporary:
+              root=Path(temporary)
+              for n in ('case_number_ocr.py','SETUP.bat','README_FIRST.txt'):
+                  (root/n).write_text('old')
+              private={'private.pdf':b'private case pdf',
+                       'learning_examples_v3.json':b'old learning',
+                       '.case_ocr_state.json':b'private review state',
+                       'models/checkpoint.pt':b'private model',
+                       'logs/worklog.txt':b'private log'}
+              for n,content in private.items():
+                  file=root/n;file.parent.mkdir(parents=True,exist_ok=True);file.write_bytes(content)
+              archive=root/'update.zip'
+              shutil.copy2(out/'CaseNumberOCR_Update.zip',archive)
+              mod.apply_update(root,archive)
+              assert all((root/n).read_bytes()==data for n,data in private.items())
+              subprocess.run([sys.executable,str(root/'verify_package.py')],check=True)
+              assert 'self.app_version = "5.6.19"' in (root/'case_number_ocr.py').read_text()
+          print('PASS: updater retains all private files, learning data and models')
+          PY
+      - name: Publish verified v5.6.19 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.6.19
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          test -s dist/CaseNumberOCR_Update.zip
+          test -s dist/MFCase_Number_OCR_V5.6.19_Full_Online_Install.zip
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.6.19" --notes-file "$APP/CHANGELOG_V5_6_19.txt"
+          fi
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.6.19_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
