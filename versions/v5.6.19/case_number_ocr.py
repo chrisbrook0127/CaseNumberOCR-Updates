@@ -6276,6 +6276,7 @@ class App:
                 and isinstance(box,(tuple,list)) and len(box)==4
                 and math.isfinite(score) and score>=threshold):
                 high.append(h)
+        if any(h.get("trailing_digit_uncertain") for h in high):return None
         if len({_case_identity(h["number"]) for h in high})!=1:
             return None
         return max(high,key=lambda h:float(h.get("score") or 0))
@@ -6642,7 +6643,7 @@ class App:
             x0,y0,x1,y1=rect;pad=max(3,int((y1-y0)*.2))
             # One complete printed read >=95% already qualifies; do not
             # spend another model pass manufacturing a contradictory value.
-            printed_complete=any(score>=95. for _n,score,_engine in choices)
+            printed_complete=any(score>=self._get_auto_threshold() for _n,score,_engine in choices)
             if (run_trocr and not printed_complete and calls<(
                     5 if getattr(self,"_page_ocr_budget",None) and
                     self._page_ocr_budget.get("handwriting_uncertain") else 3) and
@@ -6658,7 +6659,7 @@ class App:
                         raw,score=self._trocr_read_scored(crop);calls+=1
                         baseline_raw=normalize_case_number(raw)
                         alt_values=[baseline_raw]
-                        if score<95 or hw5618.following_ink(region,rect):
+                        if score<self._get_auto_threshold() or hw5618.following_ink(region,rect):
                             for variant in hw5618.image_variants(crop):
                                 if calls>=5:break
                                 alt,alt_score=self._trocr_read_scored(variant);calls+=1
@@ -6802,7 +6803,7 @@ class App:
             with self._perf_measure('learned_handwriting'):
                 raw,score=self._trocr_read_scored(number_crop)
                 readings=[normalize_case_number(raw)]
-                if score<95 or number_reason=='edge_clipped':
+                if score<self._get_auto_threshold() or number_reason=='edge_clipped':
                     for variant in hw5618.image_variants(number_crop):
                         alt,alt_score=self._trocr_read_scored(variant)
                         if CASE_RE.fullmatch(normalize_case_number(alt)):
@@ -6884,7 +6885,7 @@ class App:
                     zones=[dict(rect=list(z['rect']),count=z['count']) for z in zones])
                 self._prepare_printed_region(image,zones,(region,offset_x,0))
                 printed_hits=self._automatic_handwritten_4x4(region,offset_x,0,run_trocr=False)
-                printed_complete=self._clear_localized_case(printed_hits,95.0) is not None
+                printed_complete=self._clear_localized_case(printed_hits,self._get_auto_threshold()) is not None
                 learned_complete=False
                 for zone in ([] if printed_complete else zones):
                     if self._page_ocr_budget["handwriting"] >= (
@@ -6898,7 +6899,7 @@ class App:
                         # All of these candidates have a physical location
                         # backed by a human-verified historical crop.
                         results.append((page_index,image,candidates,'learned'))
-                    if self._clear_localized_case(candidates,95.0) is not None:
+                    if self._clear_localized_case(candidates,self._get_auto_threshold()) is not None:
                         learned_complete=True
                         break
                 if not learned_complete:
@@ -6942,7 +6943,7 @@ class App:
                 candidate_cases={_case_identity(h.get("number")) for _idx,_im,hh,_kind in matches
                                  for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))}
                 if (len(candidate_cases)==1 and matches and
-                    any(self._clear_localized_case(hh,95.0) is not None
+                    any(self._clear_localized_case(hh,self._get_auto_threshold()) is not None
                         for _idx,_im,hh,_kind in matches)):
                     if len(doc)>page_index+1:
                         self._diag_event("scan_fast_pdf",file=Path(path).name,
@@ -6969,7 +6970,7 @@ class App:
                 index,image,hits,kind=entry
                 verified=max((float(h.get("score") or 0) for h in hits
                     if h.get("box_verified") and h.get("box_rect")),default=0.0)
-                return (verified>=95.0,verified,
+                return (verified>=self._get_auto_threshold(),verified,
                         {"learned":6,"header":5,"incident":4,"case":3,"fallback":2}[kind])
             index,image,hits,kind=max(results,key=rank)
             self._diag_event("ocr_candidates",page=index+1,source=kind,
@@ -7009,7 +7010,7 @@ class App:
                 if _source in ("header","fallback","incident","case","learned")
                 for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))
                 and h.get("box_verified") and h.get("box_rect")
-                and float(h.get("score") or 0)>=95.0}
+                and float(h.get("score") or 0)>=self._get_auto_threshold()}
             all_region_cases={_case_identity(h.get("number"))
                 for _idx,_im,other_hits,source in results
                 if source in ("header","fallback","incident","case","learned")
@@ -7018,9 +7019,10 @@ class App:
             # Only independently verified, >=95% competing readings of the
             # selected physical field can block automatic approval. A weak
             # variant or unrelated lower-page number cannot cause REVIEW.
+            trailing_review=any(h.get("trailing_digit_uncertain") for h in hits)
             ambiguous=len({_case_identity(h.get("number")) for h in hits
                            if h.get("box_verified") and h.get("box_rect") and
-                           float(h.get("score") or 0.)>=95.0})>1
+                           float(h.get("score") or 0.)>=self._get_auto_threshold()})>1 or trailing_review
             visuals=[]
             for h in hits:
                 rect=h.get("rect")
@@ -7034,20 +7036,23 @@ class App:
                     "engine_scores":dict(h.get("engine_scores") or {}),
                     "label_type":h.get("label_type"),
                     "label_distance":0.0,
-                    "learned_location":bool(h.get("learned_location"))})
+                    "learned_location":bool(h.get("learned_location")),
+                    "trailing_digit_uncertain":bool(h.get("trailing_digit_uncertain"))})
             self._diag_event("ocr_decision",page=index+1,source=kind,
                  primary=number,score=float(best.get("score") or 0),
                  ambiguous=ambiguous,conflicting=sorted(distinct),
                  engines=engines,selected_bbox=best.get("rect"),
                  outcome="manual_review" if ambiguous else "candidate_ready")
-            if ambiguous:
+            if trailing_review:
+                note="Potential missing final digit — MANUAL REVIEW (trailing-digit uncertainty)"
+            elif ambiguous:
                 all_conflicts=sorted({h.get("number") for h in hits
                         if CASE_RE.fullmatch(normalize_case_number(h.get("number")))
-                        and float(h.get("score") or 0.)>=95.0})
+                        and float(h.get("score") or 0.)>=self._get_auto_threshold()})
                 note=(f"upper-right quarter case field has conflicting OCR reads: "
                       + ", ".join(all_conflicts)+" — MANUAL REVIEW")
             elif kind=="learned":
-                note="Verified manual-crop location — handwriting-first OCR; 95% required for auto-completion"
+                note=f"Verified manual-crop location — handwriting-first OCR; {self._get_auto_threshold():g}% required for auto-completion"
             elif kind=="incident":
                 note="Case field right-of-label full number — Upper-right quarter labeled printed OCR"
             elif kind=="case":
@@ -7581,7 +7586,7 @@ class App:
                                      else "fallback" if note.startswith("Upper-right")
                                      else "incident-unreadable" if note.startswith("Case field located")
                                      else "unknown"),
-                        scan_ambiguous="conflicting OCR reads" in note,
+                        scan_ambiguous=("conflicting OCR reads" in note or "trailing-digit uncertainty" in note),
                         sequence_excluded=False,
                         sequence_conflict=False, sequence_inferred=False,
                         sequence_previous_prefill=False,
@@ -7591,7 +7596,7 @@ class App:
                      # Diagnostic counters belong to THIS run, not accumulated saved state.
                     if note.startswith("Scan error"):
                         reason = "scan_error"
-                    elif "conflicting OCR reads" in note:
+                    elif "conflicting OCR reads" in note or "trailing-digit uncertainty" in note:
                         reason = "conflicting_readings"
                     elif note.startswith("Upper-right"):
                         reason = "unverified_fallback_location"
