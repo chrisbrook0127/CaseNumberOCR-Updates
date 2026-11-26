@@ -69,8 +69,16 @@ def assemble():
     before=(app/'case_number_ocr.py').read_text('utf8')
     assert 'self.app_version = "6.0.3"' in before
     assert PATCH.is_file()
-    subprocess.run(['git','apply','--check',str(PATCH)],cwd=str(app),check=True)
-    subprocess.run(['git','apply',str(PATCH)],cwd=str(app),check=True)
+    # Windows Git checkouts can convert *.diff to CRLF, while the official
+    # published v6.0.3 sources inside the ZIP are LF. Normalize *only* the
+    # transport patch, and verify it against the audited LF SHA256.
+    patched_bytes=PATCH.read_bytes().replace(b'\r\n',b'\n')
+    assert sha256(patched_bytes)=='613d1a5f6363d315c37a9f7ea846070175ddb789beeee0bf656ac7f613f2a464', 'Modified source patch'
+    normalized=work/'patch_verified_lf.diff'
+    normalized.write_bytes(patched_bytes)
+    git=['git','-c','core.autocrlf=false','-c','core.safecrlf=false','apply']
+    subprocess.run(git+['--check',str(normalized)],cwd=str(app),check=True)
+    subprocess.run(git+[str(normalized)],cwd=str(app),check=True)
     after=(app/'case_number_ocr.py').read_text('utf8')
     assert 'self.app_version = "6.0.4"' in after
     assert all((app/n).is_file() for n in EXPECTED_PATCHED)
