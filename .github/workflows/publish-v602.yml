@@ -1,0 +1,156 @@
+name: MFCase v6.0.2 sequence tolerance release
+on:
+  push:
+    branches:
+      - publish/v6.0.2
+    paths:
+      - .github/workflows/publish-v602.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-release-v602
+  cancel-in-progress: false
+jobs:
+  linux_validation:
+    name: Linux regression GUI and update protection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install OCR test prerequisites and GUI display
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Retrieve exact official v6.0.1 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p baseline
+          gh release download v6.0.1 --repo "$GITHUB_REPOSITORY" \
+            --pattern MFCase_Number_OCR_V6.0.1_Full_Online_Install.zip --dir baseline
+      - name: Apply verified sequence-only delta and audit unchanged OCR
+        run: python tools/assemble_v602.py assemble
+      - name: Run 235 existing and new regression checks
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP:$APP/tests" python -m unittest discover -s "$APP/tests" -p 'test_release_*.py' -q
+      - name: Validate GUI full list, controls and confidence without startup network
+        env:
+          MFCASE_SKIP_STARTUP_MAINTENANCE: '1'
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import tkinter as tk
+          from case_number_ocr import App
+          root=tk.Tk()
+          app=App(root)
+          root.update()
+          assert app.app_version=='6.0.2'
+          assert app.show_all_files_var.get() is True
+          assert app.tree.winfo_exists()
+          assert app.pie_transport.winfo_exists()
+          assert set(app.pie_transport.actions)=={'folder','scan','pause','stop'}
+          assert len(app.pie_transport._hitboxes)==4
+          assert callable(app._show_order_popup)
+          root.destroy()
+          print('PASS unchanged GUI and review popup')
+          PY
+      - name: Package release and verify actual in-place updater protection
+        run: python tools/assemble_v602.py package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mfcase-v602-tested-build
+          path: |
+            dist/CaseNumberOCR_Update.zip
+            dist/MFCase_Number_OCR_V6.0.2_Full_Online_Install.zip
+            dist/SHA256SUMS.json
+            dist/tested_v602_source/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows_validation:
+    name: Windows 235-test regression and update safety
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install OCR test dependencies
+        run: python -m pip install numpy pillow "pymupdf<2.0" opencv-python-headless
+      - name: Retrieve verified baseline
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path baseline -Force | Out-Null
+          gh release download v6.0.1 --repo "$env:GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V6.0.1_Full_Online_Install.zip --dir baseline
+      - name: Independently verify and assemble unchanged OCR base
+        run: python tools/assemble_v602.py assemble
+      - name: Test Windows sequence review, locks, before-after and GUI logic
+        shell: pwsh
+        run: |
+          $app=(Get-ChildItem -Path stage -Filter case_number_ocr.py -Recurse | Select-Object -First 1).Directory.FullName
+          $env:PYTHONPATH="$app;$app\tests"
+          python -m unittest discover -s "$app\tests" -p "test_release_*.py" -q
+      - name: Verify Windows updater preserves PDF learning and model files
+        run: python tools/assemble_v602.py package
+
+  release:
+    name: Publish only after Linux and Windows tests succeed
+    runs-on: ubuntu-latest
+    needs: [linux_validation, windows_validation]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mfcase-v602-tested-build
+          path: dist
+      - name: Verify package SHA256 digests from validated build
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json,hashlib
+          d=Path('dist')
+          expected=json.loads((d/'SHA256SUMS.json').read_text('utf8'))
+          assert set(expected)=={'CaseNumberOCR_Update.zip','MFCase_Number_OCR_V6.0.2_Full_Online_Install.zip'}
+          for name,sha in expected.items():
+              f=d/name
+              assert f.stat().st_size>100000
+              assert hashlib.sha256(f.read_bytes()).hexdigest()==sha
+              print('PASS:',name,sha)
+          PY
+      - name: Archive independently verified full source in versioned folder
+        run: |
+          mkdir -p versions/v6.0.2
+          cp -R dist/tested_v602_source/. versions/v6.0.2/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add versions/v6.0.2
+          git commit -m "Archive tested MFCase v6.0.2 sources and sequence regressions"
+          git push origin HEAD:publish/v6.0.2
+      - name: Publish verified full installer and updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v6.0.2
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft \
+              --target publish/v6.0.2 --title "MFCase v6.0.2" \
+              --notes "Sequence-only repair based on v6.0.1. Real two-case tolerance; 08-603 is not blamed for 08-403; matching before/after anchors bypass independent OCR outliers; valid nearby OCR and red locks are preserved. Both OCR engines and handwriting learning remain byte-for-byte unchanged. All 235 regression tests, Windows tests, GUI and updater protection passed."
+          fi
+          gh release upload "$TAG" \
+            "$PWD/dist/CaseNumberOCR_Update.zip" \
+            "$PWD/dist/MFCase_Number_OCR_V6.0.2_Full_Online_Install.zip" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          mkdir -p check
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern CaseNumberOCR_Update.zip --dir check
+          cmp dist/CaseNumberOCR_Update.zip check/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
