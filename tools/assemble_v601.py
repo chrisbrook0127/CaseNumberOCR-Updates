@@ -130,7 +130,7 @@ def package()->None:
   module.apply_update(existing,arc)
   assert all((existing/n).read_bytes()==v for n,v in secret.items())
   subprocess.run([sys.executable,str(existing/'verify_package.py')],check=True)
-  assert 'self.app_version = "6.0.1"' in (existing/'case_number_ocr.py').read_text()
+  assert 'self.app_version = "6.0.1"' in (existing/'case_number_ocr.py').read_text(encoding='utf-8')
   with ZipFile(existing/'evil.zip','w') as z:
    z.writestr('case_number_ocr.py',b'malicious')
    z.writestr('private.pdf',b'unsafe')
