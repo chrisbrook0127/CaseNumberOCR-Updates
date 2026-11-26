@@ -738,7 +738,7 @@ class MFCasePieTransport(tk.Canvas):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. CASE NUMBER OCR — V5.6.20")
+        root.title("M.F. CASE NUMBER OCR — V6.0.0")
         root.geometry("1180x780")
         root.minsize(1040, 720)
         self.folder = None
@@ -824,7 +824,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.20"
+        self.app_version = "6.0.0"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -1152,10 +1152,13 @@ class App:
                 "sequence_original_ambiguous":bool(old.get("sequence_original_ambiguous",False)),
                 "sequence_excluded": bool(old.get("sequence_excluded", False)),
                 "sequence_locked": bool(old.get("sequence_locked", False)),
+                "order_review_ack": old.get("order_review_ack", ""),
+                "excluded_send_requested": False,
                 "scan_selected": bool(old.get("scan_selected", True)),
                 "learning_pending": bool(old.get("learning_pending", False)),
                 "export_error": str(old.get("export_error", ""))
             }
+            if "scan_raw_candidate" in old:item["scan_raw_candidate"]=old["scan_raw_candidate"]
             if not item.get("case_draft") and not str(item.get("status", "")).startswith("Edited —"):
                 item.pop("case_draft",None)
             if item["auto_labeled"] and item["approval_rule_version"]!="5.3.2":
@@ -2173,14 +2176,19 @@ class App:
             stamp=Path(name).stat().st_mtime_ns
         except OSError:
             stamp=0
-        key=(name,stamp,str(record.get("candidate") or ""),str(record.get("confirmed") or ""))
+        key=("source-crop-v2",name,stamp,str(record.get("candidate") or ""),str(record.get("confirmed") or ""),
+             str(record.get("manual_crop_rect")),
+             str((record.get("preview_meta") or {}).get("rect")),
+             str((record.get("preview_meta") or {}).get("candidates")),
+             (record.get("preview_meta") or {}).get("page_num",0))
         token=_hashlib.sha256(repr(key).encode("utf-8")).hexdigest()[:25]
         return base/(token+".png")
 
     def _make_scan_preview(self,iid,record):
         from PIL import Image,ImageDraw,ImageFont,ImageTk
         cache_path=self._scan_preview_cache_file(record)
-        if not record.get("snippet") and record.get("preview_meta") and not cache_path.is_file():
+        if (not record.get("snippet") and not cache_path.is_file() and
+                (record.get("preview_meta") or record.get("manual_crop_rect"))):
             self._ensure_preview(record)
         snippet=record.get("snippet")
         existing=self._scan_preview_keys.get(iid)
@@ -2188,6 +2196,7 @@ class App:
         if existing==key and iid in self._scan_preview_photos:
             return self._scan_preview_photos[iid]
         tile=None
+        actual_crop=False
         if snippet and len(snippet)>1 and snippet[1] is not None:
             try:
                 page=Image.fromarray(snippet[1]).convert("RGB")
@@ -2197,6 +2206,10 @@ class App:
                     try:return _case_identity(value)==_case_identity(case) and _case_identity(case) is not None
                     except (ValueError,TypeError):return False
                 chosen=next((h for h in candidates if h.get("rect") and same_case(h.get("number"))),None)
+                if chosen is None:
+                    raw=_case_identity(record.get("scan_raw_candidate") or record.get("sequence_original_candidate") or record.get("candidate"))
+                    chosen=next((h for h in candidates if h.get("rect") and _case_identity(h.get("number"))==raw),None)
+                if chosen is None and candidates:chosen=candidates[0]
                 rect=(record.get("manual_crop_rect") if record.get("manual_crop_origin")=="drawn"
                       else chosen.get("rect") if chosen else None)
                 # A bare snippet rect cannot authorize a box: it must belong
@@ -2215,6 +2228,7 @@ class App:
                 else:
                     raise ValueError("No verified 08- number crop; manual review required")
                 crop=page.crop(box)
+                actual_crop=True
                 crop.thumbnail((216,64),Image.Resampling.LANCZOS)
                 tile=Image.new("RGB",(222,68),"white")
                 tile.paste(crop,((222-crop.width)//2,(68-crop.height)//2))
@@ -2232,7 +2246,7 @@ class App:
             msg="No 08- crop — review" if not record.get("candidate") else "08- crop unavailable"
             draw.text((9,25),msg,fill="#555555")
         ImageDraw.Draw(tile).rectangle((0,0,221,67),outline="#999999",width=1)
-        if snippet and snippet[1] is not None:
+        if actual_crop:
             try:
                 cache_path.parent.mkdir(parents=True,exist_ok=True)
                 tile.save(cache_path)
@@ -2435,6 +2449,239 @@ class App:
             return
         return self.export(selected_iids=[iid])
 
+    @staticmethod
+    def _order_review_value(record):
+        if record.get("status") in ("Not scanned","Scanning"):return None
+        if record.get("case_draft") or record.get("sequence_excluded"):
+            value=record.get("case_draft","")
+        elif record.get("manual_approved") and not record.get("auto_labeled"):
+            value=record.get("confirmed","")
+        elif "scan_raw_candidate" in record:
+            value=record["scan_raw_candidate"]
+        elif record.get("sequence_inferred") or record.get("sequence_previous_prefill"):
+            value=record.get("sequence_original_candidate","")
+        else:
+            value=record.get("candidate") or record.get("confirmed","")
+        return _case_identity(value)
+
+    def _order_review_order(self):
+        """All original positions, including sent/excluded context; no table ordering."""
+        rows={}
+        folder=Path(self.folder) if self.folder else None
+        if folder is None:return []
+        for iid,r in self.records.items():
+            path=Path(r.get("path") or "")
+            if path.parent not in (folder,folder/"COMPLETED"):continue
+            original=Path(r.get("original_name") or path.name).name
+            rows[original.casefold()]=(iid,r)
+        for original,h in getattr(self,"sent_history",{}).items():
+            if original.casefold() in rows:continue
+            r=dict(h,path=folder/"COMPLETED"/h["destination_name"],original_name=original,
+                   candidate=h.get("ocr_candidate") or h.get("confirmed",""),exported=True,
+                   status="SENT — CONTEXT ONLY",snippet=None)
+            rows[original.casefold()]=("sent-history::"+original,r)
+        return sorted(rows.values(),key=lambda x:self._natural_pdf_sort_key(
+            x[1].get("original_name") or Path(x[1]["path"]).name))
+
+    def _order_review_findings(self):
+        order=self._order_review_order();flagged=set();previous=None
+        for iid,r in order:
+            if r.get("sequence_locked"):continue
+            value=self._order_review_value(r)
+            if not value:continue
+            current=(iid,r,int(value[3:]))
+            if previous and previous[2]>current[2]:
+                for key,record,_ in (previous,current):
+                    if (key in self.records and not record.get("exported") and
+                        record.get("order_review_ack")!=self._order_review_value(record)):
+                        flagged.add(key)
+            previous=current
+        return [iid for iid,_ in order if iid in flagged]
+
+    def _order_review_context(self, iid):
+        order=self._order_review_order()
+        index=next((i for i,(key,_) in enumerate(order) if key==iid),None)
+        return order[max(0,index-2):index+3] if index is not None else []
+
+    def _check_order_review(self):
+        """Pause sequence changes/sending until genuine backward steps are inspected."""
+        if self.busy:return False
+        findings=self._order_review_findings()
+        self._order_review_ids=findings
+        self._order_review_pending=bool(findings)
+        if not findings:return False
+        for iid in findings:
+            r=self.records[iid]
+            if r.get("sequence_inferred") or r.get("sequence_previous_prefill"):
+                raw=self._order_review_value(r) or ""
+                r.update(candidate=raw,confirmed="",manual_approved=False,auto_labeled=False,
+                         sequence_inferred=False,sequence_previous_prefill=False,
+                         status="ORDER REVIEW — ORIGINAL OCR SHOWN")
+                if self.completed_tree.exists(iid):self.completed_tree.delete(iid)
+                self._insert_scan_row(iid,r)
+        self._save_state()
+        self.status.config(text="ORDER REVIEW REQUIRED — SENDING PAUSED. CHECK THE HIGHLIGHTED FILES.")
+        self._schedule_order_popup()
+        return True
+
+    def _schedule_order_popup(self):
+        if not getattr(self,"_order_review_pending",False):return
+        if getattr(self,"_order_popup_job",None) is None:
+            self._order_popup_job=self.root.after_idle(self._show_order_popup)
+
+    def _show_order_popup(self):
+        self._order_popup_job=None
+        findings=getattr(self,"_order_review_ids",[])
+        if not findings or not getattr(self,"_order_review_pending",False):return
+        win=getattr(self,"_order_popup",None)
+        if win is None or not win.winfo_exists():
+            win=tk.Toplevel(self.root);self._order_popup=win
+            win.title("CASE ORDER REVIEW — SENDING PAUSED")
+            win.geometry("1120x580");win.minsize(900,460)
+            win.protocol("WM_DELETE_WINDOW",self._hide_order_popup)
+            self._order_popup_body=ttk.Frame(win,padding=10)
+            self._order_popup_body.pack(fill="both",expand=True)
+        body=self._order_popup_body
+        for child in body.winfo_children():child.destroy()
+        current=getattr(self,"_order_current",None)
+        if current not in findings:current=findings[0]
+        self._order_current=current
+        position=findings.index(current)
+        ttk.Label(body,text=f"ORDER CHECK {position+1} OF {len(findings)} — VERIFY OR EXCLUDE THE HIGHLIGHTED FILE",
+                  font=("Segoe UI",12,"bold")).pack(anchor="w",pady=(0,8))
+        viewport=ttk.Frame(body);viewport.pack(fill="both",expand=True)
+        canvas=tk.Canvas(viewport,highlightthickness=0)
+        xs=ttk.Scrollbar(viewport,orient="horizontal",command=canvas.xview)
+        ys=ttk.Scrollbar(viewport,orient="vertical",command=canvas.yview)
+        canvas.configure(xscrollcommand=xs.set,yscrollcommand=ys.set)
+        xs.pack(side="bottom",fill="x");ys.pack(side="right",fill="y")
+        canvas.pack(side="left",fill="both",expand=True)
+        table=ttk.Frame(canvas)
+        canvas.create_window((0,0),window=table,anchor="nw")
+        table.bind("<Configure>",lambda event:canvas.configure(scrollregion=canvas.bbox("all")))
+        for col,title in enumerate(("ORIGINAL FILE","SOURCE CROP","CASE NUMBER","APPROVE","EXCLUDE","SEND","REVIEW","STATUS","OCR SCORE")):
+            ttk.Label(table,text=title).grid(row=0,column=col,padx=4,pady=5)
+        table.columnconfigure(0,weight=1);table.columnconfigure(7,weight=1)
+        self._release_order_previews()
+        self._order_entry_vars={}
+        for row,(iid,r) in enumerate(self._order_review_context(current),1):
+            bg="#fff0b3" if iid==current else "#ffffff"
+            tk.Label(table,text=r.get("original_name") or Path(r["path"]).name,bg=bg,
+                     font=("Segoe UI",10,"bold" if iid==current else "normal"),wraplength=160).grid(row=row,column=0,sticky="nsew",padx=2,pady=3)
+            photo=self._make_scan_preview(iid,r);self._order_photo_refs.append(photo)
+            self._order_preview_ids.add(iid)
+            label=tk.Label(table,image=photo,bg=bg);label.grid(row=row,column=1,padx=3,pady=3)
+            editable=iid in self.records and not r.get("exported")
+            var=tk.StringVar(value=r.get("case_draft") if r.get("sequence_excluded") else
+                             r.get("confirmed") or r.get("candidate") or "")
+            self._order_entry_vars[iid]=var
+            entry=ttk.Entry(table,textvariable=var,width=15,font=("Segoe UI",12))
+            entry.grid(row=row,column=2,padx=4)
+            if editable:
+                var.trace_add("write",lambda *_,key=iid,v=var:self._order_edit(key,v.get()))
+                entry.bind("<Return>",lambda event,key=iid:self._order_approve(key))
+            else:entry.configure(state="readonly")
+            blocked=not editable or self._scan_row_locked(iid)
+            for col,text,color,action in ((3,"✓","#188038",self._order_approve),
+                    (4,"☑" if r.get("sequence_locked") else "☐","#b3261e",self._order_exclude),
+                    (5,"SEND","#1456a8",self._send_scan_row),
+                    (6,"R","#1456a8",self._order_full_review)):
+                button=tk.Button(table,text=text,bg=color,fg="white",font=("Segoe UI",11,"bold"),
+                                 command=lambda key=iid,fn=action:fn(key))
+                button.grid(row=row,column=col,padx=4,ipadx=5,ipady=5)
+                if blocked and col!=6:button.configure(state="disabled")
+            tk.Label(table,text="SENT" if r.get("exported") else self._workflow_status(r),bg=bg,
+                     wraplength=130).grid(row=row,column=7,sticky="nsew",padx=2,pady=3)
+            scores=r.get("engine_scores") or {}
+            score_text=" / ".join(f"{scores[e]:.1f}%" if e in scores else "—" for e in ("EasyOCR","TrOCR")) if scores else f"{float(r.get('score') or 0):.1f}%"
+            ttk.Label(table,text=score_text).grid(row=row,column=8,padx=5)
+        bar=ttk.Frame(body);bar.pack(fill="x",pady=(8,0))
+        ttk.Button(bar,text="PREVIOUS ISSUE",command=lambda:self._order_next(-1)).pack(side="left")
+        ttk.Button(bar,text="NEXT ISSUE",command=lambda:self._order_next(1)).pack(side="left",padx=8)
+        ttk.Button(bar,text="CLOSE — KEEP SENDING PAUSED",command=self._hide_order_popup).pack(side="right")
+        win.lift()
+
+    def _release_order_previews(self):
+        for iid in getattr(self,"_order_preview_ids",set()):
+            if iid not in getattr(self,"_scan_preview_widgets",{}):
+                getattr(self,"_scan_preview_photos",{}).pop(iid,None)
+                getattr(self,"_scan_preview_keys",{}).pop(iid,None)
+        self._order_preview_ids=set();self._order_photo_refs=[]
+
+    def _hide_order_popup(self):
+        job=getattr(self,"_order_popup_job",None)
+        if job is not None:self.root.after_cancel(job)
+        self._order_popup_job=None
+        self._save_state()
+        win=getattr(self,"_order_popup",None)
+        if win is not None and win.winfo_exists():win.destroy()
+        self._order_popup=None
+        self._release_order_previews()
+
+    def _order_next(self, direction):
+        ids=self._order_review_ids
+        self._order_current=ids[(ids.index(self._order_current)+direction)%len(ids)]
+        self._show_order_popup()
+
+    def _order_edit(self, iid, text):
+        r=self.records[iid]
+        r.update(case_draft=text,confirmed="",manual_approved=False,auto_labeled=False,
+                 sequence_inferred=False,sequence_excluded=True,order_review_ack="",
+                 status="EDITED — CLICK GREEN TO APPROVE")
+        if self.completed_tree.exists(iid):self.completed_tree.delete(iid)
+        self._insert_scan_row(iid,r)
+        self._update_completed_count()
+
+    def _order_approve(self, iid):
+        self._quick_approve(iid)
+        self._schedule_order_popup()
+
+    def _order_exclude(self, iid):
+        self._toggle_sequence_lock(iid)
+        # Keep the current issue visible until green is pressed, allowing RED + GREEN.
+        self._schedule_order_popup()
+
+    def _order_full_review(self, iid):
+        if iid in self.records and not self.records[iid].get("exported"):
+            self._open_review_iid(iid)
+            return
+        r=next((r for key,r in self._order_review_order() if key==iid),None)
+        if r:
+            try:os.startfile(str(r["path"]))
+            except (AttributeError,OSError):self.status.config(text="OPEN THE SENT PDF FROM COMPLETED FOR FULL-PAGE REVIEW.")
+
+    def _order_review_after_approval(self, iid):
+        r=self.records[iid]
+        r["order_review_ack"]=_case_identity(r.get("confirmed")) or ""
+        if r.get("sequence_locked"):r["excluded_send_requested"]=True
+        if not self._save_state():
+            r["excluded_send_requested"]=False
+            self.status.config(text="APPROVAL COULD NOT BE SAVED — SEND BLOCKED.");return
+        if getattr(self,"_order_review_pending",False):
+            if not self._check_order_review():
+                self._hide_order_popup()
+                self._apply_sequence_consensus()
+                self._sequence_review_pending=False
+                self._save_state()
+        self._drain_excluded_sends()
+        self._resume_order_send_when_ready()
+
+    def _resume_order_send_when_ready(self):
+        resume=getattr(self,"_order_resume_send",None)
+        if resume is None or self.busy or self.export_busy or getattr(self,"_order_review_pending",False):return
+        ids,automatic=resume
+        self._order_resume_send=None
+        if automatic and getattr(self,"_stop_all_requested",False):return
+        self.export(selected_iids=ids,automatic=automatic)
+
+    def _drain_excluded_sends(self):
+        if self.busy or self.export_busy:return
+        for iid,r in self.records.items():
+            if r.get("excluded_send_requested") and r.get("sequence_locked") and not r.get("exported"):
+                if self._eligible_for_kurt(iid,r):
+                    self.export(selected_iids=[iid]);return
+
+
     def _quick_approve(self, iid):
         if self._scan_row_locked(iid):
             self.status.config(text="THIS FILE IS BEING SCANNED, SENT OR IS NOT EDITABLE.")
@@ -2451,7 +2698,8 @@ class App:
                 and not record.get("learning_pending") and not record.get("sequence_conflict")):
             self.status.config(text=f"{record['path'].name} is already COMPLETED and ready to send.")
             self._insert_scan_row(iid,record)
-            return  # Never duplicate learning or rename a previously approved file.
+            self._order_review_after_approval(iid)
+            return  # Never duplicate learning for a previously approved file.
         if not CASE_RE.fullmatch(normalize_case_number(value)):
             self.status.config(text="ENTER A COMPLETE 08- CASE NUMBER BEFORE ACCEPTING.")
             self._start_scan_case_edit(iid)
@@ -2464,6 +2712,7 @@ class App:
             record.pop("case_draft",None)
             self._save_state()
             self._insert_scan_row(iid,record)
+            self._order_review_after_approval(iid)
 
     def _save_scan_draft(self, iid, entry):
         record=self.records[iid]
@@ -3017,6 +3266,8 @@ class App:
                             initialdir=getattr(self,"_last_folder",None) or None)
         if not folder:
             return
+        if getattr(self,"_order_popup",None) is not None:self._hide_order_popup()
+        self._order_review_pending=False;self._order_resume_send=None;self._order_review_ids=[]
         self.folder = Path(folder)
         self._last_folder=str(self.folder)
         self._save_user_settings()
@@ -3087,10 +3338,13 @@ class App:
                 "sequence_original_ambiguous":bool(rec.get("sequence_original_ambiguous",False)),
                 "sequence_excluded": bool(rec.get("sequence_excluded", False)),
                 "sequence_locked": bool(rec.get("sequence_locked", False)),
+                "order_review_ack": rec.get("order_review_ack", ""),
                 "scan_selected": bool(rec.get("scan_selected", True)),
                 "learning_pending": bool(rec.get("learning_pending", False)),
                 "export_error": str(rec.get("export_error", ""))
             }
+            if "scan_raw_candidate" in rec:
+                payload["files"][path.name]["scan_raw_candidate"]=rec["scan_raw_candidate"]
         target = self.folder / ".case_ocr_state.json"
         temp = target.with_suffix(".json.tmp")
         try:
@@ -3576,7 +3830,7 @@ class App:
             # The transfer can outlast the first idle interval; retry after it finishes.
             self._post_scan_learning_after=self.root.after(30000,lambda:self._run_post_scan_learning_if_idle(after_send=after_send))
             return
-        if (self.busy or self.paused or self.trocr_training
+        if (getattr(self,"_order_review_pending",False) or self.busy or self.paused or self.trocr_training
                 or self._loading_jobs or not self._startup_ready):
             self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
             return
@@ -4508,6 +4762,11 @@ class App:
         """Only the worker's all-files-done event can release the export barrier."""
         self._sequence_review_pending=True
         self._scan_progress_update(len(self.scan_items),"CHECKING BEFORE / AFTER")
+        if self._check_order_review():
+            self._sequence_review_pending=False
+            self._save_state()
+            self._scan_progress_update(len(self.scan_items),"ORDER REVIEW — SENDING PAUSED")
+            return
         self._apply_sequence_consensus()
         self._sequence_review_pending=False
         self._save_state()
@@ -4603,6 +4862,7 @@ class App:
         return plan,conflicts
 
     def _apply_sequence_consensus(self, affected_range=None):
+        if getattr(self,"_order_review_pending",False):return 0
         with self._perf_measure("before_after"):
             result=self._apply_sequence_consensus_impl(affected_range=affected_range)
         self._diag_event("performance_stage",stage="before_after",
@@ -4805,8 +5065,11 @@ class App:
 
     def _recheck_after_decision(self):
         """Refresh dependent approvals after a human changes an anchor."""
-        if self.export_busy or self._training_blocks_work():
+        if self.export_busy or self._training_blocks_work() or self.busy:
             return
+        if getattr(self,"_order_review_pending",False):
+            self._schedule_order_popup();return
+        if self._check_order_review():return
         try:
             self._last_sequence_signature=None
             self._apply_sequence_consensus()
@@ -7620,6 +7883,8 @@ class App:
                     normalized_candidate = normalize_case_number(cand) if cand else ""
                     if not CASE_RE.fullmatch(normalized_candidate):
                         normalized_candidate = ""  # Hard 08- gate before saving any OCR read.
+                    r["scan_raw_candidate"]=normalized_candidate
+                    r["order_review_ack"]=""
                     if r.get("manual_approved") and not r.get("auto_labeled"):
                         self._diag_event("manual_override_preserved",
                             file=Path(r["path"]).name,ocr_candidate=normalized_candidate,
@@ -7752,7 +8017,8 @@ class App:
                     self._insert_scan_row(iid, r)
                     self._scan_progress_update(idx,"SCANNING")
                     self.status.config(text=f"Scanned {idx} of {len(self.scan_items)} PDF(s): {Path(r['path']).name}")
-                    self._incremental_sequence_check(iid)
+                    # Review raw OCR order after the full scan, before sequence inference.
+                    if not self.busy:self._incremental_sequence_check(iid)
                     self._refresh_review_controls()
                     self._update_completed_count()
                     self._release_page_pixels(r)
@@ -7779,6 +8045,9 @@ class App:
                     self._refresh_scan_button()
                     self._export_reschedule = False
                     self._schedule_auto_export()
+                    self._schedule_order_popup()
+                    self._drain_excluded_sends()
+                    self._resume_order_send_when_ready()
                     self._schedule_post_scan_learning(after_send=True)
                 elif kind == "engine_status":
                     _, message = msg
@@ -7963,6 +8232,8 @@ class App:
                               else "Scan complete. Approved PDFs remain available for review and SEND FILES."))
                     self._refresh_learning_button_state()
                     self._save_state()
+                    if getattr(self,"_order_review_pending",False):
+                        self.status.config(text="SCAN COMPLETE — ORDER REVIEW REQUIRED; BATCH SENDING PAUSED.")
                     self._diag_event("run_end",summary=dict(self._run_outcomes))
                     self._active_scan_iid=None
                     self._rescan_force_iids.clear()
@@ -7970,6 +8241,7 @@ class App:
                     if bool(self.auto_send_var.get()):
                         self.root.after_idle(lambda:self.export(automatic=True))
                     self._schedule_post_scan_learning()
+                    self._drain_excluded_sends()
                     threading.Thread(target=self._diag_sync_shared,args=(self._diag_file,),daemon=True).start()
                     self._log("Scan-run summary: %s", json.dumps(self._run_outcomes, sort_keys=True))
                     self._schedule_auto_export()
@@ -9666,6 +9938,13 @@ class App:
                 self.status.config(text=message)
                 self.completed_send_status.config(text=message)
             return
+        ids=list(selected_iids) if selected_iids is not None else None
+        single=self.records.get(ids[0],{}) if ids is not None and len(ids)==1 else {}
+        explicit_excluded=bool(single.get("sequence_locked") and single.get("manual_approved")
+                               and not single.get("auto_labeled") and not automatic)
+        if self._check_order_review() and not explicit_excluded:
+            self._order_resume_send=(ids,automatic)
+            return
         self._yield_background_learning("sending verified files")
         # Main SEND ignores table selection; row SEND supplies exactly one ID.
         selected_set = set(selected_iids) if selected_iids is not None else None
@@ -9708,6 +9987,7 @@ class App:
             self._audit_event("AUTO_SEND_STARTED",approved_count=len(approved))
         self._export_cancel_event.clear()
         self.export_busy = True
+        for iid,_,_ in approved:self.records[iid]["excluded_send_requested"]=False
         self._export_in_flight_iids = {iid for iid, _, _ in approved}
         self._update_completed_count()
         message = f"Sending {len(approved)} approved PDF(s) to COMPLETED…"
@@ -9834,6 +10114,9 @@ class App:
                     "score":float(rec.get("score") or 0),
                     "sequence_inferred":bool(rec.get("sequence_inferred")),
                     "sequence_locked":bool(rec.get("sequence_locked")),
+                    "preview_meta":rec.get("preview_meta",{}),
+                    "manual_crop_rect":rec.get("manual_crop_rect"),
+                    "manual_crop_origin":rec.get("manual_crop_origin",""),
                     "source":"mfcase_send", "sent_at":datetime.now().isoformat(timespec="seconds")}
                 self._save_sent_history()
             self._audit_event("FILE_SENT",

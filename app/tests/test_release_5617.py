@@ -107,7 +107,7 @@ class UIOnlyRegressions(unittest.TestCase):
         self.assertIn('def _sequence_consensus_plan(',code)
         self.assertIn('def _scan_one_learned_zone(',code)
         self.assertIn('def _run_post_scan_learning_if_idle(',code)
-        self.assertIn('self.app_version = "5.6.20"',code)
+        self.assertIn('self.app_version = "6.0.0"',code)
         self.assertNotIn('"GITHUB LOG UPLOAD",self._configure_github_logs',code)
         self.assertIn('GITHUB SETTINGS',code)
         self.assertIn("target=output_dir/suggested",code)

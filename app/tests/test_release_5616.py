@@ -118,6 +118,6 @@ class Release5616(unittest.TestCase):
         a=m.App.__new__(m.App);a.queue=queue.Queue();a.queue.put(('export_done',));a.root=Mock()
         a.busy=False;a.export_busy=True;a._export_in_flight_iids={'i1'};a.scan_items=[];a._stop_all_requested=True
         for n in ('_scan_progress_update','_rebuild_scan_list','_update_completed_count','_refresh_scan_button','_schedule_auto_export','_update_scan_file_count','_apply_sequence_consensus'):setattr(a,n,Mock())
-        a._poll();self.assertFalse(a.export_busy);self.assertEqual(a._export_in_flight_iids,set())
+        a.records={};a._poll();self.assertFalse(a.export_busy);self.assertEqual(a._export_in_flight_iids,set())
         a._rebuild_scan_list.assert_called_once();a._apply_sequence_consensus.assert_not_called()
 if __name__=='__main__':unittest.main()

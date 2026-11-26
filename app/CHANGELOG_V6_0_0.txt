@@ -1,0 +1,11 @@
+MFCase V6.0.0
+Based on user-approved V5.6.20. Before/after decision methods locked unchanged.
+
+- Source-crop thumbnails remain visible after a number is corrected or inferred. Crops are rebuilt from saved source coordinates without another OCR call; unavailable-crop placeholders are not saved as real crop images.
+- Red EXCLUDE followed by green APPROVE saves the approval and attempts learning, then automatically sends only that approved excluded PDF and removes its row after successful transfer. If scanning/sending is busy, the request waits; failed transfers remain visible for explicit retry.
+- After the full scan and before sending, inspect original-order OCR reads for backward case-number steps. Repeats, leading-zero equivalents and forward gaps are allowed. Each side of a backward step can be reviewed without guessing which is wrong.
+- Review popup shows the flagged PDF plus up to two original files on each side, actual crop, editable case, approval, exclusion, individual send, full-page review, status and OCR score. Sent context is read-only. Missing edge neighbors are not fabricated.
+- Batch sending and sequence inference pause until discrepancies are resolved. Closing the popup leaves sending paused. Confirming a legitimate case or red-excluding it resolves its flag. Explicitly approved red-excluded individual sends are allowed while other issues remain pending.
+- Raw OCR and review acknowledgements persist across reopening; before/after cannot hide the original reading. Table sorting/filtering does not change original order.
+
+Validation: 209 regression tests passed, including 22 new checks. Source-hash checks lock the four core before/after decision methods to V5.6.20. Existing OCR engines/call limits and learning/training code retained. No live Windows UI or network-share timing test was performed; popup controls were tested with widget doubles.

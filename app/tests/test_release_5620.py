@@ -71,7 +71,7 @@ class ExclusionAndSend(unittest.TestCase):
     def test_main_send_still_includes_all_approved(self):
         a=self.a;a.busy=False;a._training_blocks_work=Mock(return_value=False)
         a._yield_background_learning=Mock();a._unsaved_completed_changes=Mock(return_value=[])
-        a._apply_sequence_consensus=Mock();a._export_cancel_event=threading.Event();a.status=Mock();a.completed_send_status=Mock()
+        a._apply_sequence_consensus=Mock();a._check_order_review=Mock(return_value=False);a._export_cancel_event=threading.Event();a.status=Mock();a.completed_send_status=Mock()
         for r in self.r.values():r['path'].write_bytes(b'pdf')
         with patch.object(m.threading,'Thread') as worker:a.export()
         self.assertEqual([x[0] for x in worker.call_args.kwargs['args'][1]],['i0','i1','i3'])
