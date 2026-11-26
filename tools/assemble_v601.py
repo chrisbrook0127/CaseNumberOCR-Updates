@@ -9,7 +9,7 @@ STAGE=ROOT/'stage'
 BASELINE=ROOT/'baseline'/'MFCase_Number_OCR_V6.0.0_Full_Online_Install.zip'
 TRANSFER=ROOT/'tools'/'transfer_601.b64'
 BASE_SHA='ad926c3668e55ba9c49f51c657cb3a074bf336548980eaf3e7d89ba3c443b6fc'
-TRANSFER_SHA='f4034a15c72d3eead835be952f61d2363d79b2666ee6f552250dd74320efff7a'
+TRANSFER_SHA='7cd8e72ce1affe47c1b243372c68cb9a2bd9b25893b5f92a8e066a72d155af43'
 EXPECTED_TRANSFER={
  'case_number_ocr.py','SETUP.bat','README_FIRST.txt','verify_package.py',
  'CHANGELOG_V6_0_1.txt','tests/test_release_5617.py',
