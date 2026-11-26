@@ -1,5 +1,5 @@
 name: MFCase v6.0.4 TEST - OCR speed and nonblocking order review
-# Re-run: restored terminal newline in audited source patch
+# Re-run: Windows checkout patch CRLF normalized with verified original SHA256
 on:
   push:
     branches:
@@ -150,3 +150,4 @@ jobs:
             --pattern CaseNumberOCR_Update.zip --dir verify
           cmp verify/CaseNumberOCR_Update.zip dist/CaseNumberOCR_Update.zip
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets,isPrerelease
+
