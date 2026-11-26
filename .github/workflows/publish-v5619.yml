@@ -113,6 +113,33 @@ jobs:
             '        self.assertEqual(a.root.after.call_args.args[0],90000)\n'
           )
           test.write_text(t[:start]+replacement+t[end:],encoding='utf8')
+          # Earlier releases treated confidence clipping as the only way to
+          # force REVIEW. v5.6.19 records an independent safety flag instead.
+          old_test=app/'tests/test_release_5612.py'
+          t=old_test.read_text('utf8')
+          previous="self.assertLess(hits[0]['score'],95.)  # synthetic edge-clipped crop stays REVIEW"
+          assert t.count(previous)==1
+          t=t.replace(previous,"self.assertTrue(hits[0].get('trailing_digit_uncertain'))  # REVIEW flag is separate from confidence")
+          old_test.write_text(t,encoding='utf8')
+          # The full folder path is intentional and replaces v5.6.17's
+          # abbreviated directory-label requirement.
+          old_test=app/'tests/test_release_5617.py'
+          t=old_test.read_text('utf8')
+          assert t.count("'…/April 2008'")==1
+          t=t.replace("'…/April 2008'","'/root/rolls/April 2008'")
+          old_test.write_text(t,encoding='utf8')
+          # v5.6.18 temporarily disabled idle training; the prior 5616
+          # headless test was adapted to expect no training even when ready.
+          # Restore the original positive assertion while preserving STOP.
+          old_test=app/'tests/test_release_5616.py'
+          t=old_test.read_text('utf8')
+          start=t.index('    def test_idle_retry_and_stop(self):')
+          end=t.index('    def test_last_folder_saved_and_restored(self):',start)
+          section=t[start:end]
+          assert 'assert_not_called()' in section
+          section=section.replace('a._start_automatic_learning_if_ready.assert_not_called()',
+                                  'a._start_automatic_learning_if_ready.assert_called_once()')
+          old_test.write_text(t[:start]+section+t[end:],encoding='utf8')
           print('PASS v5.6.19 local-source checks and retained crop-location logic')
           PY
       - name: Compile and test original regressions plus new threshold checks
