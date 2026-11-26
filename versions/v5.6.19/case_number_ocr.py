@@ -6636,8 +6636,9 @@ class App:
             seen.add(rect)
             if getattr(self,"stop_event",None) is not None and self.stop_event.is_set():
                 raise InterruptedError("Stopped during quarter-page OCR")
-            choices=[(n,min(c,94.0) if hw5618.following_ink(region,r) else c,"EasyOCR")
-                     for r,n,c in printed if self._same_number_box(rect,r)]
+            trailing_uncertain=bool(hw5618.following_ink(region,rect))
+            choices=[(n,c,"EasyOCR") for r,n,c in printed
+                     if self._same_number_box(rect,r)]
             x0,y0,x1,y1=rect;pad=max(3,int((y1-y0)*.2))
             # One complete printed read >=95% already qualifies; do not
             # spend another model pass manufacturing a contradictory value.
@@ -6666,7 +6667,7 @@ class App:
                                     if alt_score>score:raw,score=alt,alt_score
                         if (hw5618.missing_end_conflict(alt_values) or
                                 hw5618.following_ink(region,rect)):
-                            score=min(score,94.0)
+                            trailing_uncertain=True
                             self._diag_event('trailing_digit_review',rect=list(rect),readings=alt_values)
                         self._diag_event("crop_raw_read",rect=list(rect),engine="TrOCR",
                                          text=str(raw or ""),score=score)
@@ -6688,7 +6689,8 @@ class App:
             absolute=(x0+x_offset,y0+y_offset,x1+x_offset,y1+y_offset)
             candidates.append(dict(number=number,score=score,rect=absolute,box_rect=absolute,
                 box_verified=True,prefix_source=engine,engines=list(scores),engine_scores=scores,
-                label_type=kind,label_context=bool(kind),incident_label_context=kind=="incident",label_distance=distance))
+                label_type=kind,label_context=bool(kind),incident_label_context=kind=="incident",
+                label_distance=distance,trailing_digit_uncertain=trailing_uncertain))
         self._diag_event("bounded_ocr_pass",printed_calls=int(self.reader is not None),
                          handwriting_calls=calls,candidates=len(candidates))
         return candidates
@@ -6766,7 +6768,7 @@ class App:
         if cropped.size==0 or int(cropped.max())-int(cropped.min())<8:
             return []
         hits=[]
-        def add_hit(number,score,engine,rect):
+        def add_hit(number,score,engine,rect,trailing_uncertain=False):
             number=normalize_case_number(number)
             try:score=float(score or 0.)
             except (TypeError,ValueError):return
@@ -6777,7 +6779,8 @@ class App:
                 prefix_source=engine,engines=[engine],
                 engine_scores={engine.split('-',1)[0]:score},
                 label_type=None,label_context=False,
-                learned_location=True,learned_sample_count=zone['count']))
+                learned_location=True,learned_sample_count=zone['count'],
+                trailing_digit_uncertain=bool(trailing_uncertain)))
         # Keep learned LOCATION unchanged; extract only NUMBER pixels for TrOCR.
         words=self._automatic_detections(cropped,x0,y0) if getattr(self,'reader',None) is not None else []
         label_rects=[]
@@ -6805,13 +6808,14 @@ class App:
                         if CASE_RE.fullmatch(normalize_case_number(alt)):
                             readings.append(normalize_case_number(alt))
                             if alt_score>score:raw,score=alt,alt_score
-                if hw5618.missing_end_conflict(readings) or number_reason=='edge_clipped':
-                    score=min(score,94.0)
+                trailing_uncertain=(hw5618.missing_end_conflict(readings)
+                                    or number_reason=='edge_clipped')
+                if trailing_uncertain:
                     self._diag_event('trailing_digit_review',readings=readings,source='learned')
             number=normalize_case_number(raw)
             bias=getattr(self,'_trocr_bias_values',set())
             if _case_identity(number) not in bias:
-                add_hit(number,score,'TrOCR-learned',(x0,y0,x1,y1))
+                add_hit(number,score,'TrOCR-learned',(x0,y0,x1,y1),trailing_uncertain)
             elif CASE_RE.fullmatch(number):
                 self._diag_event('trocr_default_value_rejected',
                     rect=[x0,y0,x1,y1],reading=number,reason='model negative controls')
