@@ -1,0 +1,11 @@
+MFCASE V5.6.19 — COMPACT REVIEW LAYOUT AND CONFIGURABLE HANDWRITING
+Based on the published v5.6.18 release; crop-location learning remains unchanged.
+- Four separate glossy circular folder, scan, pause and stop buttons inside a compact rectangular panel.
+- Review table occupies most of the screen; file actions and toolbar are smaller while still legible.
+- Compact yellow list control and RESCAN ALL; toolbar SELECT ALL removed, table selection unchanged.
+- Show the full selected folder path instead of shortening it to the final directory.
+- SETTINGS contains a persistent 90–99% OCR auto-approval slider (95% default).
+- Handwritten and printed complete 08- reads are eligible at the same selected threshold; no forced 94% confidence cap.
+- Potentially clipped final digits remain in REVIEW regardless of slider choice.
+- Guarded background UPDATE LEARNING returns after SEND FILES or 90 seconds of idle time.
+- Existing TrOCR quarantine, backups, independent baseline validation, offline behavior, STOP, before/after, model checks and file moves retained.

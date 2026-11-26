@@ -81,15 +81,15 @@ class Release5613(unittest.TestCase):
         self.assertEqual(hits[0][0][0],[10.,10.])
         self.assertEqual(len(a._automatic_detections(image,400,0)),1)
         a.reader.readtext.assert_called_once()
-    def test_spinner_runs_stopping_then_cancels(self):
+    def test_learning_box_animates_then_cancels(self):
         a=self.app();a.root=Mock();a.root.after.return_value='timer'
         a.learning_activity=Mock();a.learning_activity.winfo_manager.return_value=''
         a.learning_spinner=Mock();a.learning_activity_label=Mock()
         a.learning_stop_event=threading.Event()
         a._set_background_learning_indicator(True)
-        a.learning_spinner.create_arc.assert_called_once()
+        self.assertGreaterEqual(a.learning_spinner.create_rectangle.call_count,2)
         a.learning_stop_event.set();a._spin_learning_indicator()
-        a.learning_activity_label.config.assert_called_with(text='LEARNING STOPPING')
+        a.learning_activity_label.config.assert_called_with(text='LEARNING')
         a._set_background_learning_indicator(False)
         a.root.after_cancel.assert_called_with('timer')
         a.learning_activity.pack_forget.assert_called_once()

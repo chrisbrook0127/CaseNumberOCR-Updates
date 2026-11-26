@@ -12,6 +12,239 @@ from time import perf_counter
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
+"""MFCase handwriting safety, v5.6.18.
+
+This file deliberately has NO network access and never changes learned field
+coordinates. Case data and quarantine reports remain in the learning directory.
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageOps
+
+CASE = re.compile(r"08-[0-9]{1,7}\Z")
+
+
+def identity(value):
+    value = str(value or "").strip()
+    if not CASE.fullmatch(value):
+        return None
+    return '08-' + (value[3:].lstrip('0') or '0')
+
+
+def number_only(image, label_rects=(), require_separation=False):
+    """Return an ink-localized number image, a relative bbox, and confidence of isolation.
+
+    Printed labels are excluded only when their actual box is known. Without a
+    label box, significant whitespace between right-hand and left-hand groups
+    permits a conservative split. Uncertain full fields are NOT fed to TrOCR.
+    """
+    rgb = np.asarray(image.convert('RGB') if isinstance(image, Image.Image) else image)
+    if rgb.ndim != 3 or rgb.shape[2] < 3 or rgb.shape[0] < 11 or rgb.shape[1] < 35:
+        return None, None, 'unusable_crop'
+    h, w = rgb.shape[:2]
+    gray = np.array(Image.fromarray(rgb[:, :, :3]).convert('L'))
+    import cv2
+    # Remove long flat form rules; their ink is not part of a digit.
+    dark = (gray < min(215, int(np.percentile(gray, 80)) - 25)).astype(np.uint8)
+    horizontals = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((1, max(30, w//4)),np.uint8))
+    ink = np.where(horizontals > 0, 0, dark)
+    xx = np.flatnonzero(ink.sum(axis=0) >= 2)
+    yy = np.flatnonzero(ink.sum(axis=1) >= 2)
+    if len(xx) < 20 or len(yy) < 7:
+        return None, None, 'no_number_strokes'
+    cut = 0
+    confirmed_split = False
+    for r in label_rects:
+        if len(r) == 4:
+            end = int(r[2])
+            if 3 < end < w - 28 and end > cut:
+                cut = end
+                confirmed_split = True
+    if not confirmed_split:
+        # A wide empty vertical gap is robust evidence of a separate printed
+        # caption on the left. Never blindly crop off a fixed percentage.
+        gaps=[]
+        for a,b in zip(xx[:-1],xx[1:]):
+            width = int(b-a-1)
+            if width >= max(12,int(w*.055)) and 0.25*w<a<0.82*w:
+                left=int((xx<=a).sum());right=int((xx>=b).sum())
+                if left>=12 and right>=18:
+                    gaps.append((width,a,b))
+        if gaps:
+            _,a,b=max(gaps)
+            cut=int(b)
+            confirmed_split=True
+    if require_separation and not confirmed_split:
+        return None, None, 'field_not_separable'
+    # Restrict to the actual ink after the caption. Outer padding keeps thin
+    # first and last strokes without the label; no resizing of the original ROI.
+    segment=ink[:,cut:]
+    col=np.flatnonzero(segment.sum(axis=0)>=2)
+    row=np.flatnonzero(segment.sum(axis=1)>=2)
+    if len(col)<18 or len(row)<7:
+        return None,None,'number_not_visible'
+    x0=max(cut,cut+int(col[0])-max(4,int(w*.015)))
+    x1=min(w,cut+int(col[-1])+max(6,int(w*.025))+1)
+    y0=max(0,int(row[0])-max(3,int(h*.045)))
+    y1=min(h,int(row[-1])+max(4,int(h*.06))+1)
+    if x1-x0<30 or y1-y0<10:
+        return None,None,'too_small'
+    out=rgb[y0:y1,x0:x1].copy()
+    # The last stroke at the exact learned-field edge makes an incomplete read
+    # plausible; the caller must keep any result in REVIEW.
+    clipped=bool((ink[:,max(cut,w-3):].sum()>=3) and x1==w)
+    return out,(x0,y0,x1,y1),('edge_clipped' if clipped else 'isolated' if confirmed_split else 'number_only')
+
+
+def image_variants(image):
+    src=Image.fromarray(np.asarray(image)).convert('RGB')
+    w,h=src.size
+    pad=max(6,int(h*.15))
+    yield np.asarray(ImageOps.expand(src,border=pad,fill='white'))
+    contrast=ImageOps.autocontrast(src.convert('L'),cutoff=1).convert('RGB')
+    yield np.asarray(ImageOps.expand(contrast,border=pad,fill='white'))
+
+
+def missing_end_conflict(readings):
+    """True if two valid 08 readings differ by one or more *trailing* digits."""
+    values=list({identity(v) for v in readings if identity(v)})
+    return any(a!=b and (a.startswith(b) or b.startswith(a)) for a in values for b in values)
+
+
+def suspect_training_label(example):
+    """Conservative label audit; no OCR prediction is treated as ground truth."""
+    truth=identity(example.get('confirmed_case_number'))
+    if not truth:
+        return 'invalid_08_label'
+    if example.get('training_quarantined'):
+        return 'previously_quarantined'
+    candidate=identity(example.get('ocr_candidate'))
+    score=float(example.get('ocr_score') or 0)
+    # A human may assign a case number for filing that is not what the crop
+    # visibly says. We cannot teach the neural model from such a conflict.
+    if candidate and candidate!=truth and score>=75:
+        return 'ocr_label_conflict_needs_visual_verification'
+    if not candidate or score<85:
+        return 'no_independent_high_confidence_label_evidence'
+    if candidate!=truth:
+        return 'label_not_corroborrated'
+    if example.get('crop_origin')=='manual-field' and not example.get('number_only_verified'):
+        return 'manual_field_may_contain_caption'
+    return None
+
+
+def audit_examples(examples, learning_dir):
+    """Non-destructive audit; return safe examples and quarantine report."""
+    safe=[]; quarantine=[]
+    learning_dir=Path(learning_dir)
+    for ex in examples:
+        reason=suspect_training_label(ex)
+        rel=str(ex.get('image') or '')
+        path=(learning_dir/rel)
+        if not rel or path.suffix.lower() not in ('.png','.jpg','.jpeg'):
+            reason=reason or 'invalid_image_name'
+        if not path.is_file():
+            reason=reason or 'image_missing'
+        elif not reason:
+            try:
+                with Image.open(path) as image:
+                    im=np.asarray(image.convert('RGB'))
+                    number,box,why=number_only(im,require_separation=False)
+                    if number is None or why=='edge_clipped':
+                        reason='crop_incomplete_or_unreadable'
+                    elif not ex.get('number_only_verified'):
+                        # Legacy crops may include the caption. In the absence
+                        # of physical separation evidence, do not trust them.
+                        _,_,strict_reason=number_only(im,require_separation=True)
+                        if strict_reason=='field_not_separable' and image.width>image.height*6:
+                            reason='wide_legacy_crop_requires_review'
+            except (OSError,ValueError):
+                reason='image_unreadable'
+        if reason:
+            quarantine.append({'example_id':ex.get('example_id'),'image':rel,'reason':reason})
+        else:
+            safe.append(ex)
+    return safe,quarantine
+
+
+def write_quarantine_report(folder, quarantine):
+    folder=Path(folder)
+    target=folder/'handwriting_quarantine_v5618.json'
+    payload={'version':'5.6.18','generated_at':datetime.now().isoformat(timespec='seconds'),
+             'excluded_from_training':quarantine,
+             'note':'Only handwriting training is affected. No source images, labels, or location history were deleted.'}
+    temp=target.with_name(target.name+'.tmp')
+    temp.write_text(json.dumps(payload,indent=2),encoding='utf8')
+    os.replace(temp,target)
+    return target
+
+
+def backup_learning_once(folder):
+    """Create immutable-in-practice copies BEFORE model changes; refuse if failure."""
+    folder=Path(folder)
+    destination=folder/'v5618_safety_backup'
+    marker=destination/'COMPLETE.json'
+    if marker.is_file():
+        return destination
+    destination.mkdir(parents=True,exist_ok=True)
+    # Never modify original learning images. Back up metadata and both model
+    # directories. This can require several GB and intentionally aborts if the
+    # volume cannot hold the safety copy.
+    for name in ('learning_examples_v3.json','learning_examples_v3.last_good.json',
+                 'learning_examples_v2.json','learning_examples.json'):
+        src=folder/name
+        if src.is_file():
+            shutil.copy2(src,destination/name)
+    for name in ('trocr_v2_finetuned','trocr_v2_previous'):
+        src=folder/name
+        if src.is_dir():
+            shutil.copytree(src,destination/name,dirs_exist_ok=True)
+    for name in ('examples_v3',):
+        src=folder/name
+        if src.is_dir():
+            shutil.copytree(src,destination/name,dirs_exist_ok=True)
+    tmp=marker.with_suffix('.tmp')
+    tmp.write_text(json.dumps({'version':'5.6.18','created_at':datetime.now().isoformat(),
+                               'note':'Preserved original examples, database, and available checkpoints.'}),encoding='utf8')
+    os.replace(tmp,marker)
+    return destination
+
+
+def following_ink(region, rect):
+    """Test whether the OCR bounding box omitted adjacent right-hand digit ink."""
+    import cv2
+    image=np.asarray(region)
+    if image.ndim==3:
+        image=np.asarray(Image.fromarray(image).convert('L'))
+    x0,y0,x1,y1=map(int,rect)
+    h,w=image.shape[:2]
+    charh=y1-y0
+    if charh<9 or x1>w-5:
+        return False
+    xend=min(w,x1+max(15,int(charh*1.5)))
+    scan=image[max(0,y0-3):min(h,y1+3),x1+1:xend]
+    if scan.shape[1]<5 or scan.shape[0]<7:
+        return False
+    threshold=min(205,int(np.percentile(scan,80))-20)
+    mask=(scan<threshold).astype(np.uint8)
+    cnt,labels,stats,cent=cv2.connectedComponentsWithStats(mask,8)
+    for x,y,ww,hh,area in stats[1:]:
+        # Minimum digit-like component; exclude table grid lines.
+        if (ww>=2 and hh>=max(8,int(charh*.35)) and area>=max(9,int(charh*.45))
+                and ww<max(8,int(charh*1.5)) and x<max(6,int(charh*.4))):
+            return True
+    return False
+
+from types import SimpleNamespace as _MFCaseSafetyNamespace
+hw5618=_MFCaseSafetyNamespace(identity=identity,number_only=number_only,image_variants=image_variants,missing_end_conflict=missing_end_conflict,suspect_training_label=suspect_training_label,audit_examples=audit_examples,write_quarantine_report=write_quarantine_report,backup_learning_once=backup_learning_once,following_ink=following_ink)
+
 from tkinter import ttk, filedialog, messagebox
 
 # Operational default: OFFLINE. No startup model discovery or HF telemetry.
@@ -381,12 +614,133 @@ def _save_github_log_settings(settings, enabled, token=''):
     return data
 
 
+
+class _MFCaseCapsLabel(ttk.Label):
+    """Uppercase generated status messages without modifying saved data."""
+    def configure(self, cnf=None, **kwargs):
+        if 'text' in kwargs:
+            kwargs['text']=App._ui_message_caps(kwargs['text'])
+        return super().configure(cnf,**kwargs)
+    config=configure
+
+class _MFCasePieAction:
+    """Small Button-compatible state proxy for the existing scan callbacks."""
+    def __init__(self, canvas, key):
+        self.canvas, self.key = canvas, key
+    def config(self, **kwargs):
+        item=self.canvas.actions[self.key]
+        if 'state' in kwargs: item['state']=kwargs['state']
+        if 'text' in kwargs: item['text']=kwargs['text'].upper()
+        self.canvas.redraw()
+    configure=config
+    def cget(self, key): return self.canvas.actions[self.key].get(key)
+    def __getitem__(self,key): return self.cget(key)
+    def invoke(self): return self.canvas.invoke_action(self.key)
+    def winfo_exists(self): return self.canvas.winfo_exists()
+
+class MFCasePieTransport(tk.Canvas):
+    """Four independent glossy round buttons in a compact rectangular control."""
+    COLORS={'folder':'#2053b8','scan':'#228316','pause':'#b77609','stop':'#be271f'}
+    ORDER=('folder','scan','pause','stop')
+    def __init__(self,master,on_activate,**kwargs):
+        super().__init__(master,bg='#e8e9eb',highlightthickness=0,takefocus=1,**kwargs)
+        self.on_activate=on_activate
+        self.actions={}
+        self.selected=None
+        self.focused='folder'
+        self.center=(0,0)
+        self.radius=0
+        self._hitboxes={}
+        self.bind('<Configure>',lambda e:self.redraw())
+        self.bind('<Button-1>',self._click)
+        self.bind('<Return>',self._activate_keyboard)
+        self.bind('<space>',self._activate_keyboard)
+        for key,delta in (('<Left>',-1),('<Right>',1),('<Up>',-1),('<Down>',1)):
+            self.bind(key,lambda e,d=delta:self._change_focus(d))
+        self.bind('<FocusIn>',lambda e:self.redraw())
+        self.bind('<FocusOut>',lambda e:self.redraw())
+    def register(self,key,text,callback,state):
+        self.actions[key]={'text':text,'command':callback,'state':state}
+        return _MFCasePieAction(self,key)
+    def _change_focus(self,delta):
+        self.focused=self.ORDER[(self.ORDER.index(self.focused)+delta)%4]
+        self.redraw()
+        return 'break'
+    def _activate_keyboard(self,event=None):
+        self.invoke_action(self.focused)
+        return 'break'
+    def _click(self,event):
+        self.focus_set()
+        for key,(x,y,r) in self._hitboxes.items():
+            if (event.x-x)**2+(event.y-y)**2<=r*r:
+                self.focused=key
+                self.invoke_action(key)
+                return
+    def invoke_action(self,key):
+        action=self.actions.get(key)
+        if action is None or action['state']=='disabled':
+            return
+        self.on_activate('pie:'+key)
+        action['command']()
+    def redraw(self):
+        if not self.winfo_exists():return
+        self.delete('all')
+        w=max(1,self.winfo_width());h=max(1,self.winfo_height())
+        self.create_rectangle(1,1,w-2,h-2,fill='#e8e9eb',outline='#a9b1ba',width=2)
+        radius=min(w/4*.36,(h-24)/2)
+        if radius<12:return
+        self.radius=radius;self.center=(w/2,h/2)
+        self._hitboxes={}
+        for index,key in enumerate(self.ORDER):
+            if key not in self.actions:continue
+            action=self.actions[key]
+            disabled=action['state']=='disabled'
+            pressed=self.selected=='pie:'+key
+            x=(index+.5)*w/4;y=(h-22)/2+(2 if pressed else 0)
+            r=radius
+            self._hitboxes[key]=(x,y,r)
+            color=self.COLORS[key]
+            if disabled:color='#83909b'
+            rim='#19222b' if pressed else '#303f4b'
+            self.create_oval(x-r+2,y-r+5,x+r+2,y+r+5,fill='#9aa0a6',outline='')
+            self.create_oval(x-r,y-r,x+r,y+r,fill=rim,outline='#384249',width=1)
+            self.create_oval(x-r*.90,y-r*.90,x+r*.90,y+r*.90,fill='#c9d4db',outline='')
+            self.create_oval(x-r*.84,y-r*.84,x+r*.84,y+r*.84,fill=color,outline='')
+            self.create_oval(x-r*.72,y-r*.72,x+r*.72,y+r*.72,
+                             fill='#d3dadc' if pressed else '#f6f7f8',
+                             outline='#6c737a',width=2)
+            self.create_arc(x-r*.93,y-r*.93,x+r*.91,y+r*.91,start=38,extent=130,
+                            style='arc',outline='#f9f9f9',width=max(2,int(r*.10)))
+            size=r*.45
+            if key=='folder':
+                self.create_rectangle(x-size*.85,y-size*.15,x+size*.85,y+size*.70,
+                    fill=color,outline=color)
+                self.create_rectangle(x-size*.85,y-size*.65,x-size*.08,y-size*.12,
+                    fill=color,outline=color)
+            elif key=='scan':
+                self.create_polygon(x-size*.55,y-size*.9,x+size*.85,y,
+                                    x-size*.55,y+size*.9,fill=color,outline=color)
+            elif key=='pause':
+                for offset in (-.58,.20):
+                    self.create_rectangle(x+size*offset,y-size*.85,
+                        x+size*(offset+.35),y+size*.85,fill=color,outline=color)
+            else:
+                self.create_rectangle(x-size*.65,y-size*.65,x+size*.65,y+size*.65,
+                    fill=color,outline=color)
+            caption={'folder':'FOLDER','scan':'SCAN','pause':action['text'],'stop':'STOP'}[key]
+            self.create_text(x,y+r+3,anchor='n',text=caption,fill='#273446',
+                             font=('Segoe UI',10,'bold'))
+            if self.focused==key and self.focus_get()==self:
+                self.create_oval(x-r-3,y-r-3,x+r+3,y+r+3,
+                                 outline='#124879',width=2)
+
+
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.6.16")
+        root.title("M.F. CASE NUMBER OCR — V5.6.20")
         root.geometry("1180x780")
-        root.minsize(1000, 650)
+        root.minsize(1040, 720)
         self.folder = None
         self.reader = None
         self.trocr_processor = None
@@ -470,7 +824,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.16"
+        self.app_version = "5.6.20"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -492,7 +846,7 @@ class App:
         self._audit_root = Path(os.getenv("LOCALAPPDATA") or str(Path(__file__).resolve().parent)) / "MFCase" / "logs"
         self._audit_file = self._audit_root / "MFCase_Work_Log.txt"
         self.auto_send_var = tk.BooleanVar(master=root, value=False)
-        self.show_all_files_var = tk.BooleanVar(master=root, value=True)
+        self.show_all_files_var = tk.BooleanVar(master=root, value=False)
         self._load_user_settings()
         self.app_dir = Path(__file__).resolve().parent
         self.update_config_path = self.app_dir / "update_config.json"
@@ -505,10 +859,10 @@ class App:
         self.auto_threshold_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
         self.year_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
         self.auto_label_var.set(True)
-        self.auto_threshold_var.set("95")
         self._refresh_auto_eligibility_status()
         root.bind_all("<ButtonPress>", self._mark_user_activity, add="+")
         root.bind_all("<KeyPress>", self._mark_user_activity, add="+")
+        root.bind_all('<ButtonRelease-1>',self._on_ui_button_released,add='+')
         root.protocol("WM_DELETE_WINDOW",self._request_close)
         root.after(150, self._poll)
         # Production is local-only. Network access is possible only after an
@@ -566,9 +920,9 @@ class App:
         if self._loading_jobs:
             if self._loader_label is not None:
                 if "rolls" in self._loading_jobs:
-                    self._loader_label.configure(text="Loading PDF rolls…")
+                    self._loader_label.configure(text="LOADING PDF ROLLS…")
                 elif "learning" in self._loading_jobs:
-                    self._loader_label.configure(text="Loading shared learning…")
+                    self._loader_label.configure(text="LOADING SHARED LEARNING…")
             return
         if self._loader_tick_id is not None:
             self.root.after_cancel(self._loader_tick_id)
@@ -646,7 +1000,8 @@ class App:
                     "confirmed":case,"source":"prior_state",
                     "manual_approved":bool(value.get("manual_approved")),
                     "auto_labeled":bool(value.get("auto_labeled")),
-                    "sequence_inferred":bool(value.get("sequence_inferred"))})
+                    "sequence_inferred":bool(value.get("sequence_inferred")),
+                    "sequence_locked":bool(value.get("sequence_locked"))})
         if completed.is_dir():
             # Recovery of older sent files that v5.5.1 forgot after restarting.
             # The strict _08-number filename suffix is created by MFCase SEND FILES.
@@ -714,11 +1069,12 @@ class App:
                 continue
             original=Path(rec.get("original_name") or rec["path"]).name
             active.add(original.casefold())
+            if rec.get("sequence_locked"):continue
             order.append((iid,rec))
         # History is validated against actual COMPLETED PDFs ONCE at folder load.
         # Do not re-stat every historical file on each scan row over SMB.
         for original,row in getattr(self,"sent_history",{}).items():
-            if original.casefold() in active or row.get("sequence_inferred"):
+            if original.casefold() in active or row.get("sequence_inferred") or row.get("sequence_locked"):
                 continue
             target=folder/"COMPLETED"/str(row.get("destination_name") or "")
             case=normalize_case_number(row.get("confirmed"))
@@ -790,10 +1146,12 @@ class App:
                 "sequence_conflict": bool(old.get("sequence_conflict", False)),
                 "sequence_anchors": list(old.get("sequence_anchors", [])),
                 "sequence_suggestion": old.get("sequence_suggestion", ""),
+                "sequence_previous_prefill":bool(old.get("sequence_previous_prefill",False)),
                 "sequence_original_candidate":old.get("sequence_original_candidate",""),
                 "sequence_original_score":old.get("sequence_original_score",old.get("score",0)),
                 "sequence_original_ambiguous":bool(old.get("sequence_original_ambiguous",False)),
                 "sequence_excluded": bool(old.get("sequence_excluded", False)),
+                "sequence_locked": bool(old.get("sequence_locked", False)),
                 "scan_selected": bool(old.get("scan_selected", True)),
                 "learning_pending": bool(old.get("learning_pending", False)),
                 "export_error": str(old.get("export_error", ""))
@@ -844,115 +1202,293 @@ class App:
         self._update_completed_count()
         self._schedule_auto_export()
 
+    @staticmethod
+    def _ui_message_caps(value):
+        """Uppercase generated status copy, never filesystem identifiers."""
+        value=str(value or '')
+        if re.search(r'(?i)\b[^\s]+\.(?:pdf|zip|jsonl?)\b|https?://|\\\\|[A-Za-z]:[/\\]',value):
+            return value
+        return value.upper()
+
+    def _on_ui_button_released(self,event):
+        """Visual-only pressed selection for ordinary review/settings buttons.
+
+        Never invokes a command or changes review/approval semantics.
+        """
+        widget=getattr(event,'widget',None)
+        if not isinstance(widget,(tk.Button,ttk.Button)):
+            return
+        if widget in getattr(self,'_ui_action_buttons',{}).values():
+            return  # Shared dashboard controls already handle their own state.
+        try:
+            if str(widget.cget('state'))=='disabled':return
+        except tk.TclError:return
+        previous=getattr(self,'_generic_pressed_widget',None)
+        if previous is not None:
+            try:
+                if previous.winfo_exists():
+                    if isinstance(previous,tk.Button):previous.config(relief='raised',bd=2)
+                    else:previous.config(style=getattr(previous,'_mfcase_original_style','MFCase.Action.TButton'))
+            except tk.TclError:pass
+        self._generic_pressed_widget=None
+        self._pressed_visual('generic:'+str(widget))
+        if previous is widget:return
+        self._generic_pressed_widget=widget
+        try:
+            if isinstance(widget,tk.Button):widget.config(relief='sunken',bd=4)
+            else:
+                widget._mfcase_original_style=widget.cget('style')
+                widget.config(style='MFCase.Pressed.TButton')
+        except tk.TclError:pass
+
+    def _pressed_visual(self,key):
+        """One depressed selection at a time; repeat-click releases it."""
+        if not key.startswith('generic:'):
+            previous=getattr(self,'_generic_pressed_widget',None)
+            if previous is not None:
+                try:
+                    if previous.winfo_exists():
+                        if isinstance(previous,tk.Button):previous.config(relief='raised',bd=2)
+                        else:previous.config(style=getattr(previous,'_mfcase_original_style','MFCase.Action.TButton'))
+                except tk.TclError:pass
+                self._generic_pressed_widget=None
+        old=getattr(self,'_pressed_ui_key',None)
+        self._pressed_ui_key=None if old==key else key
+        for name,button in getattr(self,'_ui_action_buttons',{}).items():
+            if button.winfo_exists():
+                active=(self._pressed_ui_key==name)
+                button.configure(relief='sunken' if active else 'raised',
+                                 bd=4 if active else 2)
+        pie=getattr(self,'pie_transport',None)
+        if pie is not None:
+            pie.selected=self._pressed_ui_key
+            pie.redraw()
+
+    def _action_button(self,parent,key,label,callback,color='#123f79',**pack):
+        def run():
+            self._pressed_visual(key)
+            callback()
+        button=tk.Button(parent,text=label.upper(),command=run,
+            bg=color,fg='white',activebackground='#082e59',activeforeground='white',
+            font=('Segoe UI',10,'bold'),relief='raised',bd=2,
+            padx=12,pady=9,takefocus=1,cursor='hand2',
+            disabledforeground='#cad0d6')
+        self._ui_action_buttons[key]=button
+        if pack:button.pack(**pack)
+        return button
+
+    def _toggle_list_display(self):
+        self.show_all_files_var.set(not self.show_all_files_var.get())
+        self._pressed_visual('list')
+        self._toggle_full_list()
+        self._refresh_list_toggle()
+
+    def _refresh_list_toggle(self):
+        button=getattr(self,'list_toggle_btn',None)
+        if button is not None:
+            button.configure(relief='sunken' if self.show_all_files_var.get() else 'raised',
+                             bd=4 if self.show_all_files_var.get() else 2)
+
+    def _select_all_visible(self):
+        tree=getattr(self,'tree',None)
+        if tree is None:return
+        visible=set(tree.get_children(''))
+        selected=bool(visible) and visible.issubset(self.scan_checked_iids)
+        desired=bool(self.ui_select_all_var.get())
+        if desired==selected:return
+        # Preserve the existing checkbox rules and guards.
+        if self.busy or self._training_blocks_work():
+            self.ui_select_all_var.set(selected)
+            return
+        self._toggle_scan_select_all()
+
+    def _short_folder_name(self,folder):
+        if not folder:return 'NO FOLDER SELECTED'
+        return str(folder)
+
+    def _dashboard_resize(self,event=None):
+        dashboard=getattr(self,'dashboard',None)
+        if dashboard is None or not dashboard.winfo_exists():return
+        available=max(0,self.review_tab.winfo_height())
+        desired=max(75,min(145,int(available*.14)))
+        if getattr(self,'_dashboard_last_height',None)!=desired:
+            self._dashboard_last_height=desired
+            dashboard.configure(height=desired)
+
+    def _format_run_clock(self,seconds):
+        seconds=max(0,int(seconds))
+        return f'{seconds//3600:02d}:{seconds//60%60:02d}:{seconds%60:02d}'
+
+    def _scan_clock_actual(self):
+        if getattr(self,'_scan_clock_start',None) is None:
+            return getattr(self,'_scan_clock_final_elapsed',0.0)
+        now=time.monotonic()
+        paused=getattr(self,'_scan_clock_pause_seconds',0.0)
+        pause_start=getattr(self,'_scan_clock_pause_start',None)
+        if pause_start is not None:paused+=max(0.0,now-pause_start)
+        return max(0.0,now-self._scan_clock_start-paused)
+
+    def _update_run_timers(self):
+        label=getattr(self,'scan_run_time_label',None)
+        if label is None:return
+        actual=self._scan_clock_actual()
+        done=getattr(self,'_scan_clock_done',0)
+        total=len(getattr(self,'scan_items',[]) or [])
+        if done and total:
+            per=max(.01,actual/done)
+            estimate=per*total
+            remaining=max(0.0,per*(total-done))
+            estimated=self._format_run_clock(estimate)
+            remaining=self._format_run_clock(remaining)
+        else:
+            estimated='--:--:--';remaining='--:--:--'
+        label.config(text=('RUN TIME: ESTIMATED '+estimated+'  |  ACTUAL '+
+                           self._format_run_clock(actual)+'  |  REMAINING '+remaining))
+
+    def _tick_ui_clock(self):
+        try:
+            if self.root.winfo_exists():
+                self._update_run_timers()
+                self.root.after(800,self._tick_ui_clock)
+        except tk.TclError:pass
+
     def _ui(self):
-        main = ttk.Frame(self.root, padding=12)
-        main.pack(fill="both", expand=True)
-        header = ttk.Frame(main)
-        header.pack(fill="x", pady=(0, 2))
-        brand = ttk.Label(header, text="M.F.", font=("Segoe UI", 18, "bold"),
-                          foreground="#ffffff", background="#1456a8", padding=(10, 3))
-        brand.pack(side="left", padx=(0, 10))
-        title_stack = ttk.Frame(header)
-        title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text=f"Case Number OCR & Renamer — V{self.app_version}",
-                  font=("Segoe UI", 17, "bold")).pack(anchor="w")
-
-        # One-screen workflow: scan, review and approved files use one list.
-        # The detailed crop editor opens from a double-click on a file.
-        self.settings_nav_btn=tk.Button(
-            header,text="SETTINGS",command=self._open_settings_window,
-            bg="#1456a8",fg="white",activebackground="#0d4388",
-            activeforeground="white",relief="raised",bd=2,padx=14,pady=8,
-            font=("Segoe UI",10,"bold"),cursor="hand2")
-        self.settings_nav_btn.pack(side="right",padx=(6,0))
-        # The local training spinner never covers or disables the file list.
-        self.learning_activity = ttk.Frame(header)
-        self.learning_activity_label = ttk.Label(self.learning_activity,
-            text="LOCAL LEARNING", font=("Segoe UI",9,"bold"))
-        self.learning_activity_label.pack(side="left",padx=(0,6))
-        self.learning_spinner = tk.Canvas(self.learning_activity,width=22,height=22,
-            highlightthickness=0)
-        self.learning_spinner.pack(side="left")
-        self._learning_spinner_job = None
-        ttk.Separator(main, orient="horizontal").pack(fill="x", pady=(8, 7))
-
-        self.view_container = ttk.Frame(main)
-        self.view_container.pack(fill="both", expand=True)
-        self.review_tab = ttk.Frame(self.view_container, padding=8)
-        self.completed_tab = ttk.Frame(self.view_container, padding=8)
-        self.settings_tab = ttk.Frame(self.view_container, padding=14)
-        self.update_btn = ttk.Button(self.settings_tab, text="UPDATE", command=self.check_for_updates)
-        self.finish_batch_btn = ttk.Button(self.settings_tab, text="UPDATE LEARNING", command=self._finish_import_batch, state="disabled")
-        self.update_btn.pack(anchor="w", pady=5)
-        self.finish_batch_btn.pack(anchor="w", pady=5)
-        # Keep the old completed widgets as internal state compatibility only;
-        # do not display a second tab or lose historical verified records.
-        self.review_tab.place(relx=0, rely=0, relwidth=1, relheight=1)
-
-        # The selected year stays internal at the established default of 08.
-        # Coworkers only choose the folder and run/review the files.
-        self.year_var = tk.StringVar(value="08")
+        self._pressed_ui_key=None
+        self._generic_pressed_widget=None
+        self._ui_action_buttons={}
+        styles=ttk.Style(self.root)
+        styles.configure('MFCase.Pressed.TButton',relief='sunken',borderwidth=3,
+                         padding=(4,6),font=('Segoe UI',10,'bold'))
+        self._scan_clock_start=None
+        self._scan_clock_pause_start=None
+        self._scan_clock_pause_seconds=0.
+        self._scan_clock_final_elapsed=0.
+        self._scan_clock_done=0
+        main=ttk.Frame(self.root,padding=7)
+        main.pack(fill='both',expand=True)
+        header=ttk.Frame(main)
+        header.pack(fill='x',pady=(0,4))
+        ttk.Label(header,text='M.F.',font=('Segoe UI',16,'bold'),
+                  foreground='white',background='#123f79',padding=(10,3)).pack(side='left',padx=(0,9))
+        title_stack=ttk.Frame(header)
+        title_stack.pack(side='left',fill='x',expand=True)
+        ttk.Label(title_stack,text=f'M.F. CASE NUMBER OCR & RENAMER — V{self.app_version}',
+                  font=('Segoe UI',15,'bold')).pack(anchor='w')
+        self.settings_nav_btn=self._action_button(header,'settings','SETTINGS',
+            self._open_settings_window)
+        self.settings_nav_btn.pack(side='right',padx=(6,0))
+        self.learning_activity=ttk.Frame(header)
+        self.learning_activity_label=ttk.Label(self.learning_activity,
+            text='LEARNING',font=('Segoe UI',9,'bold'))
+        self.learning_activity_label.pack(side='left',padx=(0,4))
+        self.learning_spinner=tk.Canvas(self.learning_activity,width=78,height=15,
+            bg='#e6efe7',highlightthickness=1,highlightbackground='#a3c6ac')
+        self.learning_spinner.pack(side='left')
+        self._learning_spinner_job=None
+        ttk.Separator(main,orient='horizontal').pack(fill='x',pady=(4,5))
+        self.view_container=ttk.Frame(main)
+        self.view_container.pack(fill='both',expand=True)
+        self.review_tab=ttk.Frame(self.view_container,padding=5)
+        self.completed_tab=ttk.Frame(self.view_container,padding=8)
+        self.settings_tab=ttk.Frame(self.view_container,padding=14)
+        self.update_btn=ttk.Button(self.settings_tab,text='UPDATE',command=self.check_for_updates)
+        self.finish_batch_btn=ttk.Button(self.settings_tab,text='UPDATE LEARNING',
+                                          command=self._finish_import_batch,state='disabled')
+        self.update_btn.pack(anchor='w',pady=5)
+        self.finish_batch_btn.pack(anchor='w',pady=5)
+        self.review_tab.place(relx=0,rely=0,relwidth=1,relheight=1)
+        self.year_var=tk.StringVar(value='08')
         self.auto_label_var.set(True)
-        self.auto_threshold_var.set("95")
 
-        self.action_bar = ttk.Frame(self.review_tab)
-        self.action_bar.pack(fill="x",pady=(0,8))
-        action_specs = [
-            ("choose_folder_btn","SELECT FILES",self.choose_folder,"normal"),
-            ("scan_btn","SCAN",self.scan,"disabled"),
-            ("pause_btn","PAUSE",self.toggle_pause,"disabled"),
-            ("restart_btn","STOP",self.stop_or_restart_scan,"disabled"),
-            ("rescan_btn","RESCAN ALL",self.rescan_all,"disabled"),
-            ("refresh_root_btn","REFRESH",self.refresh_root_folder,"normal"),
-            ("clear_root_btn","CLEAR",self.clear_scan_screen,"normal"),
-            ("send_selected_btn","SEND FILES",self.export_completed,"disabled")]
-        style=ttk.Style(self.root)
-        style.configure("MFCase.Action.TButton",font=("Segoe UI",10,"bold"),padding=(4,7),anchor="center")
-        for c,(name,label,callback,state) in enumerate(action_specs):
-            self.action_bar.columnconfigure(c,weight=1,uniform="mfaction")
-            button=ttk.Button(self.action_bar,text=label,command=callback,
-                state=state,style="MFCase.Action.TButton")
-            button.grid(row=0,column=c,sticky="ew",padx=2)
-            setattr(self,name,button)
-        ttk.Checkbutton(self.review_tab,text="Full list",variable=self.show_all_files_var,
-                        command=self._toggle_full_list).pack(anchor="w")
-        self.scan_file_count_label=ttk.Label(self.review_tab,text="0 of 0 selected")
-        self.scan_file_count_label.pack(anchor="e",pady=(0,2))
-        self.folder_label=ttk.Label(self.review_tab,text="No folder selected")
-        self.folder_label.pack(anchor="w",pady=(0,5))
-        # Legacy callbacks still reference review_btn/finish_batch_btn, but
-        # their action buttons are not presented on the main screen.
-        self.review_btn = ttk.Button(self.settings_tab,text="REVIEW SELECTED",
-                                     command=self.review_selected,state="disabled")
+        self.dashboard=tk.Frame(self.review_tab,bg='#e8e9eb',height=105,
+                                highlightthickness=1,highlightbackground='#afbfce')
+        self.dashboard.place(relx=0,rely=0,relwidth=1,relheight=.14)
+        self.dashboard.grid_propagate(False)
+        self.lower_panel=ttk.Frame(self.review_tab,padding=(0,2,0,0))
+        self.lower_panel.place(relx=0,rely=.14,relwidth=1,relheight=.86)
+        self.dashboard.grid_columnconfigure(0,weight=6)
+        self.dashboard.grid_columnconfigure(1,weight=4)
+        self.dashboard.grid_rowconfigure(0,weight=1)
+        self.action_bar=tk.Frame(self.dashboard,bg='#e8e9eb')
+        self.action_bar.grid(row=0,column=0,sticky='nsew',padx=(3,1),pady=3)
+        self.pie_transport=MFCasePieTransport(self.action_bar,self._pressed_visual)
+        self.pie_transport.pack(fill='both',expand=True)
+        self.choose_folder_btn=self.pie_transport.register('folder','FOLDER',self.choose_folder,'normal')
+        self.scan_btn=self.pie_transport.register('scan','SCAN',self.scan,'disabled')
+        self.pause_btn=self.pie_transport.register('pause','PAUSE',self.toggle_pause,'disabled')
+        self.restart_btn=self.pie_transport.register('stop','STOP',self.stop_or_restart_scan,'disabled')
+        self.pie_transport.redraw()
+
+        right=tk.LabelFrame(self.dashboard,text=' FILE ACTIONS ',
+              fg='#123f79',bg='#e8e9eb',font=('Segoe UI',10,'bold'),
+              bd=2,relief='groove',padx=5,pady=3)
+        right.grid(row=0,column=1,sticky='nsew',padx=(3,5),pady=4)
+        for c in range(3):right.grid_columnconfigure(c,weight=1,uniform='actions')
+        self.refresh_root_btn=self._action_button(right,'refresh','REFRESH',self.refresh_root_folder)
+        self.refresh_root_btn.grid(row=0,column=0,sticky='ew',padx=2,pady=3)
+        self.clear_root_btn=self._action_button(right,'clear','CLEAR',self.clear_scan_screen)
+        self.clear_root_btn.grid(row=0,column=1,sticky='ew',padx=2,pady=3)
+        self.send_selected_btn=self._action_button(right,'send','SEND FILES',self.export_completed)
+        self.send_selected_btn.grid(row=0,column=2,sticky='ew',padx=2,pady=3)
+        self.send_selected_btn.config(state='disabled')
+        for action in (self.refresh_root_btn,self.clear_root_btn,self.send_selected_btn):
+            action.config(font=('Segoe UI',10,'bold'),padx=6,pady=5)
+
+        toolbar=ttk.Frame(self.lower_panel)
+        toolbar.pack(fill='x',pady=(0,4))
+        self.list_toggle_btn=tk.Button(toolbar,text='☰',fg='white',bg='#c99b00',
+             activebackground='#a67c00',activeforeground='white',
+             font=('Segoe UI',12,'bold'),relief='raised',bd=2,takefocus=1,
+             command=self._toggle_list_display,width=2,padx=1,pady=1,cursor='hand2')
+        self.list_toggle_btn.pack(side='left',padx=(0,5))
+        self._ui_action_buttons['list']=self.list_toggle_btn
+        self.scan_file_count_label=ttk.Label(toolbar,text='0 OF 0 SELECTED',width=17)
+        self.scan_file_count_label.pack(side='left',padx=(0,4))
+        self.ui_select_all_var=tk.BooleanVar(master=self.root,value=False)
+        self.folder_label=ttk.Label(toolbar,text='NO FOLDER SELECTED',anchor='w',
+                                    font=('Segoe UI',10,'bold'))
+        self.folder_label.pack(side='left',fill='x',expand=True,padx=(2,8))
+        self.rescan_btn=self._action_button(toolbar,'rescan','RESCAN ALL',
+                                            self.rescan_all,color='#123f79')
+        self.rescan_btn.pack(side='right',padx=(5,0))
+        self.rescan_btn.config(state='disabled',font=('Segoe UI',10,'bold'),padx=6,pady=3)
+
+        self.review_btn=ttk.Button(self.settings_tab,text='REVIEW SELECTED',
+                                   command=self.review_selected,state='disabled')
         self.review_all_btn=self.review_btn
-        self.work_log_btn=ttk.Button(self.settings_tab,text="EXPORT WORK LOG",command=self._diag_export)
-        self.before_after_btn=ttk.Button(self.settings_tab,text="BEFORE/AFTER",command=self._run_before_after)
-        scan_progress_row=ttk.Frame(self.review_tab)
-        scan_progress_row.pack(fill="x",pady=(0,8))
-        self.scan_progress_label=ttk.Label(
-            scan_progress_row,text="SCAN READY — 0 of 0 PDF files",
-            width=38,anchor="w")
-        self.scan_progress_label.pack(side="left",padx=(0,10))
-        self.progress=ttk.Progressbar(scan_progress_row,mode="determinate",
-                                      maximum=1,value=0)
-        self.progress.pack(side="left",fill="x",expand=True)
-        self.scan_progress_pct=ttk.Label(scan_progress_row,text="0%",width=6,anchor="e")
-        self.scan_progress_pct.pack(side="right",padx=(10,0))
-        self.scan_displayed_count_label=ttk.Label(self.review_tab,text="0 files displayed")
-        self.scan_displayed_count_label.pack(side="bottom",anchor="w",pady=(4,2))
+        self.work_log_btn=ttk.Button(self.settings_tab,text='EXPORT WORK LOG',command=self._diag_export)
+        self.before_after_btn=ttk.Button(self.settings_tab,text='BEFORE/AFTER',command=self._run_before_after)
+        scan_progress_row=ttk.Frame(self.lower_panel)
+        scan_progress_row.pack(fill='x',pady=(0,3))
+        self.scan_progress_label=ttk.Label(scan_progress_row,
+            text='SCAN READY — 0 OF 0 PDF FILES',width=42,anchor='w')
+        self.scan_progress_label.pack(side='left',padx=(0,10))
+        self.progress=ttk.Progressbar(scan_progress_row,mode='determinate',maximum=1,value=0)
+        self.progress.pack(side='left',fill='x',expand=True)
+        self.scan_progress_pct=ttk.Label(scan_progress_row,text='0%',width=6,anchor='e')
+        self.scan_progress_pct.pack(side='right',padx=(8,0))
+        self.scan_run_time_label=ttk.Label(self.lower_panel,
+            text='RUN TIME: ESTIMATED --:--:--  |  ACTUAL 00:00:00  |  REMAINING --:--:--',
+            font=('Segoe UI',10,'bold'))
+        self.scan_run_time_label.pack(anchor='w',pady=(0,3))
+        self.scan_displayed_count_label=ttk.Label(self.lower_panel,text='0 FILES DISPLAYED')
+        self.scan_displayed_count_label.pack(side='bottom',anchor='w',pady=(4,2))
+        self.root.after(800,self._tick_ui_clock)
 
-        pane = ttk.Frame(self.review_tab)
+        pane = ttk.Frame(self.lower_panel)
         pane.pack(fill="both", expand=True)
         self._scan_preview_photos={}
         self._scan_preview_widgets={}
         self._scan_approve_widgets={}
+        self._scan_exclude_widgets={}
+        self._scan_send_widgets={}
         self._scan_review_widgets={}
         self._scan_case_widgets={}
         self._scan_case_sync=False
         self._scan_preview_keys={}
         self._scan_preview_refresh_id=None
         ttk.Style().configure("MFCase.Scan.Treeview",rowheight=74)
-        cols = ("scan_select", "file", "preview", "candidate", "approve", "review", "score", "workflow", "status")
+        cols = ("scan_select", "file", "preview", "candidate", "approve", "exclude", "send", "review", "score", "workflow", "status")
         self.tree = ttk.Treeview(pane, columns=cols, show="headings",
                                  style="MFCase.Scan.Treeview",selectmode="extended")
         self.tree.heading("scan_select", text="☑ ALL", command=self._toggle_scan_select_all)
@@ -965,6 +1501,10 @@ class App:
         self.tree.column("candidate", width=135, minwidth=110, stretch=False, anchor="center")
         self.tree.heading("approve", text="APPROVE")
         self.tree.column("approve", width=60, minwidth=60, stretch=False, anchor="center")
+        self.tree.heading("exclude", text="EXCLUDE")
+        self.tree.column("exclude", width=66, minwidth=66, stretch=False, anchor="center")
+        self.tree.heading("send", text="SEND")
+        self.tree.column("send", width=66, minwidth=66, stretch=False, anchor="center")
         self.tree.heading("review", text="REVIEW")
         self.tree.column("review", width=58, minwidth=58, stretch=False, anchor="center")
         self._set_sortable_heading("scan", self.tree, "score", "EASY / TrOCR")
@@ -974,7 +1514,7 @@ class App:
         self._set_sortable_heading("scan", self.tree, "status", "OCR DETAILS")
         self.tree.column("status", width=220, minwidth=120, stretch=True)
         # Make OCR-generated case-number suggestions visible in the main queue.
-        self.tree["displaycolumns"] = ("scan_select", "file", "preview", "candidate", "approve", "review", "score", "workflow", "status")
+        self.tree["displaycolumns"] = ("scan_select", "file", "preview", "candidate", "approve", "exclude", "send", "review", "score", "workflow", "status")
         self.tree.tag_configure("scanning_now",background="#fff2d5")
         sy = ttk.Scrollbar(pane, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=lambda first,last:(
@@ -992,7 +1532,7 @@ class App:
         self.tree.bind("<Control-A>", self._select_all_for_rescan)
 
         # The scan progressbar is always visible above the list.
-        self.status = ttk.Label(self.review_tab, text="Choose a folder, then click SCAN.")
+        self.status = _MFCaseCapsLabel(self.lower_panel, text="SELECT A FOLDER, THEN CLICK SCAN.")
         self.status.pack(anchor="w")
 
         # Internal status labels remain available to the existing diagnostics,
@@ -1006,7 +1546,7 @@ class App:
 
         completed_header = ttk.Frame(self.completed_tab)
         completed_header.pack(fill="x", pady=(0, 5))
-        ttk.Label(completed_header, text="Ready for Review / Export",
+        ttk.Label(completed_header, text="READY FOR REVIEW / EXPORT",
                   font=("Segoe UI", 12, "bold")).pack(side="left")
         self.export_btn = ttk.Button(
             completed_header, text="SEND FILES", command=self.export, state="disabled",
@@ -1018,10 +1558,9 @@ class App:
         self.completed_refresh_btn.pack(side="right", padx=(8, 0))
         ttk.Label(
             self.completed_tab,
-            text="Enter a corrected case number in CHANGE and click Save, then SEND FILES. "
-                 "Manually approved files remain here for correction and sending. "
-                 "Approved files are renamed automatically as original_case.pdf. "
-                 "SEND FILES moves them to COMPLETED; review files remain.",
+            text="ENTER A CORRECTED CASE NUMBER IN CHANGE AND CLICK SAVE, THEN SEND FILES. "
+                 "APPROVED FILES REMAIN AVAILABLE FOR CORRECTION. "
+                 "SEND FILES MOVES APPROVED FILES TO COMPLETED; REVIEW FILES REMAIN.",
             wraplength=1100).pack(anchor="w", pady=(0, 5))
         cpane = ttk.Frame(self.completed_tab)
         cpane.pack(fill="both", expand=True)
@@ -1075,10 +1614,10 @@ class App:
         self.completed_xscrollbar.pack(fill="x")
         cbar = ttk.Frame(self.completed_tab)
         cbar.pack(fill="x", pady=(10, 0))
-        self.completed_count = ttk.Label(cbar, text="0 files ready to send")
+        self.completed_count = ttk.Label(cbar, text="0 FILES READY TO SEND")
         self.completed_count.pack(side="left")
         self.review_completed_btn = ttk.Button(
-            cbar, text="Review / Approve Selected", command=self.review_completed_selected, state="disabled")
+            cbar, text="REVIEW / APPROVE SELECTED", command=self.review_completed_selected, state="disabled")
         # Review selected is removed; double-click any row to open review.
         self.unverify_selected_btn = ttk.Button(
             cbar, text="UNVERIFY SELECTED", command=self._unverify_completed_selected,
@@ -1086,8 +1625,8 @@ class App:
         self.unverify_selected_btn.pack(side="right", padx=(0, 8))
         # Transfer outcomes must be visible while the user is on COMPLETED;
         # the generic status label lives on a different tab.
-        self.completed_send_status = ttk.Label(
-            self.completed_tab, text="Approved files are ready for SEND FILES.",
+        self.completed_send_status = _MFCaseCapsLabel(
+            self.completed_tab, text="APPROVED FILES ARE READY FOR SEND FILES.",
             wraplength=1100)
         self.completed_send_status.pack(anchor="w", pady=(5, 0))
         # The SETTINGS widget is an unplaced parent for internal status labels.
@@ -1107,35 +1646,31 @@ class App:
         return bool(self.trocr_training and not getattr(self,"_learning_auto_run",False))
 
     def _spin_learning_indicator(self):
-        self._learning_spinner_job = None
-        if not getattr(self, "_learning_indicator_active", False):
-            return
-        angle=(getattr(self,"_learning_spinner_angle",0)+30)%360
-        self._learning_spinner_angle=angle
-        self.learning_spinner.delete("all")
-        self.learning_spinner.create_arc(3,3,19,19,start=angle,extent=260,
-            style="arc",outline="#168447",width=3)
-        stopping=getattr(self,"learning_stop_event",None)
-        self.learning_activity_label.config(text="LEARNING STOPPING" if
-            stopping is not None and stopping.is_set() else "LOCAL LEARNING")
-        self._learning_spinner_job=self.root.after(80,self._spin_learning_indicator)
+        self._learning_spinner_job=None
+        if not getattr(self,'_learning_indicator_active',False):return
+        canvas=self.learning_spinner
+        position=(getattr(self,'_learning_spinner_position',0)+4)%82
+        self._learning_spinner_position=position
+        canvas.delete('all')
+        canvas.create_rectangle(1,1,76,13,outline='#9fbea6',fill='#e7f0e7')
+        x=2+min(position,82-position)*1.55
+        canvas.create_rectangle(x,2,x+13,12,fill='#168447',outline='#0d6531')
+        self.learning_activity_label.config(text='LEARNING')
+        self._learning_spinner_job=self.root.after(65,self._spin_learning_indicator)
 
-    def _set_background_learning_indicator(self, enabled):
-        """Show the same UI-thread animation for manual and idle training."""
-        frame=getattr(self,"learning_activity",None)
-        if frame is None:
-            return
+    def _set_background_learning_indicator(self,enabled):
+        """Animate only while the existing local learning worker is running."""
+        frame=getattr(self,'learning_activity',None)
+        if frame is None:return
         self._learning_indicator_active=bool(enabled)
-        job=getattr(self,"_learning_spinner_job",None)
+        job=getattr(self,'_learning_spinner_job',None)
         if job is not None:
             self.root.after_cancel(job)
             self._learning_spinner_job=None
         if enabled:
-            if not frame.winfo_manager():
-                frame.pack(side="right",padx=8)
+            if not frame.winfo_manager():frame.pack(side='right',padx=8)
             self._spin_learning_indicator()
-        else:
-            frame.pack_forget()
+        else:frame.pack_forget()
 
     def _yield_background_learning(self, reason="user work"):
         """Let selection/scanning/sending proceed; abort idle fine-tuning safely.
@@ -1159,10 +1694,10 @@ class App:
             existing.lift();existing.focus_force();return
         win=tk.Toplevel(self.root)
         self._settings_popup=win
-        win.title(f"MFCase Settings — V{self.app_version}")
+        win.title(f"MFCASE SETTINGS — V{self.app_version}")
         win.transient(self.root)
         win.resizable(False,False)
-        win.geometry("480x420")
+        win.geometry("480x550")
         panel=ttk.Frame(win,padding=20)
         panel.pack(fill="both",expand=True)
         ttk.Label(panel,text=f"SETTINGS  •  V{self.app_version}",
@@ -1170,16 +1705,28 @@ class App:
         for label,func in (
             ("USER GUIDE",self._open_instructions),
             ("EXPORT WORK LOG",self._diag_export),
-            ("GITHUB LOG UPLOAD",self._configure_github_logs),
+            ("GITHUB SETTINGS",self._configure_github_logs),
             ("UPDATE",lambda: self.check_for_updates(automatic=False)),
             ("UPDATE LEARNING",self._finish_import_batch)):
-            ttk.Button(panel,text=label,command=func,
-                style="MFCase.Action.TButton").pack(fill="x",pady=5)
+            self._action_button(panel,'settings:'+label,label,func).pack(fill='x',pady=5)
+        ttk.Separator(panel).pack(fill='x',pady=(10,7))
+        current=self._get_auto_threshold()
+        self.threshold_display=ttk.Label(panel,
+            text=f'CURRENT OCR APPROVAL THRESHOLD: {current:g}%',
+            font=('Segoe UI',11,'bold'))
+        self.threshold_display.pack(anchor='w')
+        self.threshold_scale=tk.Scale(panel,from_=90,to=99,resolution=1,
+            length=410,orient='horizontal',showvalue=True,tickinterval=3,
+            font=('Segoe UI',10),label='AUTO-APPROVE OCR CONFIDENCE (%)',
+            command=self._set_auto_threshold)
+        self.threshold_scale.pack(fill='x',pady=(0,5))
+        self.threshold_scale.set(int(current))
         ttk.Separator(panel).pack(fill="x",pady=(12,6))
-        ttk.Checkbutton(panel,text="AUTO SEND COMPLETED — after scan finishes",
+        ttk.Checkbutton(panel,text="AUTO SEND COMPLETED — AFTER SCAN FINISHES",
             variable=self.auto_send_var,command=self._save_user_settings).pack(anchor="w",pady=5)
-        ttk.Label(panel,text="OFF by default. Sends only eligible approved files after the final before/after check. "
-            "STOP never triggers an automatic send. PDFs and full logs stay local; configured sanitized diagnostics upload after scans.",
+        ttk.Label(panel,text="OFF BY DEFAULT. SENDS ONLY APPROVED FILES AFTER BEFORE/AFTER CHECKS. "
+            "STOP NEVER TRIGGERS AUTO SEND. PDFS AND FULL LOGS STAY LOCAL; "
+            "CONFIGURED SANITIZED DIAGNOSTICS MAY UPLOAD AFTER SCANS.",
             wraplength=425,justify="left").pack(anchor="w",pady=(4,0))
 
     def _network_online_passive(self):
@@ -1241,7 +1788,7 @@ class App:
             self._diag_event("offline_startup",
                 model_downloads_allowed=False,software_updates_automatic=False,
                 learning_updates_automatic=False,diagnostic_sync=False)
-            self.status.config(text="Offline startup: loading cached OCR models. "
+            self.status.config(text="OFFLINE STARTUP: LOADING CACHED OCR MODELS. "
                  "No internet or shared drive connection is required.")
             self._begin_model_preload()
         except Exception as exc:
@@ -1435,7 +1982,7 @@ class App:
         if self._background_learning_active():
             self._yield_background_learning("software update")
         if self.busy or self.export_busy or self.trocr_training:
-            self.status.config(text="Update verified; installation deferred until work is idle.")
+            self.status.config(text="UPDATE VERIFIED; INSTALLATION DEFERRED UNTIL WORK IS IDLE.")
             self.root.after(3000,lambda path=archive_path:self._launch_update_installer(path))
             return
         helper = self.app_dir / "updater_apply.py"
@@ -1494,12 +2041,14 @@ class App:
         try:
             visible = set(tree.get_children(""))
             checked = len(visible & self.scan_checked_iids)
-            label.config(text=f"{checked:,} of {len(visible):,} selected")
+            label.config(text=f"{checked:,} OF {len(visible):,} SELECTED")
+            toggle=getattr(self,"ui_select_all_var",None)
+            if toggle is not None:toggle.set(bool(visible) and visible.issubset(self.scan_checked_iids))
             footer=getattr(self,"scan_displayed_count_label",None)
             if footer is not None:
-                footer.config(text=f"{len(visible):,} files displayed • {len(self.records):,} in folder • "
-                              f"{sum(1 for r in self.records.values() if r.get('status')=='Not scanned' and not r.get('exported')):,} pending • "
-                              f"{sum(1 for r in self.records.values() if r.get('confirmed') and r.get('manual_approved') and not r.get('exported')):,} completed")
+                footer.config(text=f"{len(visible):,} FILES DISPLAYED • {len(self.records):,} IN FOLDER • "
+                              f"{sum(1 for r in self.records.values() if r.get('status')=='Not scanned' and not r.get('exported')):,} PENDING • "
+                              f"{sum(1 for r in self.records.values() if r.get('confirmed') and r.get('manual_approved') and not r.get('exported')):,} COMPLETED")
             self._refresh_scan_checkbox_heading()
         except (tk.TclError, AttributeError):
             pass
@@ -1729,6 +2278,24 @@ class App:
                     ax,ay,aw,ah=accept_box
                     button.configure(state="disabled" if self._scan_row_locked(iid) else "normal")
                     button.place(x=ax+(aw-34)//2,y=ay+(ah-32)//2,width=34,height=32)
+                for column,registry,command,color,label in (
+                        ("exclude",self._scan_exclude_widgets,self._toggle_sequence_lock,"#b3261e",
+                         "☑" if self.records[iid].get("sequence_locked") else "☐"),
+                        ("send",self._scan_send_widgets,self._send_scan_row,"#1456a8","SEND")):
+                    control=registry.get(iid)
+                    if control is None:
+                        control=tk.Button(self.tree,bg=color,fg="white",activebackground=color,
+                            activeforeground="white",font=("Segoe UI",11,"bold"),cursor="hand2",
+                            command=lambda key=iid,action=command:action(key))
+                        registry[iid]=control
+                    blocked=self._scan_row_locked(iid) or (column=="send" and
+                        not self._eligible_for_kurt(iid,self.records[iid]))
+                    control.configure(text=label,state="disabled" if blocked else "normal",
+                        relief="sunken" if column=="exclude" and self.records[iid].get("sequence_locked") else "raised")
+                    bounds=self.tree.bbox(iid,column)
+                    if bounds:
+                        bx,by,bw,bh=bounds
+                        control.place(x=bx+4,y=by+(bh-32)//2,width=bw-8,height=32)
                 review_button=self._scan_review_widgets.get(iid)
                 if review_button is None:
                     review_button=tk.Button(self.tree,text="R",bg="#1456a8",fg="white",
@@ -1766,6 +2333,11 @@ class App:
                 self._scan_preview_photos.pop(iid,None)
                 self._scan_preview_keys.pop(iid,None)
 
+        for registry in (self._scan_exclude_widgets,self._scan_send_widgets):
+            for iid,button in list(registry.items()):
+                if iid not in visible or not self.tree.exists(iid):button.place_forget()
+                if not self.tree.exists(iid):
+                    button.destroy();registry.pop(iid,None)
         for iid,button in list(self._scan_review_widgets.items()):
             if iid not in visible or not self.tree.exists(iid):
                 button.place_forget()
@@ -1837,9 +2409,35 @@ class App:
         self.tree.set(iid,"status",record["status"])
         self._update_completed_count()
 
+    def _toggle_sequence_lock(self, iid):
+        """Exclude just this PDF from all sequence inference, without approving it."""
+        if self._scan_row_locked(iid):return
+        record=self.records.get(iid)
+        if not record:return
+        previous=bool(record.get("sequence_locked"))
+        record["sequence_locked"]=not previous
+        if not self._save_state():
+            record["sequence_locked"]=previous
+            self.status.config(text="EXCLUSION NOT SAVED — CHECK FOLDER ACCESS AND RETRY.")
+            return
+        self._last_sequence_signature=None
+        self._recheck_after_decision()
+        self._insert_scan_row(iid,record)
+        self._schedule_scan_preview_refresh()
+        self.status.config(text="EXCLUDED FROM BEFORE/AFTER AND ANCHORS; APPROVAL AND SEND STILL AVAILABLE."
+                           if record["sequence_locked"] else "NORMAL BEFORE/AFTER RULES RESTORED.")
+
+    def _send_scan_row(self, iid):
+        """Send only this already-approved record; never implicitly approve a draft."""
+        record=self.records.get(iid)
+        if not record or not self._eligible_for_kurt(iid,record):
+            self.status.config(text="APPROVE THIS FILE WITH THE GREEN CHECK BEFORE SENDING; WAIT FOR SCANNING TO FINISH.")
+            return
+        return self.export(selected_iids=[iid])
+
     def _quick_approve(self, iid):
         if self._scan_row_locked(iid):
-            self.status.config(text="This file is being scanned, sent or is not editable.")
+            self.status.config(text="THIS FILE IS BEING SCANNED, SENT OR IS NOT EDITABLE.")
             return
         self._yield_background_learning("file approval")
         record=self.records.get(iid)
@@ -1855,7 +2453,7 @@ class App:
             self._insert_scan_row(iid,record)
             return  # Never duplicate learning or rename a previously approved file.
         if not CASE_RE.fullmatch(normalize_case_number(value)):
-            self.status.config(text="Enter a complete 08- case number before accepting.")
+            self.status.config(text="ENTER A COMPLETE 08- CASE NUMBER BEFORE ACCEPTING.")
             self._start_scan_case_edit(iid)
             return
         class Value:
@@ -1921,8 +2519,8 @@ class App:
                  or bool(record.get("sequence_conflict")) or bool(record.get("export_error"))))
 
     def _toggle_full_list(self):
-        self._save_user_settings()
         self._rebuild_scan_list()
+        self._refresh_list_toggle()
 
     def _rebuild_scan_list(self):
         # Batch all row changes; never sort/count the whole table per row.
@@ -1980,12 +2578,12 @@ class App:
                 record["path"].name,"",
                 proposed if candidate_override is None else
                 (candidate_override if CASE_RE.fullmatch(normalize_case_number(candidate_override)) else ""),
-                "", "R",
+                "", "", "", "R",
                 (" / ".join(f"{record['engine_scores'][engine]:.1f}%"
                     if engine in record.get("engine_scores",{}) else "—"
                     for engine in ("EasyOCR","TrOCR"))) if score_override is None else score_override,
                 self._workflow_status(record),
-                record.get("status","Not scanned"))
+                self._ui_message_caps(record.get("status","Not scanned")))
         if self.tree.exists(iid):
             self.tree.item(iid,values=values,tags=("scanning_now",) if iid==getattr(self,"_active_scan_iid",None) else ())
         else:
@@ -2030,7 +2628,7 @@ class App:
         self._yield_background_learning("manual review")
         rec=self.records[iid]
         if rec.get("exported"):
-            self.status.config(text="Sent files cannot be edited from the root queue. Restore the PDF first.")
+            self.status.config(text="SENT FILES CANNOT BE EDITED FROM THE ROOT QUEUE. RESTORE THE PDF FIRST.")
             return
         try:
             self.review_queue=[iid]
@@ -2052,33 +2650,30 @@ class App:
 
     def _open_instructions(self):
         win=tk.Toplevel(self.root)
-        win.title("MFCase — Instructions")
-        win.geometry("800x600")
+        win.title(f'MFCASE V{self.app_version} — USER GUIDE')
+        win.geometry('880x680')
         win.transient(self.root)
         frame=ttk.Frame(win,padding=18)
-        frame.pack(fill="both",expand=True)
-        text=tk.Text(frame,wrap="word",font=("Segoe UI",10))
-        text.pack(fill="both",expand=True)
-        text.insert("1.0",
-             "MFCase v5.6.0 USER GUIDE\n\n"
-             "1. SELECT FILES, then SCAN. The OCR confidence threshold is fixed at 95%.\n"
-             "2. A GREEN CHECK completes a file but never sends it. SEND FILES moves only verified files.\n"
-             "3. STOP finishes the current file, saves before/after decisions, then enables SEND FILES. PAUSE does not.\n"
-             "4. Before/after matching runs during and after scans. Only independent anchors count. "
-             "Matching verified anchors can surround any number of pages, and can correct conflicting automatic OCR reads. "
-             "Human-corrected case numbers are never silently overwritten.\n"
-             "5. Double-click a file to REVIEW. Select Draw / Redraw, drag across the number, release: OCR runs on "
-             "that crop and suggests 08- digits. Verify/correct before SAVE REVIEW.\n"
-             "6. When a corrected number is saved, its crop and location become local learning data. "
-             "Manual crop selection may cover the whole page; automatic OCR stays within the upper-right quarter.\n"
-             "7. SETTINGS contains USER GUIDE, EXPORT WORK LOG, UPDATE, UPDATE LEARNING. "
-             "Software checks GitHub at opening; verified updates install and restart when idle. "
-             "Learning uses previously verified local examples in a background worker when enough exist.\n"
-             "8. Red ONLINE / green OFFLINE reports Windows connectivity; it does not certify data isolation. "
-             "OCR and PDFs remain local; updates contact GitHub for release files. "
-             "Keep work logs and confidential PDFs out of any public repository.\n")
-        text.configure(state="disabled")
-        ttk.Button(frame,text="CLOSE",command=win.destroy).pack(anchor="e",pady=8)
+        frame.pack(fill='both',expand=True)
+        text=tk.Text(frame,wrap='word',font=('Segoe UI',10),spacing3=7)
+        text.pack(fill='both',expand=True)
+        instructions=(
+            f'MFCASE V{self.app_version} USER GUIDE\n\n'
+            '1. FOLDER: SELECT THE ROOT FOLDER CONTAINING YOUR PDF FILES. THE FOLDER NAME '            'APPEARS IN THE TOOLBAR.\n'
+            '2. SCAN: PRESS THE GREEN PLAY BUTTON. THE PROGRAM CHECKS LEARNED CASE-NUMBER '            'LOCATIONS AND THE UPPER-RIGHT QUARTER. HANDWRITING AND PRINTED OCR ARE '            'AVAILABLE. THE AUTOMATIC APPROVAL THRESHOLD REMAINS FIXED AT 95%.\n'
+            '3. PAUSE/RESUME: PRESS THE LIGHT-BLUE BUTTON. STOP: PRESS THE RED SQUARE. '            'STOP DOES NOT DELETE COMPLETED APPROVALS OR TRIGGER AUTO SEND.\n'
+            '4. LIST: PRESS THE YELLOW THREE-LINE BUTTON TO SHOW ALL FILES. PRESS IT AGAIN '            'TO RETURN TO THE FILTERED REVIEW LIST. THE DEFAULT VIEW IS FILTERED. '            'SELECT ALL APPLIES TO VISIBLE ROWS.\n'
+            '5. PROGRESS: THE TOOLBAR SHOWS SELECTED FILES, CURRENT PDF, SCAN PROGRESS, '            'ESTIMATED RUN TIME, ACTUAL ELAPSED TIME, AND ESTIMATED REMAINING TIME. '            'ESTIMATES BEGIN AFTER A PDF IS PROCESSED AND CAN CHANGE.\n'
+            '6. REVIEW: DOUBLE-CLICK A FILE OR USE R. DRAW A BOX ANYWHERE ON THE PDF '            'AND VERIFY/CORRECT ITS 08- CASE NUMBER. THE GREEN CHECK MARKS IT COMPLETED. '            'A CORRECTED CROP AND ITS LOCATION ARE SAVED FOR LOCAL LEARNING.\n'
+            '7. BEFORE/AFTER: MATCHING INDEPENDENT COMPLETIONS CAN CONFIRM FILES BETWEEN '            'THEM. CONFIRMED MANUAL CASE NUMBERS ARE PROTECTED. AUTO APPROVALS MAY BE '            'CORRECTED BY THE EXISTING ANCHOR STRATEGY.\n'
+            '8. PREVIOUS CASE: A SINGLE PRECEDING 95%+ CASE MAY PREFILL A LOW-CONFIDENCE CASE FIELD, BUT IT NEVER APPROVES, RENAMES, OR SENDS THAT PDF. THE USER MUST VERIFY AND PRESS THE GREEN CHECK. MATCHING BEFORE/AFTER ANCHORS STILL COMPLETE THE FILE AS BEFORE.\n'
+            '9. SEND FILES: MOVES ELIGIBLE COMPLETED PDFS TO THE COMPLETED SUBFOLDER. '            'AUTO SEND COMPLETED IS OPTIONAL AND OFF BY DEFAULT; STOP NEVER AUTO SENDS. '            'REFRESH RELOADS THE FOLDER; CLEAR ONLY CLEARS THE DISPLAY.\n'
+            '10. SETTINGS: USER GUIDE, EXPORT WORK LOG, GITHUB SETTINGS, UPDATE AND '            'UPDATE LEARNING ARE AVAILABLE. BACKGROUND LOCAL TRAINING CAN START AFTER '            'THE PROGRAM IS IDLE; THE SMALL GREEN INDICATOR APPEARS WHILE IT RUNS.\n'
+            '11. EXPORT WORK LOG: WRITES A UNIQUELY NAMED ZIP DIRECTLY TO THE SELECTED '            'ROOT FOLDER\'S COMPLETED SUBFOLDER, WITHOUT MOVING OR ALTERING PDFS. '            'WORK LOGS CAN INCLUDE SENSITIVE FILENAMES, CASE NUMBERS AND OCR TEXT; '            'REVIEW DEPARTMENT RULES BEFORE SHARING.\n'
+            '12. UPDATE: GITHUB MAY BE CONTACTED FOR SOFTWARE RELEASES. OCR AND PDF '            'PROCESSING REMAIN LOCAL. GITHUB SETTINGS CONTROLS THE EXISTING OPTIONAL '            'SANITIZED DIAGNOSTIC UPLOAD SETTINGS.\n')
+        text.insert('1.0',instructions.upper())
+        text.configure(state='disabled')
+        ttk.Button(frame,text='CLOSE',command=win.destroy).pack(anchor='e',pady=8)
 
     def _check_connection_status(self):
         """Report LOCAL state without HTTP, SMB probes or other network I/O."""
@@ -2193,7 +2788,7 @@ class App:
         else:
             self.tree.selection_remove(self.tree.selection())
             self._refresh_rescan_button()
-            self.status.config(text="No eligible unresolved PDFs to rescan.")
+            self.status.config(text="NO ELIGIBLE UNRESOLVED PDFS TO RESCAN.")
         return "break"
 
     def _rescan_eligible(self, iid):
@@ -2291,7 +2886,7 @@ class App:
             return
         eligible=self._rescan_all_candidates()
         if not eligible:
-            self.status.config(text="No remaining root PDFs to rescan.")
+            self.status.config(text="NO REMAINING ROOT PDFS TO RESCAN.")
             return
         if not messagebox.askyesno("RESCAN ALL",
               f"Rescan all {len(eligible)} remaining PDFs, including unsent COMPLETED rows?\n\n"
@@ -2345,11 +2940,11 @@ class App:
     def clear_scan_screen(self):
         """Clear only visible scan rows; never remove PDF files or saved learning."""
         if getattr(self,"_scan_case_editor",None) is not None:
-            self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
+            self.status.config(text="SAVE THE EDITED CASE WITH ENTER OR CANCEL WITH ESC FIRST.")
             self._scan_case_editor.focus_set()
             return
         if self.busy or self._training_blocks_work() or self.export_busy:
-            self.status.config(text="Clear is available after scanning, learning, or sending finishes.")
+            self.status.config(text="CLEAR IS AVAILABLE AFTER SCANNING, LEARNING, OR SENDING FINISHES.")
             return
         for iid in self.tree.get_children(""):
             self.tree.delete(iid)
@@ -2357,7 +2952,7 @@ class App:
         self._update_scan_file_count()
         self._refresh_scan_button()
         self._schedule_scan_preview_refresh()
-        self.status.config(text="Scan list cleared. No PDFs, approvals, or learning were deleted. Click REFRESH to restore it.")
+        self.status.config(text="SCAN LIST CLEARED. NO PDFS, APPROVALS, OR LEARNING WERE DELETED. CLICK REFRESH TO RESTORE IT.")
 
 
     def _refresh_timeout(self,generation):
@@ -2373,7 +2968,7 @@ class App:
         self.refresh_root_btn.config(state="normal")
         self.choose_folder_btn.config(state="normal")
         self.status.config(
-            text="Folder refresh is taking longer than expected. Current PDFs "
+            text="FOLDER REFRESH IS TAKING LONGER THAN EXPECTED. CURRENT PDFS "
                  "remain visible; delayed network results will load when ready.")
         self._diag_event("folder_refresh_wait",
             outcome="overlay_released_while_network_worker_pending",
@@ -2382,13 +2977,13 @@ class App:
     def refresh_root_folder(self):
         """Refresh direct root PDFs only, retaining all saved manual decisions."""
         if getattr(self,"_scan_case_editor",None) is not None:
-            self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
+            self.status.config(text="SAVE THE EDITED CASE WITH ENTER OR CANCEL WITH ESC FIRST.")
             self._scan_case_editor.focus_set()
             return
         if not self._startup_ready or self.busy or self._training_blocks_work() or self.export_busy:
             return
         if "rolls" in self._loading_jobs:
-            self.status.config(text="Folder refresh is already in progress.")
+            self.status.config(text="FOLDER REFRESH IS ALREADY IN PROGRESS.")
             return
         if not self.folder or not self.folder.is_dir():
             messagebox.showinfo("Choose a folder","Choose a folder first.")
@@ -2407,7 +3002,7 @@ class App:
 
     def choose_folder(self, folder=None):
         if getattr(self,"_scan_case_editor",None) is not None:
-            self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
+            self.status.config(text="SAVE THE EDITED CASE WITH ENTER OR CANCEL WITH ESC FIRST.")
             self._scan_case_editor.focus_set()
             return
         if not self._startup_ready or self._loading_jobs:
@@ -2425,7 +3020,7 @@ class App:
         self.folder = Path(folder)
         self._last_folder=str(self.folder)
         self._save_user_settings()
-        self.folder_label.config(text=str(self.folder))
+        self.folder_label.config(text=self._short_folder_name(self.folder))
         self.log_path = self.folder / ".case_ocr_log.txt"
         # Folder I/O and shared learning access both run off the Tk thread.
         # The indicator stays animated until BOTH tasks report completion.
@@ -2435,7 +3030,7 @@ class App:
         self.choose_folder_btn.config(state="disabled")
         self.refresh_root_btn.config(state="disabled")
         self._loader_start("rolls", "Loading PDFs from the selected root folder…")
-        self.status.config(text="Loading PDF rolls (existing shared learning remains loaded)…")
+        self.status.config(text="LOADING PDF ROLLS (EXISTING SHARED LEARNING REMAINS LOADED)…")
         threading.Thread(target=self._folder_load_worker, args=(self.folder, generation),
                          daemon=True, name="MFCase-LoadRolls").start()
 
@@ -2486,10 +3081,12 @@ class App:
                 "sequence_conflict": bool(rec.get("sequence_conflict", False)),
                 "sequence_anchors": list(rec.get("sequence_anchors", [])),
                 "sequence_suggestion": rec.get("sequence_suggestion", ""),
+                "sequence_previous_prefill": bool(rec.get("sequence_previous_prefill", False)),
                 "sequence_original_candidate":rec.get("sequence_original_candidate",""),
                 "sequence_original_score":rec.get("sequence_original_score",rec.get("score",0)),
                 "sequence_original_ambiguous":bool(rec.get("sequence_original_ambiguous",False)),
                 "sequence_excluded": bool(rec.get("sequence_excluded", False)),
+                "sequence_locked": bool(rec.get("sequence_locked", False)),
                 "scan_selected": bool(rec.get("scan_selected", True)),
                 "learning_pending": bool(rec.get("learning_pending", False)),
                 "export_error": str(rec.get("export_error", ""))
@@ -2552,13 +3149,13 @@ class App:
         win.title('GitHub scan diagnostics');win.transient(self.root)
         panel=ttk.Frame(win,padding=18);panel.pack(fill='both',expand=True)
         enabled=tk.BooleanVar(value=bool(settings.get('enabled',True)))
-        ttk.Checkbutton(panel,text='Upload sanitized diagnostics after EVERY scan',variable=enabled).pack(anchor='w')
+        ttk.Checkbutton(panel,text='UPLOAD SANITIZED DIAGNOSTICS AFTER EVERY SCAN',variable=enabled).pack(anchor='w')
         saved=bool(settings.get('protected_token') or os.environ.get('MFCASE_GITHUB_LOG_TOKEN'))
         needs_token=replacement or _github_token_is_expired(settings) or not saved
         ttk.Label(panel,text=('Token expired or rejected. Create a replacement below.' if replacement or _github_token_is_expired(settings)
                   else 'Token saved securely — reused automatically; no re-entry needed.' if saved
                   else 'One-time setup: save a GitHub token to enable uploads.'),wraplength=480).pack(pady=10)
-        ttk.Label(panel,text='Public repository: chrisbrook0127/CaseNumberOCR-Updates\n'
+        ttk.Label(panel,text='PUBLIC REPOSITORY: CHRISBROOK0127/CASENUMBEROCR-UPDATES\n'
             'Only sanitized diagnostics upload. Documents and full logs stay local.\n'
             'Use a fine-grained token for this repository with Contents: Read and write.',justify='left').pack(pady=6)
         def create_token():
@@ -2567,7 +3164,7 @@ class App:
         ttk.Button(panel,text='CREATE REPLACEMENT TOKEN',command=create_token).pack(anchor='w',pady=5)
         editor=ttk.Frame(panel)
         token=tk.StringVar()
-        ttk.Label(editor,text='New GitHub token:').pack(anchor='w')
+        ttk.Label(editor,text='NEW GITHUB TOKEN:').pack(anchor='w')
         entry=ttk.Entry(editor,textvariable=token,show='*',width=60);entry.pack(fill='x')
         def show_editor():
             editor.pack(fill='x',pady=8);entry.focus_set()
@@ -2579,7 +3176,7 @@ class App:
             try:
                 _save_github_log_settings(settings,enabled.get(),token.get())
                 token.set('');win.destroy();self._github_log_dialog=None
-                self.status.config(text='GitHub token/settings saved. Saved credentials will be reused after every scan.')
+                self.status.config(text='GITHUB TOKEN/SETTINGS SAVED. SAVED CREDENTIALS WILL BE REUSED AFTER EVERY SCAN.')
                 if retry_log and enabled.get():
                     threading.Thread(target=self._diag_sync_shared,args=(retry_log,),daemon=True).start()
             except Exception:
@@ -2610,7 +3207,7 @@ class App:
                     self.queue.put(('diagnostic_token_needed',str(logfile)));return
             if not token:token=os.environ.get('MFCASE_GITHUB_LOG_TOKEN','').strip()
             if not token:
-                status('GitHub logs not uploaded: configure a token in Settings > GITHUB LOG UPLOAD.');return
+                status('GitHub logs not uploaded: configure a token in SETTINGS > GITHUB SETTINGS.');return
             aliases={};output=io.BytesIO();count=0
             with logfile.open(encoding='utf-8') as source,gzip.GzipFile(fileobj=output,mode='wb',mtime=0) as archive:
                 for line in source:
@@ -2704,7 +3301,11 @@ class App:
         """User-controlled ZIP export. No automatic upload or transmission."""
         import zipfile as _zipfile
         from datetime import datetime as _dt
-        from tkinter import filedialog as _filedialog, messagebox as _messagebox
+        from tkinter import messagebox as _messagebox
+        if not self.folder:
+            _messagebox.showwarning('SELECT FOLDER',
+                'SELECT A ROOT FOLDER BEFORE EXPORTING A WORK LOG.')
+            return
         active=getattr(self,"_diag_file",None)
         directory=Path(os.getenv("LOCALAPPDATA") or str(self.app_dir))/"MFCase"/"diagnostics"
         logs=sorted(directory.glob("mfcase-*.jsonl"),reverse=True)[:10] if directory.is_dir() else []
@@ -2713,12 +3314,18 @@ class App:
         if not logs:
             _messagebox.showinfo("Work log","No recorded scans yet. Run a scan first.")
             return
-        suggested="MFCase_Work_Log_"+_dt.now().strftime("%Y%m%d_%H%M%S")+".zip"
-        target=_filedialog.asksaveasfilename(
-            title="Export MFCase OCR work log",defaultextension=".zip",
-            initialfile=suggested,filetypes=[("ZIP archive","*.zip")])
-        if not target:
+        output_dir=Path(self.folder)/'COMPLETED'
+        try:
+            output_dir.mkdir(parents=True,exist_ok=True)
+        except OSError as exc:
+            _messagebox.showerror('WORK LOG EXPORT FAILED',str(exc))
             return
+        suggested='MFCase_Work_Log_'+_dt.now().strftime('%Y%m%d_%H%M%S')+'.zip'
+        target=output_dir/suggested
+        number=2
+        while target.exists():
+            target=output_dir/(Path(suggested).stem+f'_{number}.zip')
+            number+=1
         notes=(
             "MFCase OCR diagnostic work log, schema mfcase.diagnostic.v1\n"
             "Each JSONL line is a standalone JSON event. Filter on event/file/run_id.\n"
@@ -2732,7 +3339,7 @@ class App:
             "Contains filenames, possible identifiers and OCR text in the 3-inch zone.\n"
             "No original PDFs or images are included.\n")
         try:
-            with _zipfile.ZipFile(target,"w",compression=_zipfile.ZIP_DEFLATED) as archive:
+            with _zipfile.ZipFile(target,"x",compression=_zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("HOW_TO_READ.txt",notes)
                 for path in logs:
                     archive.write(path,arcname=path.name)
@@ -2743,11 +3350,10 @@ class App:
                 provenance=self._audit_root / "MFCase_File_Trace.jsonl"
                 if provenance.is_file():
                     archive.write(provenance,arcname="MFCase_File_Trace.jsonl")
-            _messagebox.showinfo("Work log saved",
-                 "Diagnostic ZIP saved. You can upload it here for a complete "
-                 "file-by-file OCR decision review.\n\n"+str(target))
+            _messagebox.showinfo('WORK LOG SAVED',
+                'DIAGNOSTIC ZIP SAVED IN THE COMPLETED FOLDER.\n\n'+str(target))
         except Exception as exc:
-            _messagebox.showerror("Work log export failed",str(exc))
+            _messagebox.showerror('WORK LOG EXPORT FAILED',str(exc))
 
 
     def _scan_progress_update(self,done=None,phase="SCANNING",filename=None,index=None):
@@ -2757,17 +3363,20 @@ class App:
             try:done=int(float(self.progress["value"]))
             except (ValueError,TypeError,tk.TclError):done=0
         done=max(0,min(total,int(done)))
+        if getattr(self,'_scan_clock_start',None) is not None:
+            self._scan_clock_done=max(getattr(self,'_scan_clock_done',0),done)
         self.progress.config(maximum=max(1,total),value=done)
         pct=int(round(100*done/total)) if total else 0
         label=getattr(self,"scan_progress_label",None)
         if label is not None:
             if filename:
-                label.configure(text=f"{phase} — {index or done} of {total}: {filename}")
+                label.configure(text=f"{phase.upper()}: {index or done} OF {total} ({filename})")
             else:
-                label.configure(text=f"{phase} — {done} of {total} PDF files")
+                label.configure(text=f"{phase.upper()}: {done} OF {total} PDF FILES")
         pct_label=getattr(self,"scan_progress_pct",None)
         if pct_label is not None:
             pct_label.configure(text=f"{pct}%")
+        self._update_run_timers()
         self._diag_event("scan_progress",done=done,total=total,
                          percentage=pct,phase=phase)
 
@@ -2906,10 +3515,17 @@ class App:
             cfg=json.loads(self._user_settings_file.read_text(encoding="utf-8"))
             self._last_folder=str(cfg.get("last_folder") or "")
             self.auto_send_var.set(cfg.get("auto_send_completed") is True)
-            self.show_all_files_var.set(cfg.get("full_list",True) is not False)
+            self.show_all_files_var.set(False)  # Always start in the filtered view.
+            stored=cfg.get('ocr_approval_threshold',95)
+            try: stored=int(stored)
+            except (ValueError,TypeError):stored=95
+            if hasattr(self,'auto_threshold_var'):
+                self.auto_threshold_var.set(str(max(90,min(99,stored))))
         except (OSError,ValueError,TypeError):
             self.auto_send_var.set(False)
-            self.show_all_files_var.set(True)
+            self.show_all_files_var.set(False)
+            if hasattr(self,'auto_threshold_var'):
+                self.auto_threshold_var.set('95')
 
     def _save_user_settings(self):
         path=self._user_settings_file
@@ -2918,7 +3534,8 @@ class App:
             tmp=path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps({"version":1,
                       "auto_send_completed":bool(self.auto_send_var.get()),
-                      "full_list":bool(self.show_all_files_var.get()),
+                      "full_list":False,
+                       "ocr_approval_threshold":self._get_auto_threshold(),
                       "last_folder":str(self.folder or getattr(self,"_last_folder",""))},indent=2),encoding="utf-8")
             os.replace(tmp,path)
             self._audit_event("AUTO_SEND_SETTING",enabled=bool(self.auto_send_var.get()))
@@ -2940,33 +3557,35 @@ class App:
             (self.busy and iid in (getattr(self,"_active_scan_iid",None),
                                    getattr(self,"_worker_current_iid",None))))
 
-    def _schedule_post_scan_learning(self):
-        """Run pending local training after startup or approval and 90 seconds idle."""
+    def _schedule_post_scan_learning(self,after_send=False):
+        """Train after SEND or 90 seconds of idle time, not while scanning."""
         if getattr(self,"_stop_all_requested",False):return
         old=getattr(self,"_post_scan_learning_after",None)
         if old is not None:
             try:self.root.after_cancel(old)
             except tk.TclError:pass
         self._last_activity_time=time.monotonic()
-        self._post_scan_learning_after=self.root.after(90000,self._run_post_scan_learning_if_idle)
+        delay=3500 if after_send else 90000
+        self._post_scan_learning_after=self.root.after(delay,
+            lambda:self._run_post_scan_learning_if_idle(after_send=after_send))
 
-    def _run_post_scan_learning_if_idle(self):
+    def _run_post_scan_learning_if_idle(self,after_send=False):
         self._post_scan_learning_after=None
         if getattr(self,"_stop_all_requested",False):return
         if self.export_busy:
             # The transfer can outlast the first idle interval; retry after it finishes.
-            self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
+            self._post_scan_learning_after=self.root.after(30000,lambda:self._run_post_scan_learning_if_idle(after_send=after_send))
             return
         if (self.busy or self.paused or self.trocr_training
                 or self._loading_jobs or not self._startup_ready):
             self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
             return
         idle=time.monotonic()-getattr(self,"_last_activity_time",time.monotonic())
-        if idle < 90:
+        if idle < 90 and not after_send:
             self._post_scan_learning_after=self.root.after(int(max(1000,(90-idle)*1000)),
                 self._run_post_scan_learning_if_idle)
             return
-        self._audit_event("IDLE_LEARNING_CHECK")
+        self._audit_event("IDLE_LEARNING_CHECK",trigger="send" if after_send else "idle")
         self._start_automatic_learning_if_ready()
 
     def _audit_event(self, action, **data):
@@ -3407,7 +4026,7 @@ class App:
                            if self._normalized_training_type(ex.get("training_type")) == kind
                            and ex.get("image"))
                   for kind in ("handwritten", "printed", "unsure")}
-        ttk.Label(outer, text="Saved learning examples", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(outer, text="SAVED LEARNING EXAMPLES", font=("Segoe UI", 14, "bold")).pack(anchor="w")
         ttk.Label(outer, text=(f"Handwritten: {counts['handwritten']}   •   Printed: {counts['printed']}   •   "
                                f"Unclassified: {counts['unsure']}"),
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(3, 8))
@@ -3450,8 +4069,8 @@ class App:
                     subprocess.Popen(["xdg-open", str(self.learning_dir)])
             except Exception as exc:
                 messagebox.showerror("Open learning folder", str(exc), parent=win)
-        ttk.Button(bottom, text="Open Learning Folder", command=open_learning_folder).pack(side="left")
-        ttk.Button(bottom, text="Close", command=win.destroy).pack(side="right")
+        ttk.Button(bottom, text="OPEN LEARNING FOLDER", command=open_learning_folder).pack(side="left")
+        ttk.Button(bottom, text="CLOSE", command=win.destroy).pack(side="right")
 
     def _learning_accuracy(self):
         by_source = {}
@@ -3478,7 +4097,7 @@ class App:
                 text=f"Verified exact-match rate: {pct:.1f}% ({exact}/{total})")
         else:
             self.learning_stats_label.config(
-                text="Verified exact-match rate: no confirmed OCR predictions yet")
+                text="VERIFIED EXACT-MATCH RATE: NO CONFIRMED OCR PREDICTIONS YET")
         self._refresh_auto_eligibility_status()
         self._refresh_learning_button_state()
         if hasattr(self, "learning_type_stats_label"):
@@ -3503,8 +4122,24 @@ class App:
                      f" • {trained} training samples{detail}")
 
     def _get_auto_threshold(self):
-        """Fixed policy threshold, no user-adjustable confidence slider."""
-        return 95.0
+        """Read the saved 90–99% approval threshold, independent of OCR engine."""
+        try:
+            score=float(self.auto_threshold_var.get())
+            if not math.isfinite(score):return 95.0
+            return float(max(90,min(99,round(score))))
+        except (TypeError,ValueError,AttributeError,tk.TclError):
+            return 95.0
+
+    def _set_auto_threshold(self,value):
+        """Apply a slider adjustment to future decisions and persist locally."""
+        try: score=max(90,min(99,int(round(float(value)))))
+        except (ValueError,TypeError):return
+        if self._get_auto_threshold()!=score:
+            self.auto_threshold_var.set(str(score))
+            self._save_user_settings()
+        label=getattr(self,'threshold_display',None)
+        if label is not None and label.winfo_exists():
+            label.config(text=f'CURRENT OCR APPROVAL THRESHOLD: {score}%')
 
     def _save_learning_example(self, record, confirmed_number):
         confirmed_number=normalize_case_number(confirmed_number)
@@ -3568,15 +4203,27 @@ class App:
             crop = image.crop((x0, y0, x1, y1))
             if crop.width < 35 or crop.height < 10:
                 raise ValueError("The selected crop is too small. Draw a larger box around the case-field label (INCIDENT NO. or CASE NUMBER) and the complete case number.")
+            # The original full field is retained as location evidence only.
+            isolated,local_box,isolation=hw5618.number_only(
+                crop,require_separation=(crop_origin=='manual-field' and
+                                         crop.width>crop.height*5.0))
+            if isolated is None:
+                crop=None
+            else:
+                from PIL import Image as _Image
+                crop=_Image.fromarray(isolated)
             # Avoid nearly full-page crops: they teach the line recognizer the wrong task.
-            if crop.width >= image.width * 0.85 and crop.height >= image.height * 0.35:
+            if crop is not None and crop.width >= image.width * 0.85 and crop.height >= image.height * 0.35:
                 raise ValueError("The crop covers too much of the page. Draw a tighter box around the case number.")
-            crop_path = examples_dir / f"{stamp}.png"
-            crop.save(crop_path)
-            image_rel = f"examples_v3/{training_type}/{stamp}.png"
+            if crop is not None:
+                crop_path = examples_dir / f"{stamp}.png"
+                crop.save(crop_path)
+                image_rel = f"examples_v3/{training_type}/{stamp}.png"
 
+        # A confirmed case remains valid for filing and LOCATION learning even
+        # when its handwriting sample needs audit instead of model training.
         if not image_rel:
-            raise ValueError("No usable learning crop was saved. Draw a box around the complete case number and save again.")
+            self._log("No safe handwriting training image; location history remains available")
 
         candidate = str(record.get("candidate") or "").strip()
         # Remember where the reviewer selected/drew the field inside the same
@@ -3631,6 +4278,7 @@ class App:
         example = {
             "image": image_rel,
             "crop_origin": crop_origin if image_rel else "none",
+            "number_only_verified":bool(image_rel),
             "training_type": training_type,
             "ocr_candidate": candidate,
             "confirmed_case_number": confirmed_number,
@@ -3642,8 +4290,9 @@ class App:
         }
         example["example_id"] = self._learning_example_id(example)
         with self.data_lock:
-            self.learning_data.setdefault("examples", []).append(example)
-            self._persist_learning_data(append_example=example)
+            if image_rel:
+                self.learning_data.setdefault("examples", []).append(example)
+            self._persist_learning_data(append_example=example if image_rel else None)
             (self.folder / ".case_ocr_settings.json").write_text(
                 json.dumps({"year": REQUIRED_CASE_YEAR}, indent=2), encoding="utf-8")
         self._diag_event("learning_saved",file=Path(record["path"]).name,
@@ -3754,7 +4403,7 @@ class App:
 
     def _sequence_case_number(self, record):
         """Independent manual and machine completions have equal anchor priority."""
-        if (not record or record.get("sequence_inferred") or
+        if (not record or record.get("sequence_locked") or record.get("sequence_inferred") or
                 record.get("case_draft") or
                 str(record.get("status") or "").startswith("Unverified")):
             return None
@@ -3921,7 +4570,7 @@ class App:
         for pos in (positions if positions is not None else range(len(order))):
             if pos in human_set:continue
             iid,r=order[pos];status=str(r.get("status") or "")
-            if (r.get("exported") or r.get("case_draft") or r.get("sequence_excluded") or
+            if (r.get("sequence_locked") or r.get("exported") or r.get("case_draft") or r.get("sequence_excluded") or
                 status in ("Not scanned","Scanning","Moved to BLANKS") or status.startswith("Scan error:")):
                 continue
             hl=bisect_left(human,pos)-1;hr=bisect_right(human,pos)
@@ -3937,7 +4586,7 @@ class App:
         for pos in (positions if positions is not None else range(len(order))):
             if pos in plan or pos in conflicts or pos in human_set:continue
             iid,r=order[pos];status=str(r.get("status") or "")
-            if (r.get("exported") or r.get("case_draft") or r.get("sequence_excluded")
+            if (r.get("sequence_locked") or r.get("exported") or r.get("case_draft") or r.get("sequence_excluded")
                     or r.get("scan_ambiguous") or anchors[pos]
                     or status in ("Not scanned","Scanning","Moved to BLANKS")
                     or status.startswith("Scan error:")):
@@ -3975,7 +4624,7 @@ class App:
                           float(r.get("score") or 0)>=95 else None)
         flagged=[]
         for pos,(iid,r) in enumerate(order):
-            if (iid not in self.records or r.get("exported") or
+            if (iid not in self.records or r.get("sequence_locked") or r.get("exported") or
                     not r.get("auto_labeled") or r.get("sequence_inferred") or
                     pos in protected_positions or strong[pos] is None):
                 continue
@@ -4020,6 +4669,19 @@ class App:
             desired=plan.get(pos)
             current=_case_identity(r.get("confirmed"))
             wanted=_case_identity(desired[0]) if desired else None
+            # A previous-only anchor may SUGGEST a value, but it is never
+            # sufficient evidence to approve/rename/send this PDF. If that
+            # suggestion is no longer supported, restore the original read.
+            if (r.get("sequence_previous_prefill") and
+                    (not desired or len(desired[1]) != 1 or
+                     wanted != _case_identity(r.get("candidate")))):
+                if not desired:
+                    r.update(candidate=r.get("sequence_original_candidate", ""),
+                             score=r.get("sequence_original_score",r.get("score",0)),
+                             sequence_previous_prefill=False,sequence_anchors=[],
+                             status="Previous-case suggestion no longer supported — REVIEW")
+                    self._insert_scan_row(iid,r)
+                    changed+=1
             if r.get("sequence_inferred") and (not desired or wanted!=current):
                 r.update(candidate=r.get("sequence_original_candidate", ""),
                          score=r.get("sequence_original_score",r.get("score",0)),
@@ -4033,6 +4695,39 @@ class App:
                 changed+=1
             if pos in conflicted or not desired:
                 continue
+            if len(desired[1]) == 1:
+                # The preceding high-confidence case only PREFILLS the case
+                # number field. It cannot confirm the document, change its
+                # filename or make it eligible for SEND FILES.
+                if (r.get("sequence_previous_prefill") and not r.get("sequence_inferred")
+                        and not r.get("manual_approved") and not r.get("confirmed")
+                        and _case_identity(r.get("candidate")) == wanted
+                        and r.get("sequence_anchors") == desired[1]):
+                    continue
+                if not r.get("sequence_inferred") and not r.get("sequence_previous_prefill"):
+                    r["sequence_original_candidate"]=r.get("candidate", "")
+                    r["sequence_original_score"]=r.get("score",0)
+                    r["sequence_original_ambiguous"]=r.get("scan_ambiguous",False)
+                prior=r.get("sequence_original_candidate",r.get("candidate",""))
+                r.update(confirmed="",candidate=desired[0],manual_approved=False,
+                         auto_labeled=False,sequence_inferred=False,
+                         sequence_previous_prefill=True,sequence_conflict=False,
+                         sequence_anchors=desired[1],
+                         status=f"REVIEW — PREVIOUS CASE {desired[0]} PREFILLED; VERIFY AND APPROVE")
+                if self.completed_tree.exists(iid):
+                    self.completed_tree.delete(iid)
+                r["completed_iid"]=None
+                self._insert_scan_row(iid,r)
+                self._diag_event("sequence_prefill",file=str(r["path"]),
+                                 suggested=desired[0],original=prior,
+                                 anchors=desired[1],auto_completed=False)
+                changed+=1
+                continue
+            if r.get("sequence_previous_prefill"):
+                # A genuine MATCHING before+after pair may still complete
+                # the PDF. Preserve its pre-prefill OCR read for undo/recheck.
+                r["candidate"]=r.get("sequence_original_candidate",r.get("candidate",""))
+                r["sequence_previous_prefill"]=False
             if (r.get("sequence_inferred") and wanted==_case_identity(r.get("confirmed"))
                     and (not r.get("sequence_anchors") or r.get("sequence_anchors")==desired[1])):
                 continue
@@ -4118,7 +4813,7 @@ class App:
         except Exception as exc:
             self._sequence_review_pending=True
             self._log("Before/after recheck failed: %s",exc)
-            self.status.config(text="Before/after check failed; renaming is blocked. Finish SCAN to retry.")
+            self.status.config(text="BEFORE/AFTER CHECK FAILED; RENAMING IS BLOCKED. FINISH SCAN TO RETRY.")
 
     def _configure_trocr_token_ids(self, model, processor):
         """
@@ -4208,7 +4903,7 @@ class App:
         self._offline_prepare_busy=True
         if getattr(self,"prepare_offline_btn",None) is not None:
             self.prepare_offline_btn.config(state="disabled",text="DOWNLOADING MODELS…")
-        self.status.config(text="Downloading public OCR models by explicit request; "
+        self.status.config(text="DOWNLOADING PUBLIC OCR MODELS BY EXPLICIT REQUEST; "
                                 "no case files are transmitted.")
         threading.Thread(target=self._prepare_offline_models_worker,
             daemon=True,name="MFCase-ExplicitOfflineModelDownload").start()
@@ -4286,7 +4981,7 @@ class App:
         self.choose_folder_btn.config(state="normal")
         self.refresh_root_btn.config(state="normal" if self.folder else "disabled")
         self._refresh_scan_button()
-        self.status.config(text="OCR READY — updates are checked at startup; "
+        self.status.config(text="OCR READY — UPDATES ARE CHECKED AT STARTUP; "
                                 "background learning uses local confirmed examples.")
         self.root.after_idle(self._restore_last_folder)
         self._schedule_post_scan_learning()
@@ -4352,11 +5047,20 @@ class App:
         key=(engine,arr.shape,str(arr.dtype),hashlib.sha256(arr.tobytes()).digest())
         if key in budget["cache"]:
             return budget["cache"][key]
-        limit=1 if engine=="printed" else 3
+        limit=(1 if engine=="printed" else
+               (5 if budget.get("handwriting_uncertain") else 3))
         if budget[engine]>=limit:
             return empty
         budget[engine]+=1
         result=callback()
+        if engine=="handwriting":
+            try:
+                value,score=result
+                if (not CASE_RE.fullmatch(normalize_case_number(value)) or
+                    float(score or 0)<95):
+                    budget["handwriting_uncertain"]=True
+            except (TypeError,ValueError):
+                budget["handwriting_uncertain"]=True
         budget["cache"][key]=result
         return result
 
@@ -4419,8 +5123,8 @@ class App:
         self.training_popup = popup
         frame = ttk.Frame(popup, padding=18)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Updating learning", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        self.training_stage_label = ttk.Label(frame, text="Starting...", wraplength=510)
+        ttk.Label(frame, text="UPDATING LEARNING", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        self.training_stage_label = ttk.Label(frame, text="STARTING...", wraplength=510)
         self.training_stage_label.pack(anchor="w", pady=(12, 8))
         self.training_progressbar = ttk.Progressbar(
             frame, mode="determinate", maximum=100, value=0)
@@ -4449,13 +5153,13 @@ class App:
             if self.training_pause_button:
                 self.training_pause_button.config(text="RESUME")
             if self.training_stage_label:
-                self.training_stage_label.config(text="Learning paused.")
+                self.training_stage_label.config(text="LEARNING PAUSED.")
         else:
             self.learning_pause_event.set()
             if self.training_pause_button:
                 self.training_pause_button.config(text="PAUSE")
             if self.training_stage_label:
-                self.training_stage_label.config(text="Resuming learning...")
+                self.training_stage_label.config(text="RESUMING LEARNING...")
 
     def _stop_learning_update(self):
         if not self.trocr_training:
@@ -4467,7 +5171,7 @@ class App:
         if self.training_pause_button:
             self.training_pause_button.config(state="disabled")
         if self.training_stage_label:
-            self.training_stage_label.config(text="Stopping after the current step. Saved corrections will be kept.")
+            self.training_stage_label.config(text="STOPPING AFTER THE CURRENT STEP. SAVED CORRECTIONS WILL BE KEPT.")
 
     def _wait_for_learning_control(self):
         while not self.learning_pause_event.wait(timeout=0.2):
@@ -4635,9 +5339,16 @@ class App:
                         pass
 
             report(2, "Preparing and checking the saved training crops...")
+            hw5618.backup_learning_once(learning_dir)
+            complete_history=list(self.learning_data.get('examples',[]))
+            all_safe,quarantined=hw5618.audit_examples(complete_history,learning_dir)
+            safe_ids={ex.get('example_id') for ex in all_safe}
+            clean=[ex for ex in examples if ex.get('example_id') in safe_ids]
+            hw5618.write_quarantine_report(learning_dir,quarantined)
+            report(3,f"Audited handwriting training data; {len(quarantined)} samples quarantined")
             usable = []
-            total_examples = max(1, len(examples))
-            for index, ex in enumerate(examples, 1):
+            total_examples = max(1, len(clean))
+            for index, ex in enumerate(clean, 1):
                 self._wait_for_learning_control()
                 image_path = learning_dir / ex["image"]
                 if image_path.is_file():
@@ -4646,7 +5357,7 @@ class App:
                         # Later, each training step opens only its own crop.
                         with Image.open(image_path) as im:
                             im.verify()
-                        usable.append((image_path, ex["confirmed_case_number"]))
+                        usable.append((ex,image_path, ex["confirmed_case_number"]))
                     except Exception:
                         self._log("Could not load training crop %s", image_path)
                 if index == total_examples or index % 5 == 0:
@@ -4657,9 +5368,16 @@ class App:
                 raise RuntimeError(
                     f"Only {len(usable)} usable case-number crops; at least 10 are required.")
 
-            # Deterministic held-out split: every fifth item is validation-only for this run.
-            train_items = [item for idx, item in enumerate(usable) if idx % 5 != 0]
-            validation_items = [item for idx, item in enumerate(usable) if idx % 5 == 0]
+            # Group by image/source identity: never put two crops from the same
+            # original page into both training and independent validation.
+            grouped={}
+            for ex,image_path,target in usable:
+                key=str(ex.get('source_pdf') or image_path.stem)
+                grouped.setdefault(key,[]).append((image_path,target))
+            keys=sorted(grouped)
+            validation_keys=set(k for i,k in enumerate(keys) if i%5==0)
+            train_items=[pair for k in keys if k not in validation_keys for pair in grouped[k]]
+            validation_items=[pair for k in keys if k in validation_keys for pair in grouped[k]]
             if len(validation_items) < 2 or len(train_items) < 8:
                 raise RuntimeError("Not enough examples for a meaningful train/validation split.")
 
@@ -4694,17 +5412,18 @@ class App:
             base_model.eval()
             report(22, f"Model loaded on {device.upper()}. Testing the current model...")
 
-            def evaluate(model, start_percent, end_percent, stage_name):
+            def evaluate(model, start_percent, end_percent, stage_name, model_processor=None):
+                processor_for_eval=model_processor or processor
                 model.eval()
                 correct = 0
                 total_validation = len(validation_items)
                 for index, (image_path, target) in enumerate(validation_items, 1):
                     self._wait_for_learning_control()
                     with Image.open(image_path) as image:
-                        pixels = processor(images=image.convert("RGB"), return_tensors="pt").pixel_values.to(device)
+                        pixels = processor_for_eval(images=image.convert("RGB"), return_tensors="pt").pixel_values.to(device)
                     with torch.inference_mode():
                         output = model.generate(pixels, max_new_tokens=24, num_beams=2)
-                    predicted = processor.batch_decode(output, skip_special_tokens=True)[0]
+                    predicted = processor_for_eval.batch_decode(output, skip_special_tokens=True)[0]
                     if self._normalize_case_text(predicted) == self._normalize_case_text(target):
                         correct += 1
                     progress = start_percent + (
@@ -4717,6 +5436,18 @@ class App:
 
             baseline_correct = evaluate(
                 base_model, 24, 34, "Testing existing model")
+            # Independently compare the ORIGINAL Microsoft model on the SAME
+            # held-out cases. Never download anything during training.
+            local_base=(Path(os.environ.get('LOCALAPPDATA') or
+                   str(Path.home()/'.local'/'share'))/'MFCaseOCR'/'models'/'offline-base')
+            original_source=str(local_base) if (local_base/'config.json').is_file() else 'microsoft/trocr-base-handwritten'
+            original_processor=TrOCRProcessor.from_pretrained(original_source,local_files_only=True)
+            original_model=VisionEncoderDecoderModel.from_pretrained(original_source,local_files_only=True).to(device)
+            self._configure_trocr_token_ids(original_model,original_processor)
+            original_correct=evaluate(original_model,24,34,'Testing original Microsoft model',original_processor)
+            del original_model
+            # Keep the best of the current trained model and original base.
+            required_correct=max(baseline_correct,original_correct)
 
             model = base_model
             optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
@@ -4789,9 +5520,11 @@ class App:
 
             baseline_accuracy = 100.0 * baseline_correct / len(validation_items)
             tuned_accuracy = 100.0 * tuned_correct / len(validation_items)
-            improved = tuned_correct > baseline_correct
+            improved = tuned_correct > required_correct
             validation_report = {
                 "baseline_accuracy_pct": baseline_accuracy,
+                "original_accuracy_pct":100.0*original_correct/len(validation_items),
+                "original_correct":original_correct,
                 "accuracy_pct": tuned_accuracy,
                 "correct": tuned_correct,
                 "total": len(validation_items),
@@ -4840,12 +5573,12 @@ class App:
                     "model_activated": bool(improved)
                 }
                 attempted_ids = set(latest.get("trocr_v3_attempted_ids", []))
-                attempted_ids.update(new_ids)
+                attempted_ids.update(ex.get('example_id') for ex,_,_ in usable if ex.get('example_id'))
                 latest["trocr_v3_attempted_ids"] = sorted(attempted_ids)
                 latest["trocr_v2_attempted_count"] = len(attempted_ids)
                 if improved:
                     trained_ids = set(latest.get("trocr_v3_trained_ids", []))
-                    trained_ids.update(new_ids)
+                    trained_ids.update(ex.get('example_id') for ex,_,_ in usable if ex.get('example_id'))
                     latest["trocr_v3_trained_ids"] = sorted(trained_ids)
                     latest["trocr_v2_trained_count"] = len(trained_ids)
                 if db.is_file():
@@ -4918,7 +5651,7 @@ class App:
                 # Re-enter only when the worker has released its model.
                 if not self._scan_waiting_for_training:
                     self._scan_waiting_for_training=True
-                    self.status.config(text="Preparing scan: stopping background learning…")
+                    self.status.config(text="PREPARING SCAN: STOPPING BACKGROUND LEARNING…")
                     self.root.after(200,lambda selection=only_iids:
                         self._resume_scan_after_training(selection))
                 return
@@ -4957,6 +5690,11 @@ class App:
             try:self.root.after_cancel(self._post_scan_learning_after)
             except tk.TclError:pass
             self._post_scan_learning_after=None
+        self._scan_clock_start=time.monotonic()
+        self._scan_clock_final_elapsed=0.
+        self._scan_clock_pause_seconds=0.
+        self._scan_clock_pause_start=None
+        self._scan_clock_done=0
         self._run_outcomes = {"total_selected": len(self.scan_items)}
         self.busy = True
         self._sequence_review_pending = True
@@ -5066,15 +5804,20 @@ class App:
         if not self.busy:
             return
         if self.paused:
+            started=getattr(self,'_scan_clock_pause_start',None)
+            if started is not None:
+                self._scan_clock_pause_seconds+=max(0.,time.monotonic()-started)
+                self._scan_clock_pause_start=None
             self.paused = False
             self.pause_event.set()
             self.pause_btn.config(text="PAUSE")
-            self.status.config(text="Scanning...")
+            self.status.config(text="SCANNING...")
         else:
             self.paused = True
+            self._scan_clock_pause_start=time.monotonic()
             self.pause_event.clear()
             self.pause_btn.config(text="RESUME")
-            self.status.config(text="Scan paused.")
+            self.status.config(text="SCAN PAUSED.")
 
     def _restore_last_folder(self):
         folder=getattr(self,"_last_folder","")
@@ -5084,6 +5827,9 @@ class App:
     def stop_or_restart_scan(self):
         """STOP is cancellation only; it never launches a new scan."""
         self._stop_all_requested=True
+        self._scan_clock_final_elapsed=self._scan_clock_actual()
+        self._scan_clock_start=None
+        self._scan_clock_pause_start=None
         self.stop_event.set();self.pause_event.set();self.paused=False
         self.learning_stop_event.set();self.learning_pause_event.set()
         self._export_cancel_event.set()
@@ -5105,7 +5851,7 @@ class App:
         if self.busy or self.export_busy or self.trocr_training:
             self.root.after(150,self._close_when_workers_idle);return
         if self.folder and not self._save_state():
-            self.status.config(text="Could not save progress. Check folder access before closing.");return
+            self.status.config(text="COULD NOT SAVE PROGRESS. CHECK FOLDER ACCESS BEFORE CLOSING.");return
         self._save_user_settings()
         self.root.destroy()
 
@@ -5591,6 +6337,7 @@ class App:
                 and isinstance(box,(tuple,list)) and len(box)==4
                 and math.isfinite(score) and score>=threshold):
                 high.append(h)
+        if any(h.get("trailing_digit_uncertain") for h in high):return None
         if len({_case_identity(h["number"]) for h in high})!=1:
             return None
         return max(high,key=lambda h:float(h.get("score") or 0))
@@ -5770,7 +6517,7 @@ class App:
         # The old OCR path accepted 28x24 boxes and near-full-width rules as
         # complete seven-character case numbers. They are not whole fields.
         ratio=cw/max(1,ch)
-        if cw<35 or ch<11 or ratio<1.85 or ratio>10.5:
+        if cw<29 or ch<9 or ratio<1.25 or ratio>13.5:
             return False,"implausible_number_line_dimensions"
         gray=np.asarray(region[y0:y1,x0:x1])
         if gray.ndim==3:
@@ -5792,7 +6539,7 @@ class App:
             _,_,stats,_=cv2.connectedComponentsWithStats(ink.astype(np.uint8),8)
             substantial=[r for r in stats[1:] if r[cv2.CC_STAT_HEIGHT]>=max(5,int(ch*.20))
                          and r[cv2.CC_STAT_AREA]>=max(6,int(ch*.30))]
-            if (len(substantial)<2 and not any(r[cv2.CC_STAT_WIDTH]>=cw*.25
+            if (len(substantial)<1 and not any(r[cv2.CC_STAT_WIDTH]>=cw*.25
                     and r[cv2.CC_STAT_HEIGHT]>=max(6,int(ch*.25)) for r in substantial)):
                 return False,"specks_without_number_strokes"
         except ImportError:
@@ -5801,7 +6548,10 @@ class App:
         # not receive an invented OCR case number.
         wide_rows=(ink.sum(axis=1)>=cw*.77)
         if wide_rows.sum()>=max(2,int(ch*.09)):
-            return False,"ruled_form_line"
+            # Reject the rule only when it overwhelms all other glyph ink.
+            remaining=ink[~wide_rows,:]
+            if remaining.size==0 or remaining.mean()<.006:
+                return False,"ruled_form_line"
         for word_rect,token,confidence in detected_words:
             value=str(token or '').strip()
             if CASE_RE.fullmatch(normalize_case_number(value)) or CASE_FIELD_LABEL_RE.search(value):
@@ -5948,12 +6698,16 @@ class App:
             seen.add(rect)
             if getattr(self,"stop_event",None) is not None and self.stop_event.is_set():
                 raise InterruptedError("Stopped during quarter-page OCR")
-            choices=[(n,c,"EasyOCR") for r,n,c in printed if self._same_number_box(rect,r)]
+            trailing_uncertain=bool(hw5618.following_ink(region,rect))
+            choices=[(n,c,"EasyOCR") for r,n,c in printed
+                     if self._same_number_box(rect,r)]
             x0,y0,x1,y1=rect;pad=max(3,int((y1-y0)*.2))
             # One complete printed read >=95% already qualifies; do not
             # spend another model pass manufacturing a contradictory value.
-            printed_complete=any(score>=95. for _n,score,_engine in choices)
-            if (run_trocr and not printed_complete and calls<3 and
+            printed_complete=any(score>=self._get_auto_threshold() for _n,score,_engine in choices)
+            if (run_trocr and not printed_complete and calls<(
+                    5 if getattr(self,"_page_ocr_budget",None) and
+                    self._page_ocr_budget.get("handwriting_uncertain") else 3) and
                     (self.trocr_model is not None or self.trocr_error=="")):
                 viable,reason=self._plausible_case_ink_crop(region,rect,pieces)
                 if not viable:
@@ -5964,6 +6718,19 @@ class App:
                     if crop.size and int(crop.max())-int(crop.min())>=8:
                         self._probe_trocr_default_bias()
                         raw,score=self._trocr_read_scored(crop);calls+=1
+                        baseline_raw=normalize_case_number(raw)
+                        alt_values=[baseline_raw]
+                        if score<self._get_auto_threshold() or hw5618.following_ink(region,rect):
+                            for variant in hw5618.image_variants(crop):
+                                if calls>=5:break
+                                alt,alt_score=self._trocr_read_scored(variant);calls+=1
+                                if CASE_RE.fullmatch(normalize_case_number(alt)):
+                                    alt_values.append(normalize_case_number(alt))
+                                    if alt_score>score:raw,score=alt,alt_score
+                        if (hw5618.missing_end_conflict(alt_values) or
+                                hw5618.following_ink(region,rect)):
+                            trailing_uncertain=True
+                            self._diag_event('trailing_digit_review',rect=list(rect),readings=alt_values)
                         self._diag_event("crop_raw_read",rect=list(rect),engine="TrOCR",
                                          text=str(raw or ""),score=score)
                         number=normalize_case_number(raw)
@@ -5984,7 +6751,8 @@ class App:
             absolute=(x0+x_offset,y0+y_offset,x1+x_offset,y1+y_offset)
             candidates.append(dict(number=number,score=score,rect=absolute,box_rect=absolute,
                 box_verified=True,prefix_source=engine,engines=list(scores),engine_scores=scores,
-                label_type=kind,label_context=bool(kind),incident_label_context=kind=="incident",label_distance=distance))
+                label_type=kind,label_context=bool(kind),incident_label_context=kind=="incident",
+                label_distance=distance,trailing_digit_uncertain=trailing_uncertain))
         self._diag_event("bounded_ocr_pass",printed_calls=int(self.reader is not None),
                          handwriting_calls=calls,candidates=len(candidates))
         return candidates
@@ -6062,7 +6830,7 @@ class App:
         if cropped.size==0 or int(cropped.max())-int(cropped.min())<8:
             return []
         hits=[]
-        def add_hit(number,score,engine,rect):
+        def add_hit(number,score,engine,rect,trailing_uncertain=False):
             number=normalize_case_number(number)
             try:score=float(score or 0.)
             except (TypeError,ValueError):return
@@ -6073,20 +6841,43 @@ class App:
                 prefix_source=engine,engines=[engine],
                 engine_scores={engine.split('-',1)[0]:score},
                 label_type=None,label_context=False,
-                learned_location=True,learned_sample_count=zone['count']))
-        # Check the handwriting engine before EasyOCR as requested.  Reject
-        # model-default predictions already caught by negative-control probes.
-        viable,reason=self._plausible_case_ink_crop(page_image,(x0,y0,x1,y1))
+                learned_location=True,learned_sample_count=zone['count'],
+                trailing_digit_uncertain=bool(trailing_uncertain)))
+        # Keep learned LOCATION unchanged; extract only NUMBER pixels for TrOCR.
+        words=self._automatic_detections(cropped,x0,y0) if getattr(self,'reader',None) is not None else []
+        label_rects=[]
+        for box,token,_confidence in words:
+            if CASE_FIELD_LABEL_RE.search(str(token)):
+                xs=[p[0] for p in box];ys=[p[1] for p in box]
+                label_rects.append((min(xs),min(ys),max(xs),max(ys)))
+        number_crop,number_rect,number_reason=hw5618.number_only(
+            cropped,label_rects=label_rects,
+            require_separation=bool(label_rects or
+                    cropped.shape[1]>cropped.shape[0]*6.0))
+        viable,reason=(self._plausible_case_ink_crop(
+            number_crop,(0,0,number_crop.shape[1],number_crop.shape[0]))
+            if number_crop is not None else (False,number_reason))
         if not viable:
             self._diag_event('model_crop_rejected',rect=[x0,y0,x1,y1],reason=reason,source='learned')
         if viable and getattr(self,'trocr_model',None) is not None:
             self._probe_trocr_default_bias()
             with self._perf_measure('learned_handwriting'):
-                raw,score=self._trocr_read_scored(cropped)
+                raw,score=self._trocr_read_scored(number_crop)
+                readings=[normalize_case_number(raw)]
+                if score<self._get_auto_threshold() or number_reason=='edge_clipped':
+                    for variant in hw5618.image_variants(number_crop):
+                        alt,alt_score=self._trocr_read_scored(variant)
+                        if CASE_RE.fullmatch(normalize_case_number(alt)):
+                            readings.append(normalize_case_number(alt))
+                            if alt_score>score:raw,score=alt,alt_score
+                trailing_uncertain=(hw5618.missing_end_conflict(readings)
+                                    or number_reason=='edge_clipped')
+                if trailing_uncertain:
+                    self._diag_event('trailing_digit_review',readings=readings,source='learned')
             number=normalize_case_number(raw)
             bias=getattr(self,'_trocr_bias_values',set())
             if _case_identity(number) not in bias:
-                add_hit(number,score,'TrOCR-learned',(x0,y0,x1,y1))
+                add_hit(number,score,'TrOCR-learned',(x0,y0,x1,y1),trailing_uncertain)
             elif CASE_RE.fullmatch(number):
                 self._diag_event('trocr_default_value_rejected',
                     rect=[x0,y0,x1,y1],reading=number,reason='model negative controls')
@@ -6155,10 +6946,11 @@ class App:
                     zones=[dict(rect=list(z['rect']),count=z['count']) for z in zones])
                 self._prepare_printed_region(image,zones,(region,offset_x,0))
                 printed_hits=self._automatic_handwritten_4x4(region,offset_x,0,run_trocr=False)
-                printed_complete=self._clear_localized_case(printed_hits,95.0) is not None
+                printed_complete=self._clear_localized_case(printed_hits,self._get_auto_threshold()) is not None
                 learned_complete=False
                 for zone in ([] if printed_complete else zones):
-                    if self._page_ocr_budget["handwriting"]>=2:
+                    if self._page_ocr_budget["handwriting"] >= (
+                            4 if self._page_ocr_budget.get("handwriting_uncertain") else 2):
                         break
                     if getattr(self,'stop_event',None) is not None and self.stop_event.is_set():
                         raise InterruptedError('Stopped during learned-zone OCR')
@@ -6168,7 +6960,7 @@ class App:
                         # All of these candidates have a physical location
                         # backed by a human-verified historical crop.
                         results.append((page_index,image,candidates,'learned'))
-                    if self._clear_localized_case(candidates,95.0) is not None:
+                    if self._clear_localized_case(candidates,self._get_auto_threshold()) is not None:
                         learned_complete=True
                         break
                 if not learned_complete:
@@ -6212,7 +7004,7 @@ class App:
                 candidate_cases={_case_identity(h.get("number")) for _idx,_im,hh,_kind in matches
                                  for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))}
                 if (len(candidate_cases)==1 and matches and
-                    any(self._clear_localized_case(hh,95.0) is not None
+                    any(self._clear_localized_case(hh,self._get_auto_threshold()) is not None
                         for _idx,_im,hh,_kind in matches)):
                     if len(doc)>page_index+1:
                         self._diag_event("scan_fast_pdf",file=Path(path).name,
@@ -6239,7 +7031,7 @@ class App:
                 index,image,hits,kind=entry
                 verified=max((float(h.get("score") or 0) for h in hits
                     if h.get("box_verified") and h.get("box_rect")),default=0.0)
-                return (verified>=95.0,verified,
+                return (verified>=self._get_auto_threshold(),verified,
                         {"learned":6,"header":5,"incident":4,"case":3,"fallback":2}[kind])
             index,image,hits,kind=max(results,key=rank)
             self._diag_event("ocr_candidates",page=index+1,source=kind,
@@ -6279,7 +7071,7 @@ class App:
                 if _source in ("header","fallback","incident","case","learned")
                 for h in hh if CASE_RE.fullmatch(normalize_case_number(h.get("number")))
                 and h.get("box_verified") and h.get("box_rect")
-                and float(h.get("score") or 0)>=95.0}
+                and float(h.get("score") or 0)>=self._get_auto_threshold()}
             all_region_cases={_case_identity(h.get("number"))
                 for _idx,_im,other_hits,source in results
                 if source in ("header","fallback","incident","case","learned")
@@ -6288,9 +7080,10 @@ class App:
             # Only independently verified, >=95% competing readings of the
             # selected physical field can block automatic approval. A weak
             # variant or unrelated lower-page number cannot cause REVIEW.
+            trailing_review=any(h.get("trailing_digit_uncertain") for h in hits)
             ambiguous=len({_case_identity(h.get("number")) for h in hits
                            if h.get("box_verified") and h.get("box_rect") and
-                           float(h.get("score") or 0.)>=95.0})>1
+                           float(h.get("score") or 0.)>=self._get_auto_threshold()})>1 or trailing_review
             visuals=[]
             for h in hits:
                 rect=h.get("rect")
@@ -6304,20 +7097,23 @@ class App:
                     "engine_scores":dict(h.get("engine_scores") or {}),
                     "label_type":h.get("label_type"),
                     "label_distance":0.0,
-                    "learned_location":bool(h.get("learned_location"))})
+                    "learned_location":bool(h.get("learned_location")),
+                    "trailing_digit_uncertain":bool(h.get("trailing_digit_uncertain"))})
             self._diag_event("ocr_decision",page=index+1,source=kind,
                  primary=number,score=float(best.get("score") or 0),
                  ambiguous=ambiguous,conflicting=sorted(distinct),
                  engines=engines,selected_bbox=best.get("rect"),
                  outcome="manual_review" if ambiguous else "candidate_ready")
-            if ambiguous:
+            if trailing_review:
+                note="Potential missing final digit — MANUAL REVIEW (trailing-digit uncertainty)"
+            elif ambiguous:
                 all_conflicts=sorted({h.get("number") for h in hits
                         if CASE_RE.fullmatch(normalize_case_number(h.get("number")))
-                        and float(h.get("score") or 0.)>=95.0})
+                        and float(h.get("score") or 0.)>=self._get_auto_threshold()})
                 note=(f"upper-right quarter case field has conflicting OCR reads: "
                       + ", ".join(all_conflicts)+" — MANUAL REVIEW")
             elif kind=="learned":
-                note="Verified manual-crop location — handwriting-first OCR; 95% required for auto-completion"
+                note=f"Verified manual-crop location — handwriting-first OCR; {self._get_auto_threshold():g}% required for auto-completion"
             elif kind=="incident":
                 note="Case field right-of-label full number — Upper-right quarter labeled printed OCR"
             elif kind=="case":
@@ -6720,7 +7516,7 @@ class App:
                         self._loader_finish("rolls")
                         self.refresh_root_btn.config(state="normal")
                         self.choose_folder_btn.config(state="normal")
-                        self.status.config(text="Could not refresh root PDFs; current list remains unchanged.")
+                        self.status.config(text="COULD NOT REFRESH ROOT PDFS; CURRENT LIST REMAINS UNCHANGED.")
                         messagebox.showerror("Folder load failed", detail)
                 elif kind == "offline_models_ready":
                     self._offline_prepare_busy=False
@@ -6730,14 +7526,14 @@ class App:
                     self.trocr_model=None
                     self.trocr_processor=None
                     self.trocr_error=""
-                    self.status.config(text="Models installed locally. "
+                    self.status.config(text="MODELS INSTALLED LOCALLY. "
                                             "Initializing offline OCR…")
                     self._begin_model_preload()
                 elif kind == "offline_models_error":
                     self._offline_prepare_busy=False
                     if getattr(self,"prepare_offline_btn",None) is not None:
                         self.prepare_offline_btn.config(state="normal")
-                    self.status.config(text="Model preparation failed: "+str(msg[1]))
+                    self.status.config(text="MODEL PREPARATION FAILED: "+str(msg[1]))
                     messagebox.showerror("Offline models",
                         "Could not prepare all models; nothing was uploaded. "
                         "Check the connection or available disk space.\n\n"+str(msg[1]))
@@ -6769,7 +7565,7 @@ class App:
                         if startup_origin:
                             self._startup_learning_pending = False
                             self._fail_startup(detail)
-                        self.status.config(text="Shared learning unavailable; scanning disabled.")
+                        self.status.config(text="SHARED LEARNING UNAVAILABLE; SCANNING DISABLED.")
                         if not startup_origin:
                             messagebox.showwarning(
                             "Shared learning unavailable",
@@ -6851,16 +7647,17 @@ class App:
                                      else "fallback" if note.startswith("Upper-right")
                                      else "incident-unreadable" if note.startswith("Case field located")
                                      else "unknown"),
-                        scan_ambiguous="conflicting OCR reads" in note,
+                        scan_ambiguous=("conflicting OCR reads" in note or "trailing-digit uncertainty" in note),
                         sequence_excluded=False,
                         sequence_conflict=False, sequence_inferred=False,
+                        sequence_previous_prefill=False,
                         sequence_anchors=[], sequence_suggestion="")
                     if note.startswith("Upper-right header"):
                          r["scan_source"]="header"
                      # Diagnostic counters belong to THIS run, not accumulated saved state.
                     if note.startswith("Scan error"):
                         reason = "scan_error"
-                    elif "conflicting OCR reads" in note:
+                    elif "conflicting OCR reads" in note or "trailing-digit uncertainty" in note:
                         reason = "conflicting_readings"
                     elif note.startswith("Upper-right"):
                         reason = "unverified_fallback_location"
@@ -6977,11 +7774,12 @@ class App:
                             self._apply_sequence_consensus()
                     except Exception as exc:
                         self._log("Could not recheck remaining review files after SEND: %s",exc)
-                        self.status.config(text="SEND finished, but before/after recheck failed; review remaining PDFs.")
+                        self.status.config(text="SEND FINISHED, BUT BEFORE/AFTER RECHECK FAILED; REVIEW REMAINING PDFS.")
                     self._update_completed_count()
                     self._refresh_scan_button()
                     self._export_reschedule = False
                     self._schedule_auto_export()
+                    self._schedule_post_scan_learning(after_send=True)
                 elif kind == "engine_status":
                     _, message = msg
                     self._loader_finish("ocr")
@@ -7040,6 +7838,10 @@ class App:
                     if not self._startup_ready:
                         self._begin_model_preload()
                 elif kind == "fatal":
+                    self._scan_clock_final_elapsed=self._scan_clock_actual()
+                    self._scan_clock_start=None
+                    self._scan_clock_pause_start=None
+                    self._update_run_timers()
                     self._loader_finish("ocr")
                     self._loader_finish("model")
                     self.busy = False
@@ -7105,6 +7907,10 @@ class App:
                     else:
                         messagebox.showerror("Update failed", msg[1])
                 elif kind == "stopped":
+                    self._scan_clock_final_elapsed=self._scan_clock_actual()
+                    self._scan_clock_start=None
+                    self._scan_clock_pause_start=None
+                    self._update_run_timers()
                     self._loader_finish("ocr")
                     self._loader_finish("model")
                     self.busy = False
@@ -7123,7 +7929,7 @@ class App:
                     self._refresh_review_controls()
                     self._refresh_learning_button_state()
                     self._update_completed_count()
-                    self.status.config(text="Scan stopped. Completed files may now be sent. Remaining files stay in root.")
+                    self.status.config(text="SCAN STOPPED. COMPLETED FILES MAY NOW BE SENT. REMAINING FILES STAY IN ROOT.")
                     self._active_scan_iid=None
                     self._rescan_force_iids.clear()
                     self._save_state()
@@ -7134,6 +7940,11 @@ class App:
                     self._log("%s",msg[1])
                     if not self.busy:self.status.config(text=msg[1])
                 elif kind == "done":
+                    self._scan_clock_final_elapsed=self._scan_clock_actual()
+                    self._scan_clock_start=None
+                    self._scan_clock_pause_start=None
+                    self._scan_clock_done=len(getattr(self,'scan_items',[]) or [])
+                    self._update_run_timers()
                     self._loader_finish("ocr")
                     self._loader_finish("model")
                     self.busy = False
@@ -7293,8 +8104,11 @@ class App:
             return
         changed = False
         for example in self.learning_data.get("examples", []):
-            if example.get("source_pdf") == source_name:
-                example["confirmed_case_number"] = confirmed_number
+            if example.get("source_pdf") == source_name and (
+                    _case_identity(example.get("confirmed_case_number")) !=
+                    _case_identity(confirmed_number)):
+                example["training_quarantined"] = True
+                example["training_quarantine_reason"] = "filename_changed_after_crop_created"
                 changed = True
         for region in self.learning_data.get("field_regions", []):
             if region.get("source_pdf") == source_name:
@@ -7310,7 +8124,7 @@ class App:
             self._close_completed_edit(iid)
             return
         if iid in self._export_in_flight_iids:
-            self.status.config(text="That file is being renamed; edits are temporarily unavailable.")
+            self.status.config(text="THAT FILE IS BEING RENAMED; EDITS ARE TEMPORARILY UNAVAILABLE.")
             return
         value = entry.get().strip()
         value = normalize_case_number(value)
@@ -7331,7 +8145,7 @@ class App:
             record["scan_ambiguous"] = False
             record["sequence_inferred"] = False
             if not self._save_state():
-                self.status.config(text="Correction is in memory but could not be saved; check folder access and retry Enter.")
+                self.status.config(text="CORRECTION IS IN MEMORY BUT COULD NOT BE SAVED; CHECK FOLDER ACCESS AND RETRY ENTER.")
                 return False
             self._cancel_completed_case_edit(iid)
             self._recheck_after_decision()
@@ -7350,6 +8164,7 @@ class App:
         record["manual_approved"] = True
         record["auto_labeled"] = False
         record["sequence_inferred"] = False
+        record["sequence_previous_prefill"] = False
         record["sequence_conflict"] = False
         record["sequence_excluded"] = False
         record["sequence_anchors"] = []
@@ -7370,7 +8185,7 @@ class App:
         saved=self._save_state()
         self._update_completed_count()
         if not saved:
-            self.status.config(text="Correction is in memory but could not be saved; check folder access and retry Enter.")
+            self.status.config(text="CORRECTION IS IN MEMORY BUT COULD NOT BE SAVED; CHECK FOLDER ACCESS AND RETRY ENTER.")
             return False
         message = (f"Case number saved as {value} for {record['path'].name}. "
                    "It remains in root until SEND FILES.")
@@ -7428,9 +8243,9 @@ class App:
                     draft = self.completed_edit_drafts.get(iid, "")
                     if draft:
                         entry.insert(0, draft)
-                    save = ttk.Button(self.completed_tree, text="Save",
+                    save = ttk.Button(self.completed_tree, text="SAVE",
                                       command=lambda key=iid, e=entry: self._save_completed_case_edit(key, e))
-                    cancel = ttk.Button(self.completed_tree, text="Cancel",
+                    cancel = ttk.Button(self.completed_tree, text="CANCEL",
                                         command=lambda key=iid: self._cancel_completed_case_edit(key))
                     entry.bind("<KeyRelease>", lambda _e, key=iid, e=entry:
                                self._remember_completed_draft(key, e))
@@ -7729,7 +8544,7 @@ class App:
                 if record.get("score") else "OCR detector score: unavailable")
             ttk.Label(head, text=score_description).pack(side="right")
             ttk.Label(win, text=str(record["path"]), padding=(10, 0)).pack(anchor="w")
-            ttk.Label(win, text="GREEN = field used for the filename / learning crop     RED = other detected case-number candidates",
+            ttk.Label(win, text="GREEN = FIELD USED FOR THE FILENAME / LEARNING CROP     RED = OTHER DETECTED CASE-NUMBER CANDIDATES",
                       foreground="#1b6e36", padding=(10, 5)).pack(anchor="w")
             panel = ttk.Frame(win, padding=(8, 0, 8, 8))
             panel.pack(fill="both", expand=True)
@@ -7893,7 +8708,7 @@ class App:
         if not record or record.get("exported"):
             return
         if iid in self._export_in_flight_iids:
-            self.status.config(text="That file is being renamed; UNVERIFY is temporarily unavailable.")
+            self.status.config(text="THAT FILE IS BEING RENAMED; UNVERIFY IS TEMPORARILY UNAVAILABLE.")
             return
         old_thumbnail = self._completed_thumbnail_path(record)
         if old_thumbnail and old_thumbnail.exists():
@@ -7915,6 +8730,7 @@ class App:
         record["manual_approved"] = False
         record["auto_labeled"] = False
         record["sequence_inferred"] = False
+        record["sequence_previous_prefill"] = False
         record["sequence_conflict"] = False
         record["sequence_anchors"] = []
         record["sequence_suggestion"] = ""
@@ -8158,7 +8974,7 @@ class App:
         ttk.Label(controls, text=r["path"].name, wraplength=280).grid(
             row=1, column=0, sticky="w", pady=(0, 12))
 
-        size_button = ttk.Button(controls, text="Restore Window")
+        size_button = ttk.Button(controls, text="RESTORE WINDOW")
         size_button.grid(row=2, column=0, sticky="ew", pady=(0, 14))
 
         def toggle_size():
@@ -8166,10 +8982,10 @@ class App:
                 if win.state() == "zoomed":
                     win.state("normal")
                     win.geometry("1400x900")
-                    size_button.config(text="Full Screen")
+                    size_button.config(text="FULL SCREEN")
                 else:
                     win.state("zoomed")
-                    size_button.config(text="Restore Window")
+                    size_button.config(text="RESTORE WINDOW")
             except tk.TclError:
                 pass
         size_button.config(command=toggle_size)
@@ -8194,7 +9010,7 @@ class App:
             label_row = 6
         else:
             label_row = 5
-        ttk.Label(controls, text="CLICK TO EDIT — confirmed case number (08- plus 1–7 digits):",
+        ttk.Label(controls, text="CLICK TO EDIT — CONFIRMED CASE NUMBER (08- PLUS 1–7 DIGITS):",
                   wraplength=280).grid(row=label_row, column=0, sticky="w")
         entry = ttk.Entry(controls, font=("Segoe UI", 14))
         entry.grid(row=label_row + 1, column=0, sticky="ew", pady=(5, 4))
@@ -8225,11 +9041,11 @@ class App:
             if 0 <= nxt < len(self.review_queue):
                 self._show_review_item(nxt)
 
-        ttk.Button(nav_buttons, text="◀ Previous",
+        ttk.Button(nav_buttons, text="◀ PREVIOUS",
                    command=lambda: move(-1),
                    state="normal" if index > 0 else "disabled").grid(
                        row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(nav_buttons, text="Next ▶",
+        ttk.Button(nav_buttons, text="NEXT ▶",
                    command=lambda: move(1),
                    state="normal" if index < len(self.review_queue)-1 else "disabled").grid(
                        row=0, column=1, sticky="ew", padx=(4, 0))
@@ -8239,7 +9055,7 @@ class App:
         def confirm():
             value=normalize_case_number(entry.get().strip())
             if not CASE_RE.fullmatch(value):
-                err.config(text="Case number must start with 08- followed by 1–7 digits.")
+                err.config(text="CASE NUMBER MUST START WITH 08- FOLLOWED BY 1–7 DIGITS.")
                 return
             pending_rect=selection.get("preview_rect")
             if pending_rect:
@@ -8265,7 +9081,7 @@ class App:
             r["status"]=f"Manual case confirmed as {value} — awaiting SEND FILES"
             self._insert_scan_row(iid,r)
             if not self._save_state():
-                err.config(text="Could not save your correction to the root-folder "
+                err.config(text="COULD NOT SAVE YOUR CORRECTION TO THE ROOT-FOLDER "
                           "state file. The case remains entered here; check network "
                           "access, then click SAVE REVIEW again.")
                 return
@@ -8306,7 +9122,7 @@ class App:
                    command=win.destroy).grid(row=action_row+2,column=0,sticky="ew")
 
         ttk.Label(controls,
-                  text="SAVE REVIEW stores the corrected 08- case and learning "
+                  text="SAVE REVIEW STORES THE CORRECTED 08- CASE AND LEARNING "
                        "without moving any PDF. You can reopen and revise it "
                        "until you press SEND FILES.",
                   wraplength=280).grid(row=action_row + 2, column=0, sticky="w", pady=(18, 0))
@@ -8349,9 +9165,9 @@ class App:
                 selection["enabled"] = True
                 selection["drag"] = None
                 selection_status.config(
-                    text="Drag around the full case number (08-...) and release to OCR it. You may redraw as needed.")
+                    text="DRAG AROUND THE FULL CASE NUMBER (08-...) AND RELEASE TO OCR IT. YOU MAY REDRAW AS NEEDED.")
             selection_button = ttk.Button(
-                controls, text="Draw / Redraw Crop Box",
+                controls, text="DRAW / REDRAW CROP BOX",
                 command=set_selection_mode)
             selection_button.grid(row=30, column=0, sticky="ew", pady=(0, 5))
 
@@ -8363,11 +9179,11 @@ class App:
                 redraw()
                 update_crop_preview()
                 selection_status.config(
-                    text="Manual box cleared. The OCR-detected box will be used when available.")
+                    text="MANUAL BOX CLEARED. THE OCR-DETECTED BOX WILL BE USED WHEN AVAILABLE.")
                 self._save_state()
 
             ttk.Button(
-                controls, text="Clear Manual Box",
+                controls, text="CLEAR MANUAL BOX",
                 command=clear_selection).grid(row=31, column=0, sticky="ew")
 
             learned_overlay_var=tk.BooleanVar(value=False)
@@ -8380,7 +9196,7 @@ class App:
             crop_preview_row = ttk.Frame(controls)
             crop_preview_row.grid(row=32, column=0, sticky="ew", pady=(8, 0))
             crop_preview_label = ttk.Label(
-                crop_preview_row, text="Crop preview will appear here.", anchor="center")
+                crop_preview_row, text="CROP PREVIEW WILL APPEAR HERE.", anchor="center")
             crop_preview_label.pack(side="left", fill="x", expand=True)
             score_value = float(r.get("score", 0.0) or 0.0)
             review_score_label = ttk.Label(
@@ -8457,14 +9273,14 @@ class App:
                 rect_to_show = manual_rect or (matching.get("rect") if matching else None)
                 if not rect_to_show:
                     crop_preview_label.config(
-                        image="", text="No crop box yet. Draw one around the case number.")
+                        image="", text="NO CROP BOX YET. DRAW ONE AROUND THE CASE NUMBER.")
                     photo_ref["crop"] = None
                     return
                 x0, y0, x1, y1 = [int(v) for v in rect_to_show]
                 x0=max(0,min(original.width,x0)); x1=max(0,min(original.width,x1))
                 y0=max(0,min(original.height,y0)); y1=max(0,min(original.height,y1))
                 if x1 <= x0 or y1 <= y0:
-                    crop_preview_label.config(image="", text="Crop box is empty.")
+                    crop_preview_label.config(image="", text="CROP BOX IS EMPTY.")
                     photo_ref["crop"] = None
                     return
                 crop = original.crop((x0,y0,x1,y1))
@@ -8628,10 +9444,10 @@ class App:
                     return
                 number,score,engine,error=suggestion
                 if error:
-                    selection_status.config(text="Crop OCR unavailable: "+error[:180])
+                    selection_status.config(text="CROP OCR UNAVAILABLE: "+error[:180])
                     return
                 if not CASE_RE.fullmatch(normalize_case_number(number)):
-                    selection_status.config(text="No complete 08- read in selected box. Enter the number manually or redraw. Crop coordinates remain saved.")
+                    selection_status.config(text="NO COMPLETE 08- READ IN SELECTED BOX. ENTER THE NUMBER MANUALLY OR REDRAW. CROP COORDINATES REMAIN SAVED.")
                     return
                 # Never replace an edit made while OCR was running.
                 if entry.get()==original_entry:
@@ -8662,7 +9478,7 @@ class App:
                         crop=original.crop(tuple(map(int, selected)))
                         original_entry=entry.get()
                         crop_rect=tuple(map(int,selected))
-                        selection_status.config(text="Reading your selected crop locally…")
+                        selection_status.config(text="READING YOUR SELECTED CROP LOCALLY…")
                         def crop_worker():
                             try:
                                 suggestion=self._ocr_review_crop(crop)
@@ -8674,7 +9490,7 @@ class App:
                     else:
                         selection["preview_rect"]=None
                         selection_status.config(
-                            text="That box is too small. Include INCIDENT NO. and the full case number in a larger box.")
+                            text="THAT BOX IS TOO SMALL. INCLUDE INCIDENT NO. AND THE FULL CASE NUMBER IN A LARGER BOX.")
                 redraw()
                 update_crop_preview()
                 return "break"
@@ -8831,7 +9647,7 @@ class App:
             if commit is not None:
                 commit()
             if getattr(self,"_scan_case_editor",None) is not None:
-                self.status.config(text="Correct or cancel the unfinished case edit before exporting.")
+                self.status.config(text="CORRECT OR CANCEL THE UNFINISHED CASE EDIT BEFORE EXPORTING.")
                 self._scan_case_editor.focus_set()
                 return
         if automatic and getattr(self,"_stop_all_requested",False):
@@ -8842,7 +9658,7 @@ class App:
             return
         if self.export_busy:
             self._export_reschedule = True
-            self.status.config(text="Export is already in progress. Wait for it to finish.")
+            self.status.config(text="EXPORT IS ALREADY IN PROGRESS. WAIT FOR IT TO FINISH.")
             return
         if not self.folder or self.busy or self._training_blocks_work() or getattr(self,"_sequence_review_pending",False):
             if not automatic:
@@ -8851,8 +9667,8 @@ class App:
                 self.completed_send_status.config(text=message)
             return
         self._yield_background_learning("sending verified files")
-        # Export is intentionally independent of scan/review selection.
-        selected_set = None
+        # Main SEND ignores table selection; row SEND supplies exactly one ID.
+        selected_set = set(selected_iids) if selected_iids is not None else None
         if not automatic:
             drafts = self._unsaved_completed_changes(selected_set)
             if drafts:
@@ -9017,6 +9833,7 @@ class App:
                     "auto_labeled":bool(rec.get("auto_labeled")),
                     "score":float(rec.get("score") or 0),
                     "sequence_inferred":bool(rec.get("sequence_inferred")),
+                    "sequence_locked":bool(rec.get("sequence_locked")),
                     "source":"mfcase_send", "sent_at":datetime.now().isoformat(timespec="seconds")}
                 self._save_sent_history()
             self._audit_event("FILE_SENT",

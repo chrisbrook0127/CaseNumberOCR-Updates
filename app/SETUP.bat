@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title M.F. Case Number OCR - Setup V5.6.7
+title M.F. Case Number OCR - Setup V5.6.17
 set "PYTHON_EXE="
 set "APP_HOME=%~dp0"
-echo M.F. CASE NUMBER OCR V5.6.7 - INSTALL / REPAIR
+echo M.F. CASE NUMBER OCR V5.6.17 - INSTALL / REPAIR
 echo.
 if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
 if not defined PYTHON_EXE (
@@ -41,7 +41,7 @@ call "%~dp0CREATE_DESKTOP_SHORTCUT.bat"
 if errorlevel 1 echo WARNING: Shortcut creation failed. Try Create_Desktop_Shortcut.vbs directly.
 echo.
 echo Checking required OCR dependencies...
-"!PYTHON_EXE!" -c "import torch,torchvision,transformers,easyocr,pymupdf,numpy,PIL; print('OCR dependencies already installed')" >nul 2>nul
+"!PYTHON_EXE!" -c "import torch,torchvision,transformers,easyocr,pymupdf,numpy,PIL,cv2; print('OCR dependencies already installed')" >nul 2>nul
 if not errorlevel 1 goto installed
 echo Installing missing OCR libraries. This can take several minutes on first install.
 "!PYTHON_EXE!" -m ensurepip --upgrade
@@ -53,7 +53,7 @@ if errorlevel 1 goto failed
 "!PYTHON_EXE!" -m pip install "pymupdf<2.0" easyocr pillow numpy transformers sentencepiece
 if errorlevel 1 goto failed
 :installed
-"!PYTHON_EXE!" -c "import torch,torchvision,transformers,easyocr,pymupdf,numpy,PIL; print('Dependencies OK')"
+"!PYTHON_EXE!" -c "import torch,torchvision,transformers,easyocr,pymupdf,numpy,PIL,cv2; print('Dependencies OK')"
 if errorlevel 1 goto failed
 call "%~dp0CREATE_DESKTOP_SHORTCUT.bat"
 echo.

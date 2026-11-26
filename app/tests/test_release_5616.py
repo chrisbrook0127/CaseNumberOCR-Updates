@@ -90,6 +90,13 @@ class Release5616(unittest.TestCase):
         a._close_when_workers_idle();a.root.destroy.assert_not_called()
         a.export_busy=False;a.folder=Path('/tmp');a._save_state=Mock(return_value=True);a._save_user_settings=Mock()
         a._close_when_workers_idle();a._save_state.assert_called_once();a.root.destroy.assert_called_once()
+    @staticmethod
+    def glyph_fixture():
+        import cv2, numpy as np
+        image=np.full((500,500,3),255,dtype=np.uint8)
+        cv2.putText(image,'08-111',(308,58),cv2.FONT_HERSHEY_SIMPLEX,.65,(0,0,0),2)
+        return image
+
     def test_learning_saves_real_handwritten_crop_without_modifying_old_data(self):
         import numpy as np
         with tempfile.TemporaryDirectory() as d:
@@ -98,7 +105,7 @@ class Release5616(unittest.TestCase):
             for n in ('_persist_learning_data','_diag_event','_diag_sync_shared','_refresh_learning_stats','_refresh_learning_button_state','_save_state'):setattr(a,n,Mock())
             a._valid_ocr_box_candidates=Mock(return_value=[])
             r=dict(path=Path(d)/'Image1.pdf',candidate='08-111',score=60,training_type='printed',
-                   snippet=(None,np.full((500,500,3),255,dtype=np.uint8),None,(300,30,430,65)))
+                   snippet=(None,self.glyph_fixture(),None,(300,30,430,65)))
             self.assertTrue(a._save_learning_example(r,'08-111'))
             ex=a.learning_data['examples'][0];self.assertEqual(ex['training_type'],'handwritten')
             self.assertTrue((a.learning_dir/ex['image']).is_file());self.assertEqual(old.read_bytes(),b'old-example')

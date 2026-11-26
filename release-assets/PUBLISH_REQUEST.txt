@@ -1,1 +1,1 @@
-Publish tested MFCase v5.6.16: queue recovery, safe stop/resume, approval learning and context review.
+Publish v5.6.20: user-supplied 5.6.19 baseline, per-file sequence exclusion and individual SEND.

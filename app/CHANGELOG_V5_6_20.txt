@@ -1,0 +1,8 @@
+MFCase V5.6.20
+Baseline: user-supplied V5.6.19 full installer.
+
+Each scan-list row now has APPROVE, a red EXCLUDE checkbox, and SEND.
+EXCLUDE removes that PDF entirely from before/after and nearby-number reasoning: it cannot be changed by those rules or act as an anchor. Other eligible files are evaluated as if it were absent. Exclusion does not approve a file. It persists in saved queue state and sent history, and remains in effect after sending. Unchecking restores normal rules.
+Row SEND transfers only that already-approved PDF to COMPLETED and removes it from the list after a successful transfer. The main SEND FILES continues to send all eligible completed PDFs. Drafts, invalid case numbers, active scans and failed transfers retain the existing protections.
+
+187 regression tests passed, including 11 new tests for exclusion, persisted history, selected transfers and unchanged PDF bytes. OCR, confidence slider, printed/handwritten recognition and learning routines are unchanged from the supplied V5.6.19. No live Windows or network-share UI test was performed.

@@ -17,9 +17,17 @@ class Release5615(unittest.TestCase):
         r['i1']['score']=75;r['i2']['score']=0;r['i3']['score']=74.9
         self.assertEqual(self.a._apply_sequence_consensus_impl(),3)
         for iid in ('i1','i2','i3'):
-            self.assertEqual(r[iid]['confirmed'],'08-123');self.assertEqual(r[iid]['sequence_anchors'],['i0'])
+            self.assertEqual(r[iid]['candidate'],'08-123')
+            self.assertFalse(r[iid]['confirmed'])
+            self.assertFalse(r[iid]['manual_approved'])
+            self.assertFalse(r[iid]['auto_labeled'])
+            self.assertFalse(r[iid]['sequence_inferred'])
+            self.assertTrue(r[iid]['sequence_previous_prefill'])
+            self.assertEqual(r[iid]['sequence_anchors'],['i0'])
+            self.assertIn('REVIEW',r[iid]['status'])
             self.assertIsNone(self.a._sequence_case_number(r[iid]))
         self.assertEqual(r['i1']['score'],75)
+        self.a._move_to_completed.assert_not_called()
     def test_above_75_and_no_anchor_remain_review(self):
         r=self.setup_records([('','review'),('08-123','auto'),('08-456','review')]);r['i2']['score']=75.01
         self.assertEqual(self.a._apply_sequence_consensus_impl(),0)
@@ -33,12 +41,18 @@ class Release5615(unittest.TestCase):
         r=self.setup_records([('08-123','auto'),('08-999','review')]);r['i1']['score']=40
         self.a._apply_sequence_consensus_impl()
         r['i2']=dict(r['i0'],path=self.a.folder/'Image0002.pdf',original_name='Image0002.pdf')
-        self.a._apply_sequence_consensus_impl();self.assertEqual(r['i1']['sequence_anchors'],['i0','i2'])
+        self.a._apply_sequence_consensus_impl()
+        self.assertEqual(r['i1']['sequence_anchors'],['i0','i2'])
+        self.assertEqual(r['i1']['confirmed'],'08-123')
+        self.assertFalse(r['i1']['sequence_previous_prefill'])
     def test_new_conflicting_right_anchor_revokes_carry_forward(self):
         r=self.setup_records([('08-123','auto'),('08-999','review')]);r['i1']['score']=40
         self.a._apply_sequence_consensus_impl()
         r['i2']=dict(r['i0'],path=self.a.folder/'Image0002.pdf',original_name='Image0002.pdf',confirmed='08-456')
-        self.a._apply_sequence_consensus_impl();self.assertEqual(r['i1']['confirmed'],'');self.assertEqual(r['i1']['candidate'],'08-999')
+        self.a._apply_sequence_consensus_impl()
+        self.assertEqual(r['i1']['confirmed'],'')
+        self.assertEqual(r['i1']['candidate'],'08-999')
+        self.assertFalse(r['i1']['sequence_previous_prefill'])
     def test_speckled_crop_rejected_before_handwriting_model(self):
         image=np.full((40,160,3),240,dtype=np.uint8)
         for y in range(6,34,3):

@@ -1,0 +1,11 @@
+MFCASE V5.6.17 — USER INTERFACE REDESIGN AND PREVIOUS-CASE SAFETY
+
+- Four colored pie-style VCR controls in upper-left quarter; retained original callbacks and disabled states.
+- REFRESH, CLEAR, and SEND FILES grouped in the upper-right action panel.
+- Yellow three-line full-list toggle; start in filtered review mode, retain existing table behavior.
+- Selected file count, abbreviated root folder, current scan filename/index, progress bar and estimated/actual/remaining timer.
+- Pressed-button visuals, uppercase UI text, and GITHUB SETTINGS naming.
+- The USER GUIDE is updated and EXPORT WORK LOG saves directly into the selected root folder's COMPLETED subfolder.
+- Idle training indicator beside SETTINGS uses a small green animation.
+- IMPORTANT: A single previous 95%+ case only PREFILLS a low-confidence review entry. It cannot auto-complete, rename, or SEND the PDF. A human green check is required. The matching two-sided before/after rule remains unchanged.
+- UI changes and the narrowly scoped previous-case safety adjustment are based directly on the uploaded v5.6.16 source.

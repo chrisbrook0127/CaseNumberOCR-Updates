@@ -1,7 +1,6 @@
 # MFCase status
-Production: V5.6.16, based on published V5.6.15.
-Approved scope: send/clear UI recovery; STOP cancellation and safe close; last-folder restore; green approval learning; ten-neighbor outlier review; idle local learning.
-132 regression tests passed. Printed OCR and inference call limits unchanged.
-Matching before/after and manual corrections retain precedence; outliers are reviewed, never numerically guessed.
-Existing PDFs, examples, crops and checkpoints preserved.
-Limitations: cancellation completes the current inference/write safely. No live Windows/SMB or recognition-accuracy validation; real PDFs/models unavailable.
+Production update: V5.6.20. Baseline: user-supplied V5.6.19 full installer.
+Completed: red per-file sequence exclusion; individual approved-row SEND; persistent exclusion through send/history reload.
+All other rules and OCR/learning methods preserved from the supplied application.
+187 tests passed. Local transfer test preserved PDF bytes and left unrelated files untouched.
+Limitations: Windows/SMB UI timing not exercised here. Exclusion is per-file and does not change rules for other mixed-order files.
