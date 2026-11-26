@@ -1842,8 +1842,10 @@ class App:
             pending=self._pending_learning_examples()
             if not pending:
                 return False
-            # v5.6.18: never fine-tune while idle; UPDATE LEARNING is explicit.
-            return False
+            started=self._maybe_train_trocr(automatic=True)
+            if started:
+                self._auto_learning_started=True
+            return started
         except Exception as exc:
             self._log("Automatic learning skipped: %s",exc)
             return False
@@ -3494,34 +3496,36 @@ class App:
             (self.busy and iid in (getattr(self,"_active_scan_iid",None),
                                    getattr(self,"_worker_current_iid",None))))
 
-    def _schedule_post_scan_learning(self):
-        """Run pending local training after startup or approval and 90 seconds idle."""
+    def _schedule_post_scan_learning(self,after_send=False):
+        """Train after SEND or 90 seconds of idle time, not while scanning."""
         if getattr(self,"_stop_all_requested",False):return
         old=getattr(self,"_post_scan_learning_after",None)
         if old is not None:
             try:self.root.after_cancel(old)
             except tk.TclError:pass
         self._last_activity_time=time.monotonic()
-        # Location learning is still captured on approval. Model retraining is manual.
-        self._post_scan_learning_after=None
+        delay=3500 if after_send else 90000
+        self._post_scan_learning_after=self.root.after(delay,
+            lambda:self._run_post_scan_learning_if_idle(after_send=after_send))
 
-    def _run_post_scan_learning_if_idle(self):
+    def _run_post_scan_learning_if_idle(self,after_send=False):
         self._post_scan_learning_after=None
         if getattr(self,"_stop_all_requested",False):return
         if self.export_busy:
             # The transfer can outlast the first idle interval; retry after it finishes.
-            self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
+            self._post_scan_learning_after=self.root.after(30000,lambda:self._run_post_scan_learning_if_idle(after_send=after_send))
             return
         if (self.busy or self.paused or self.trocr_training
                 or self._loading_jobs or not self._startup_ready):
             self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
             return
         idle=time.monotonic()-getattr(self,"_last_activity_time",time.monotonic())
-        if idle < 90:
+        if idle < 90 and not after_send:
             self._post_scan_learning_after=self.root.after(int(max(1000,(90-idle)*1000)),
                 self._run_post_scan_learning_if_idle)
             return
-        self._audit_event("IDLE_LEARNING_CHECK_SKIPPED_MANUAL_ONLY")
+        self._audit_event("IDLE_LEARNING_CHECK",trigger="send" if after_send else "idle")
+        self._start_automatic_learning_if_ready()
 
     def _audit_event(self, action, **data):
         """Append-only text and trace records. Never rotate, truncate or delete."""
@@ -5161,7 +5165,6 @@ class App:
             pass
 
     def _maybe_train_trocr(self, automatic=False):
-        if automatic:return False  # Explicit UPDATE LEARNING only (v5.6.18).
         if automatic and getattr(self,"_stop_all_requested",False):return False
         if not automatic:self._stop_all_requested=False
         if self.trocr_training or self.busy or self.export_busy or not self.learning_dir:
@@ -7706,6 +7709,7 @@ class App:
                     self._refresh_scan_button()
                     self._export_reschedule = False
                     self._schedule_auto_export()
+                    self._schedule_post_scan_learning(after_send=True)
                 elif kind == "engine_status":
                     _, message = msg
                     self._loader_finish("ocr")
