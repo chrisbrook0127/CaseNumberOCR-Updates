@@ -1,0 +1,19 @@
+MFCASE V6.0.2 — CORRECT TWO-CASE ORDER TOLERANCE AND RESTORE BEFORE/AFTER PRECEDENCE
+Baseline: verified MFCase v6.0.1 full installer. Both OCR engines, trained handwriting
+model, data and number-only crop/learning logic are unchanged.
+
+1. Out-of-order warning requires a genuine reversal by MORE THAN TWO cases.
+   111,111,109,111 is allowed; 111,111,108,111 is suspicious.
+2. Do not flag a legitimate next case (08-603) just because an immediately
+   following OCR read is wrong (08-403). Instead identify the supported outlier.
+3. Matching independent before/after anchors can bridge an isolated wrong
+   high-confidence OCR reading, rather than accepting that mistake as a veto.
+   Original OCR is retained for review and audit.
+4. A valid, independently approved OCR reading within two cases of matching
+   anchors is not silently rewritten. Red boundaries, human decisions, previous-
+   only prefill, original order, five-row popup and SEND barriers remain.
+5. No change to printed OCR, handwriting OCR, learning, trained models, scan
+   regions, speed/path settings, or the 90–99% confidence threshold.
+
+Verification: 235 unit tests, focused before/after and red-lock cases, GUI start,
+SHA256 source verification, in-place update and private-file preservation.
