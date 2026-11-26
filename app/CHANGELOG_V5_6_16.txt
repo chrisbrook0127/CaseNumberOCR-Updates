@@ -1,0 +1,11 @@
+MFCase V5.6.16
+Based on published V5.6.15; printed OCR and call budgets unchanged.
+
+- STOP cancels scanning, idle learning and queued transfers; never starts a new scan. Current inference/write finishes safely before shutdown. Explicit SEND remains available afterward.
+- Queue polling survives a failed UI event. Sent rows and overlays are removed; CLEAR refreshes overlays and REFRESH remains available after workers finish.
+- Green approval saves the confirmed crop as a new handwritten example, including below-threshold reads. Failed crop saving is visible and retryable. Intentional blank edits cannot approve a stale candidate.
+- Last folder is saved locally and restored on opening, using existing saved queue progress. Opening does not automatically rescan or send.
+- Final scan review and pre-send review inspect up to ten original-order neighbors on either side. Independent 95%+ anchors supply median boundaries; automatic values outside those boundaries require review, not a guessed replacement. Manual corrections and matching before/after decisions retain priority. Sent anchors and hidden rows count; inferred rows cannot anchor.
+- Pending local training starts after 90 seconds idle at startup or after scanning/approval, with existing minimum-example and validation requirements. STOP suppresses automatic work until explicit scan/training or restart.
+
+Validation: 132 automated regression checks passed, including 19 new checks for context, cancellation, queue recovery, saved folder, approval and crop creation. Existing PDF/model/learning data are not migrated or overwritten. Windows UI, real network-drive timing and OCR accuracy were not measured here.

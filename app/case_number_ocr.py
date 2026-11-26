@@ -384,7 +384,7 @@ def _save_github_log_settings(settings, enabled, token=''):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("M.F. Case Number OCR — V5.6.15")
+        root.title("M.F. Case Number OCR — V5.6.16")
         root.geometry("1180x780")
         root.minsize(1000, 650)
         self.folder = None
@@ -416,6 +416,8 @@ class App:
         self._table_column_titles = {}
         # Never export before a running scan's sequence check has completed.
         self.export_busy = False
+        self._export_cancel_event=threading.Event()
+        self._stop_all_requested=False
         self._auto_export_after = None
         self._export_reschedule = False
         self._export_in_flight_iids = set()
@@ -468,7 +470,7 @@ class App:
         self._loader_angle = 0
         self._folder_load_generation = 0
         self._folder_load_timeout_id = None
-        self.app_version = "5.6.15"
+        self.app_version = "5.6.16"
         self._diag_file=None
         self._diag_run_id=None
         self._diag_current_file=None
@@ -507,6 +509,7 @@ class App:
         self._refresh_auto_eligibility_status()
         root.bind_all("<ButtonPress>", self._mark_user_activity, add="+")
         root.bind_all("<KeyPress>", self._mark_user_activity, add="+")
+        root.protocol("WM_DELETE_WINDOW",self._request_close)
         root.after(150, self._poll)
         # Production is local-only. Network access is possible only after an
         # explicit click on UPDATE or PREPARE OFFLINE MODELS.
@@ -1286,7 +1289,8 @@ class App:
             self._begin_offline_startup()
 
     def _start_automatic_learning_if_ready(self):
-        """Run only from the post-scan idle scheduler (not on application startup)."""
+        """Run pending local training only while idle."""
+        if getattr(self,"_stop_all_requested",False):return
         if not self._startup_ready:
             return False
         if self.busy or self.export_busy or self.trocr_training:
@@ -1788,7 +1792,8 @@ class App:
         if not bounds:
             return
         record=self.records[iid]
-        value=record.get("case_draft") if "case_draft" in record else (record.get("confirmed") or record.get("candidate") or "")
+        value=(record.get("case_draft","") if record.get("case_draft") or record.get("sequence_excluded")
+               else record.get("confirmed") or record.get("candidate") or "")
         pair=self._scan_case_widgets.get(iid)
         if pair is None:
             var=tk.StringVar(master=self.tree,value=value)
@@ -1840,10 +1845,12 @@ class App:
         record=self.records.get(iid)
         if not record or record.get("exported"):
             return
-        value=record.get("case_draft") if "case_draft" in record else (record.get("confirmed") or record.get("candidate") or "")
+        value=(record.get("case_draft","") if record.get("case_draft") or record.get("sequence_excluded")
+               else record.get("confirmed") or record.get("candidate") or "")
         value=normalize_case_number(value)
-        if ("case_draft" not in record and record.get("confirmed")==value
-                and record.get("manual_approved") and not record.get("sequence_conflict")):
+        if (not record.get("case_draft") and record.get("confirmed")==value
+                and record.get("manual_approved") and not record.get("auto_labeled")
+                and not record.get("learning_pending") and not record.get("sequence_conflict")):
             self.status.config(text=f"{record['path'].name} is already COMPLETED and ready to send.")
             self._insert_scan_row(iid,record)
             return  # Never duplicate learning or rename a previously approved file.
@@ -2349,6 +2356,7 @@ class App:
         self._refresh_scan_checkbox_heading()
         self._update_scan_file_count()
         self._refresh_scan_button()
+        self._schedule_scan_preview_refresh()
         self.status.config(text="Scan list cleared. No PDFs, approvals, or learning were deleted. Click REFRESH to restore it.")
 
 
@@ -2397,7 +2405,7 @@ class App:
         threading.Thread(target=self._folder_load_worker,
                          args=(self.folder,generation),daemon=True).start()
 
-    def choose_folder(self):
+    def choose_folder(self, folder=None):
         if getattr(self,"_scan_case_editor",None) is not None:
             self.status.config(text="Save the edited case with Enter or cancel with Esc first.")
             self._scan_case_editor.focus_set()
@@ -2410,10 +2418,13 @@ class App:
                 "Stop the current scan or send before changing folders.")
             return
         self._yield_background_learning("folder selection")
-        folder = filedialog.askdirectory(title="Select folder containing scanned PDFs")
+        folder = folder or filedialog.askdirectory(title="Select folder containing scanned PDFs",
+                            initialdir=getattr(self,"_last_folder",None) or None)
         if not folder:
             return
         self.folder = Path(folder)
+        self._last_folder=str(self.folder)
+        self._save_user_settings()
         self.folder_label.config(text=str(self.folder))
         self.log_path = self.folder / ".case_ocr_log.txt"
         # Folder I/O and shared learning access both run off the Tk thread.
@@ -2581,7 +2592,7 @@ class App:
         import base64,gzip,io,uuid
         # Legacy review/training hooks call this without a path. Only the
         # completed-scan hook is authorized to start an automatic upload.
-        if logfile is None:return
+        if logfile is None or getattr(self,"_stop_all_requested",False):return
         logfile=Path(logfile)
         def status(message):self.queue.put(('diagnostic_upload_status',message))
         try:
@@ -2618,6 +2629,7 @@ class App:
             name='scan-diagnostics/'+datetime.now().strftime('%Y-%m-%d')+'/'+uuid.uuid4().hex+'.jsonl.gz'
             url='https://api.github.com/repos/chrisbrook0127/CaseNumberOCR-Updates/contents/'+name
             body=json.dumps({'message':'Add sanitized MFCase scan diagnostics','content':base64.b64encode(data).decode(),'branch':'main'}).encode()
+            if getattr(self,"_stop_all_requested",False):return
             request=urllib.request.Request(url,data=body,method='PUT',headers={
                 'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json',
                 'Content-Type':'application/json','User-Agent':'MFCase-Diagnostics','X-GitHub-Api-Version':'2022-11-28'})
@@ -2892,6 +2904,7 @@ class App:
         self._user_settings_file=Path(os.getenv("LOCALAPPDATA") or str(Path.home())) / "MFCase" / "user_settings.json"
         try:
             cfg=json.loads(self._user_settings_file.read_text(encoding="utf-8"))
+            self._last_folder=str(cfg.get("last_folder") or "")
             self.auto_send_var.set(cfg.get("auto_send_completed") is True)
             self.show_all_files_var.set(cfg.get("full_list",True) is not False)
         except (OSError,ValueError,TypeError):
@@ -2905,7 +2918,8 @@ class App:
             tmp=path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps({"version":1,
                       "auto_send_completed":bool(self.auto_send_var.get()),
-                      "full_list":bool(self.show_all_files_var.get())},indent=2),encoding="utf-8")
+                      "full_list":bool(self.show_all_files_var.get()),
+                      "last_folder":str(self.folder or getattr(self,"_last_folder",""))},indent=2),encoding="utf-8")
             os.replace(tmp,path)
             self._audit_event("AUTO_SEND_SETTING",enabled=bool(self.auto_send_var.get()))
         except OSError as exc:
@@ -2927,7 +2941,8 @@ class App:
                                    getattr(self,"_worker_current_iid",None))))
 
     def _schedule_post_scan_learning(self):
-        """Training is allowed only after a completed scan and 90 seconds idle."""
+        """Run pending local training after startup or approval and 90 seconds idle."""
+        if getattr(self,"_stop_all_requested",False):return
         old=getattr(self,"_post_scan_learning_after",None)
         if old is not None:
             try:self.root.after_cancel(old)
@@ -2937,12 +2952,14 @@ class App:
 
     def _run_post_scan_learning_if_idle(self):
         self._post_scan_learning_after=None
+        if getattr(self,"_stop_all_requested",False):return
         if self.export_busy:
             # The transfer can outlast the first idle interval; retry after it finishes.
             self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
             return
         if (self.busy or self.paused or self.trocr_training
                 or self._loading_jobs or not self._startup_ready):
+            self._post_scan_learning_after=self.root.after(30000,self._run_post_scan_learning_if_idle)
             return
         idle=time.monotonic()-getattr(self,"_last_activity_time",time.monotonic())
         if idle < 90:
@@ -3637,6 +3654,7 @@ class App:
         self._refresh_learning_stats()
         self._refresh_learning_button_state()
         self._save_state()
+        return bool(image_rel)
         # Deliberately do not start training here. Training is deferred until the
         # user finishes the current import/review batch from the main window.
 
@@ -3942,6 +3960,44 @@ class App:
                          ms=round(self._perf_stages.get("before_after",(0,0))[0],2))
         return result
 
+    def _flag_context_outliers(self, order, protected_positions=()):
+        """Review automatic outliers using at most ten original neighbors per side.
+
+        Medians prevent one erroneous neighboring OCR result from becoming the
+        boundary for an entire run. This is a review gate, never digit correction.
+        Matching before/after decisions and explicit human approvals take priority.
+        """
+        from statistics import median
+        strong=[]
+        for _,r in order:
+            case=self._sequence_case_number(r)
+            strong.append(int(case.split("-")[1]) if case and
+                          float(r.get("score") or 0)>=95 else None)
+        flagged=[]
+        for pos,(iid,r) in enumerate(order):
+            if (iid not in self.records or r.get("exported") or
+                    not r.get("auto_labeled") or r.get("sequence_inferred") or
+                    pos in protected_positions or strong[pos] is None):
+                continue
+            left=[v for v in strong[max(0,pos-10):pos] if v is not None]
+            right=[v for v in strong[pos+1:pos+11] if v is not None]
+            if not left or not right:
+                continue
+            low,high=sorted((median(left),median(right)))
+            if not low<=strong[pos]<=high:
+                flagged.append((iid,r,low,high))
+        for iid,r,low,high in flagged:
+            r.update(confirmed="",manual_approved=False,auto_labeled=False,
+                     sequence_conflict=True,
+                     status=f"REVIEW: OCR outside nearby confirmed range 08-{low:g} to 08-{high:g}; verify case")
+            if self.completed_tree.exists(iid):self.completed_tree.delete(iid)
+            r["completed_iid"]=None
+            self._insert_scan_row(iid,r)
+            self._diag_event("sequence_context_review",file=str(r["path"]),
+                             candidate=r.get("candidate"),score=r.get("score"),
+                             neighbors_each_side=10)
+        return len(flagged)
+
     def _apply_sequence_consensus_impl(self, affected_range=None):
         """Apply and save current anchors during scans, on stop, and at completion."""
         if not self.folder or self.export_busy:
@@ -3951,7 +4007,10 @@ class App:
             return 0
         allowed=range(*affected_range) if affected_range is not None else None
         plan,conflicted=self._sequence_consensus_plan(order,positions=allowed)
-        changed=0
+        # Wait for the full scan: future pages must be available before this gate.
+        changed=self._flag_context_outliers(order,plan) if not self.busy else 0
+        if changed:
+            plan,conflicted=self._sequence_consensus_plan(order,positions=allowed)
         for pos,(iid,r) in enumerate(order):
             if affected_range is not None and pos not in allowed:
                 continue
@@ -4229,7 +4288,8 @@ class App:
         self._refresh_scan_button()
         self.status.config(text="OCR READY — updates are checked at startup; "
                                 "background learning uses local confirmed examples.")
-        # No learning task at startup; only explicit UPDATE LEARNING or post-scan idle.
+        self.root.after_idle(self._restore_last_folder)
+        self._schedule_post_scan_learning()
 
     def _fail_startup(self, reason):
         self._startup_ready = False
@@ -4462,6 +4522,8 @@ class App:
             pass
 
     def _maybe_train_trocr(self, automatic=False):
+        if automatic and getattr(self,"_stop_all_requested",False):return False
+        if not automatic:self._stop_all_requested=False
         if self.trocr_training or self.busy or self.export_busy or not self.learning_dir:
             return False
         usable = [
@@ -4813,6 +4875,7 @@ class App:
 
     def scan(self, only_iids=None):
         """Start from current selection and report every blocked/failed request."""
+        self._stop_all_requested=False
         was_busy=self.busy
         try:
             return self._start_scan(only_iids)
@@ -4834,6 +4897,7 @@ class App:
 
     def _resume_scan_after_training(self, only_iids=None):
         self._scan_waiting_for_training=False
+        if getattr(self,"_stop_all_requested",False):return
         return self._start_scan(only_iids)
 
     def _start_scan(self, only_iids=None):
@@ -4886,7 +4950,7 @@ class App:
                 self._rescan_force_iids.clear()
             # RESCAN ALL is an explicit separate action; ordinary SCAN never resets approvals.
             self._scan_blocked("No unscanned PDFs selected. Select rows or press Ctrl+A. Approved files are protected; use UNVERIFY before rescanning them.")
-            self.restart_btn.config(text="RESTART", state="normal")
+            self.restart_btn.config(text="STOP", state="normal")
             self._refresh_scan_button()
             return
         if self._post_scan_learning_after is not None:
@@ -4973,6 +5037,8 @@ class App:
                         continue
                     self._diag_current_file=source_path.name
                     result = self._ocr_pdf(source_path)
+                    if self.stop_event.is_set():
+                        stopped=True;processed=idx-1;break
                     candidate, snippet, note, handwritten, score, engines, agreement = result
                     self.queue.put((
                         "row", iid, candidate, snippet, note, handwritten,
@@ -5010,16 +5076,38 @@ class App:
             self.pause_btn.config(text="RESUME")
             self.status.config(text="Scan paused.")
 
+    def _restore_last_folder(self):
+        folder=getattr(self,"_last_folder","")
+        if folder and not self.folder:
+            self.choose_folder(folder)
+
     def stop_or_restart_scan(self):
-        if self.busy:
-            self.stop_event.set()
-            self.pause_event.set()
-            self.paused = False
-            self.pause_btn.config(state="disabled", text="PAUSE")
-            self.restart_btn.config(text="STOPPING...", state="disabled")
-            self.status.config(text="Stopping after the current file...")
-            return
-        self.scan()
+        """STOP is cancellation only; it never launches a new scan."""
+        self._stop_all_requested=True
+        self.stop_event.set();self.pause_event.set();self.paused=False
+        self.learning_stop_event.set();self.learning_pause_event.set()
+        self._export_cancel_event.set()
+        self._scan_waiting_for_training=False
+        job=getattr(self,"_post_scan_learning_after",None)
+        if job is not None:
+            self.root.after_cancel(job);self._post_scan_learning_after=None
+        self.pause_btn.config(state="disabled",text="PAUSE")
+        self.restart_btn.config(text="STOP",state="normal")
+        self._save_state()
+        self.status.config(text="STOP requested. No new background work will start. Finishing any active read/write safely; SEND FILES remains available afterward.")
+        self._refresh_scan_button()
+
+    def _request_close(self):
+        self.stop_or_restart_scan()
+        self._close_when_workers_idle()
+
+    def _close_when_workers_idle(self):
+        if self.busy or self.export_busy or self.trocr_training:
+            self.root.after(150,self._close_when_workers_idle);return
+        if self.folder and not self._save_state():
+            self.status.config(text="Could not save progress. Check folder access before closing.");return
+        self._save_user_settings()
+        self.root.destroy()
 
     def restart_scan(self):
         if self.busy or self._training_blocks_work():
@@ -6876,15 +6964,17 @@ class App:
                     _, iid, source_name, destination, error = msg
                     self._apply_export_result(iid, source_name, destination, error)
                 elif kind == "export_done":
-                    if not self.busy:
-                        self._scan_progress_update(len(self.scan_items),"SENDING FINISHED")
                     self.export_busy = False
                     self._export_in_flight_iids.clear()
+                    if not self.busy:
+                        self._scan_progress_update(len(self.scan_items),"SENDING FINISHED")
+                    self._rebuild_scan_list()
                     # A send changes the set of independent anchors. Reapply
                     # the rule immediately to remaining unreviewed root PDFs.
                     self._last_sequence_signature=None
                     try:
-                        self._apply_sequence_consensus()
+                        if not getattr(self,"_stop_all_requested",False):
+                            self._apply_sequence_consensus()
                     except Exception as exc:
                         self._log("Could not recheck remaining review files after SEND: %s",exc)
                         self.status.config(text="SEND finished, but before/after recheck failed; review remaining PDFs.")
@@ -6955,7 +7045,7 @@ class App:
                     self.busy = False
                     self._refresh_scan_button()
                     self.pause_btn.config(state="disabled", text="PAUSE")
-                    self.restart_btn.config(state="normal", text="RESTART")
+                    self.restart_btn.config(state="normal", text="STOP")
                     self._refresh_review_controls()
                     self._refresh_learning_button_state()
                     self._update_completed_count()
@@ -7023,7 +7113,7 @@ class App:
                     self.pause_event.set()
                     self._refresh_scan_button()
                     self.pause_btn.config(state="disabled", text="PAUSE")
-                    self.restart_btn.config(state="normal", text="RESTART")
+                    self.restart_btn.config(state="normal", text="STOP")
                     self._sequence_review_pending=False
                     try:
                         self._apply_sequence_consensus()
@@ -7074,8 +7164,11 @@ class App:
                     self._schedule_auto_export()
         except queue.Empty:
             pass
+        except Exception:
+            logging.exception("UI queue event failed; continuing to process worker completion")
+        finally:
+            self.root.after(150, self._poll)
         self._update_scan_file_count()
-        self.root.after(150, self._poll)
 
     def _review_ready_ids(self):
         ready = []
@@ -7230,7 +7323,8 @@ class App:
 
         record.pop("case_draft",None)
         old_case = str(record.get("confirmed", ""))
-        if value == old_case and record.get("manual_approved") and not record.get("auto_labeled"):
+        if (value == old_case and record.get("manual_approved") and not record.get("auto_labeled")
+                and not record.get("learning_pending")):
             record.pop("case_draft", None)
             record["sequence_excluded"] = False
             record["sequence_conflict"] = False
@@ -7262,8 +7356,8 @@ class App:
         try:
             if record.get("snippet") is None:
                 self._ensure_preview(record)
-            self._save_learning_example(record,value)  # Append a new example; do not relabel historical examples.
-            record["learning_pending"]=False
+            crop_saved=self._save_learning_example(record,value)  # Append only.
+            record["learning_pending"]=crop_saved is False
         except Exception as exc:
             record["learning_pending"]=True
             self._log("Corrected case retained; learning update pending: %s",exc)
@@ -7280,6 +7374,10 @@ class App:
             return False
         message = (f"Case number saved as {value} for {record['path'].name}. "
                    "It remains in root until SEND FILES.")
+        if record.get("learning_pending"):
+            message += " Learning crop not saved; draw a usable case box and approve again."
+        elif not getattr(self,"_stop_all_requested",False):
+            self._schedule_post_scan_learning()
         self.status.config(text=message)
         self.completed_send_status.config(text=message)
         self._recheck_after_decision()
@@ -8736,6 +8834,8 @@ class App:
                 self.status.config(text="Correct or cancel the unfinished case edit before exporting.")
                 self._scan_case_editor.focus_set()
                 return
+        if automatic and getattr(self,"_stop_all_requested",False):
+            return
         if automatic and not bool(self.auto_send_var.get()):
             return
         if automatic and not self._startup_ready:
@@ -8790,6 +8890,7 @@ class App:
                 self.records[iid]["export_error"] = ""
         if automatic:
             self._audit_event("AUTO_SEND_STARTED",approved_count=len(approved))
+        self._export_cancel_event.clear()
         self.export_busy = True
         self._export_in_flight_iids = {iid for iid, _, _ in approved}
         self._update_completed_count()
@@ -8807,6 +8908,7 @@ class App:
             destination_folder.mkdir(parents=True, exist_ok=True)
             reserved = {p.name.casefold() for p in destination_folder.iterdir() if p.is_file()}
             for iid, source, case in approved:
+                if self._export_cancel_event.is_set():break
                 case = _mfcase_export_case_name(case)
                 original = getattr(self,"records",{}).get(iid,{}).get("original_name") or source.name
                 base = f"{Path(original).stem}_{case}"
@@ -8937,8 +9039,8 @@ class App:
                 button.destroy()
             rec["completed_iid"] = None
             rec["scan_selected"] = False
-            self.tree.selection_remove(iid)
-            self._insert_scan_row(iid,rec)
+            if self.tree.exists(iid):self.tree.delete(iid)
+            self._schedule_scan_preview_refresh()
             message = f"Sent to COMPLETED: {target.name} (from {source_name})"
             self.status.config(text=message)
             self.completed_send_status.config(text=message)

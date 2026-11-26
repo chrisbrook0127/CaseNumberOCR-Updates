@@ -1,1 +1,1 @@
-Publish tested MFCase v5.6.15 carry-forward, ink validation and saved GitHub credentials.
+Publish tested MFCase v5.6.16: queue recovery, safe stop/resume, approval learning and context review.
