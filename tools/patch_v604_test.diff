@@ -1,0 +1,736 @@
+diff --git a/SETUP.bat b/SETUP.bat
+index 0453949..7dbe820 100644
+--- a/SETUP.bat
++++ b/SETUP.bat
+@@ -1,10 +1,11 @@
+ @echo off
+ setlocal EnableExtensions EnableDelayedExpansion
+ cd /d "%~dp0"
+-title M.F. Case Number OCR - Setup V6.0.1
++if /I "%~1"=="/GPU" goto gpu_setup
++title M.F. Case Number OCR - Setup V6.0.4 TEST
+ set "PYTHON_EXE="
+ set "APP_HOME=%~dp0"
+-echo M.F. CASE NUMBER OCR V6.0.1 - INSTALL / REPAIR
++echo M.F. CASE NUMBER OCR V6.0.4 TEST - INSTALL / REPAIR
+ echo.
+ if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+ if not defined PYTHON_EXE (
+@@ -67,3 +68,58 @@ echo Previously saved case files, settings and training remain untouched.
+ echo If a shortcut exists, do not use it until dependencies are installed.
+ pause
+ exit /b 1
++
++:gpu_setup
++set "PYTHON_EXE="
++echo.
++echo MFCASE OPTIONAL NVIDIA GPU SETUP - USER ACTION ONLY
++echo This downloads public CUDA-enabled PyTorch from official pytorch.org.
++echo No PDFs, case numbers, training examples, or local logs are transmitted.
++echo CLOSE MFCASE before installing PyTorch; otherwise the program may fail.
++echo.
++if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
++if not defined PYTHON_EXE (
++  for /f "delims=" %%P in ('py -3.11 -c "import sys;print(sys.executable)" 2^>nul') do set "PYTHON_EXE=%%P"
++)
++if not defined PYTHON_EXE goto gpu_missing_python
++if not exist "!PYTHON_EXE!" goto gpu_missing_python
++"!PYTHON_EXE!" -c "import sys;assert sys.version_info[:2]==(3,11)"
++if errorlevel 1 goto gpu_missing_python
++where nvidia-smi >nul 2>nul
++if errorlevel 1 goto gpu_no_nvidia
++echo Detected NVIDIA driver tools:
++nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
++if errorlevel 1 goto gpu_no_nvidia
++echo.
++echo If the NVIDIA driver is incompatible, PyTorch will report CUDA unavailable.
++echo No change to TrOCR model, learning data, crop geometry, or OCR thresholds.
++choice /C YN /M "MFCase is closed. Download and install NVIDIA CUDA PyTorch now"
++if errorlevel 2 goto gpu_cancel
++"!PYTHON_EXE!" -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu126
++if errorlevel 1 goto gpu_failed
++"!PYTHON_EXE!" -c "import torch;print('PyTorch',torch.__version__,'CUDA build',torch.version.cuda,'CUDA available',torch.cuda.is_available());assert torch.cuda.is_available()"
++if errorlevel 1 goto gpu_unavailable
++echo SUCCESS - CUDA READY. Restart MFCase to use GPU inference.
++pause
++exit /b 0
++:gpu_missing_python
++echo Python 3.11 installation missing. First run SETUP.bat normally.
++pause
++exit /b 1
++:gpu_no_nvidia
++echo NVIDIA GPU/driver was not detected. CPU mode is unchanged.
++pause
++exit /b 1
++:gpu_cancel
++echo GPU setup canceled. Existing CPU/GPU environment is unchanged.
++exit /b 0
++:gpu_unavailable
++echo CUDA was installed but is not currently usable. MFCase can fall back to CPU.
++echo Check the NVIDIA driver and supported GPU before retrying. No PDF was uploaded.
++pause
++exit /b 1
++:gpu_failed
++echo GPU wheel installation failed. Existing case and learning files remain untouched.
++echo Run SETUP.bat normally if the Python environment requires repair.
++pause
++exit /b 1
+diff --git a/case_number_ocr.py b/case_number_ocr.py
+index 7cb2852..d8854ab 100644
+--- a/case_number_ocr.py
++++ b/case_number_ocr.py
+@@ -794,7 +794,7 @@ class _MFTrackedRows(dict):
+ class App:
+     def __init__(self, root):
+         self.root = root
+-        root.title("M.F. CASE NUMBER OCR — V6.0.2")
++        root.title("M.F. CASE NUMBER OCR — V6.0.4 TEST")
+         root.geometry("1180x780")
+         root.minsize(1040, 720)
+         self.folder = None
+@@ -845,6 +845,11 @@ class App:
+         self.trocr_training = False
+         self.torch_device = "cpu"
+         self.trocr_error = ""
++        # Benchmarking is opt-in; production EasyOCR remains batch_size=1.
++        self._easyocr_gpu_batch_test_requested = False
++        self._easyocr_gpu_batch_test_samples = 0
++        self._easyocr_gpu_batch_test_results = []
++        self._easyocr_phases_instrumented = False
+         self.training_popup = None
+         self.training_progressbar = None
+         self.training_percent_label = None
+@@ -884,7 +889,7 @@ class App:
+         self._loader_angle = 0
+         self._folder_load_generation = 0
+         self._folder_load_timeout_id = None
+-        self.app_version = "6.0.3"
++        self.app_version = "6.0.4"
+         self._diag_file=None
+         self._diag_run_id=None
+         self._diag_current_file=None
+@@ -1790,7 +1795,7 @@ class App:
+         win.title(f"MFCASE SETTINGS — V{self.app_version}")
+         win.transient(self.root)
+         win.resizable(False,False)
+-        win.geometry("480x550")
++        win.geometry("480x610")
+         panel=ttk.Frame(win,padding=20)
+         panel.pack(fill="both",expand=True)
+         ttk.Label(panel,text=f"SETTINGS  •  V{self.app_version}",
+@@ -1800,7 +1805,9 @@ class App:
+             ("EXPORT WORK LOG",self._diag_export),
+             ("GITHUB SETTINGS",self._configure_github_logs),
+             ("UPDATE",lambda: self.check_for_updates(automatic=False)),
+-            ("UPDATE LEARNING",self._finish_import_batch)):
++            ("UPDATE LEARNING",self._finish_import_batch),
++            ("GPU SETUP (OPTIONAL)",self._offer_gpu_setup),
++            ("TEST GPU OCR BATCHING",self._request_easyocr_batch_test)):
+             self._action_button(panel,'settings:'+label,label,func).pack(fill='x',pady=5)
+         ttk.Separator(panel).pack(fill='x',pady=(10,7))
+         current=self._get_auto_threshold()
+@@ -1822,6 +1829,51 @@ class App:
+             "CONFIGURED SANITIZED DIAGNOSTICS MAY UPLOAD AFTER SCANS.",
+             wraplength=425,justify="left").pack(anchor="w",pady=(4,0))
+ 
++    def _offer_gpu_setup(self):
++        """User-approved public PyTorch download only; never sends local data."""
++        if self.busy or self.export_busy or self.trocr_training:
++            messagebox.showinfo('GPU SETUP','Stop scanning or training before GPU setup.')
++            return
++        if os.name!='nt':
++            messagebox.showinfo('GPU SETUP','GPU setup is supported in Windows SETUP.bat /GPU.')
++            return
++        if not messagebox.askyesno('OPTIONAL GPU SETUP',
++            'Only for a compatible NVIDIA GPU. This explicitly downloads GPU-enabled '
++            'PyTorch from the official PyTorch repository. No PDF or learning data '
++            'is uploaded. CPU operation stays available if no GPU is detected. '
++            'Close MFCase before the installation runs. Continue?'):
++            return
++        script=self.app_dir/'SETUP.bat'
++        if not script.is_file():
++            messagebox.showerror('GPU SETUP','SETUP.bat is missing.')
++            return
++        try:
++            subprocess.Popen(['cmd.exe','/c',str(script),'/GPU'],
++                cwd=str(self.app_dir),creationflags=getattr(subprocess,'CREATE_NEW_CONSOLE',0))
++            messagebox.showinfo('GPU SETUP','Setup started in a separate console. Close this '
++                'application before approving GPU package installation, then restart MFCase.')
++        except Exception as exc:
++            messagebox.showerror('GPU SETUP',f'Could not start GPU setup: {exc}')
++
++    def _request_easyocr_batch_test(self):
++        """Compare exact outputs on two upcoming scanned PDFs; no activation."""
++        if self.busy or self.trocr_training or self.export_busy:
++            messagebox.showinfo('GPU BATCH TEST','Run this test before starting SCAN.')
++            return
++        reader=getattr(self,'reader',None)
++        if reader is None or not str(getattr(reader,'device','cpu')).lower().startswith('cuda'):
++            messagebox.showinfo('GPU BATCH TEST',
++                'EasyOCR is using CPU. GPU batching cannot be tested until CUDA is ready.')
++            return
++        self._easyocr_gpu_batch_test_samples=0
++        self._easyocr_gpu_batch_test_results=[]
++        self._easyocr_gpu_batch_test_requested=True
++        messagebox.showinfo('GPU BATCH TEST',
++            'Ready. Start a normal scan. The first two EasyOCR images will be compared '
++            'with batches 1, 2, 4, and 8. The program always uses and keeps the '
++            'original batch-1 output; no OCR readings, approvals or models change. '
++            'Results will be recorded in the local work log.')
++
+     def _network_online_passive(self):
+         """Passive OS check, never a network probe or claim of zero data leakage."""
+         if os.name=="nt":
+@@ -2745,23 +2797,64 @@ class App:
+         return 'more than two case numbers outside the supported original-file sequence'
+ 
+ 
+-    def _confirm_out_of_order_change(self, iid, value):
+-        """Only an explicit YES locks a suspicious human-verified value."""
++    def _confirm_out_of_order_change(self, iid, value, resume=None):
++        """Warn only on true anomalies; never block an active scan's UI poll.
++
++        During scanning the warning is a non-modal Toplevel. This matters
++        because the scanner uses a bounded result queue: a modal dialog could
++        prevent the UI from draining it, eventually stalling the OCR worker.
++        An accepted warning locks the exact value before resuming approval.
++        """
+         record=self.records.get(iid)
+         if not record or record.get('sequence_locked'):return True
+         reason=self._manual_order_problem(iid,value)
+         if not reason:return True
+-        accepted=messagebox.askyesno('OUT-OF-ORDER CASE NUMBER',
+-            f'{value} appears out of order: {reason}.\n\n'
++        question=(f'{value} appears out of order: {reason}.\n\n'
+             'YES: accept this exact number and set the RED SEQUENCE LOCK. '
+             'Neither before/after nor RESCAN will change it or cross its position.\n\n'
+-            'NO: return to editing without approving the new number.',parent=self.root)
+-        if accepted:
+-            record['sequence_locked']=True
+-            record['order_review_ack']=_case_identity(value) or ''
++            'NO: return to editing without approving the new number.')
++        def accept():
++            latest=self.records.get(iid)
++            if not latest or latest.get('exported'):return
++            latest['sequence_locked']=True
++            latest['order_review_ack']=_case_identity(value) or ''
+             self._audit_event('ORDER_OVERRIDE_LOCKED',
+-                original_name=record.get('original_name') or Path(record['path']).name,
++                original_name=latest.get('original_name') or Path(latest['path']).name,
+                 confirmed=value,reason=reason)
++        if getattr(self,'busy',False) is True and isinstance(getattr(self,'root',None),tk.Misc):
++            # Do not grab focus or enter a modal wait. Scan progress continues
++            # every 150 ms while this review window is visible.
++            dialogs=getattr(self,'_active_order_confirmations',None)
++            if dialogs is None:
++                dialogs={};self._active_order_confirmations=dialogs
++            existing=dialogs.get(iid)
++            if existing is not None and existing.winfo_exists():
++                existing.lift()
++                return False
++            win=tk.Toplevel(self.root)
++            dialogs[iid]=win
++            win.title('OUT-OF-ORDER CASE NUMBER — SCANNING CONTINUES')
++            win.geometry('560x250')
++            win.minsize(460,230)
++            ttk.Label(win,text=question,wraplength=510,justify='left',
++                      font=('Segoe UI',11)).pack(fill='both',expand=True,padx=20,pady=15)
++            buttons=ttk.Frame(win);buttons.pack(fill='x',padx=15,pady=10)
++            def close():
++                dialogs.pop(iid,None)
++                if win.winfo_exists():win.destroy()
++            def yes():
++                close()
++                accept()
++                if callable(resume):
++                    self.root.after_idle(resume)
++                else:
++                    self.status.config(text='CASE LOCKED — CLICK GREEN TO COMPLETE APPROVAL.')
++            ttk.Button(buttons,text='NO — RETURN TO EDITING',command=close).pack(side='left')
++            ttk.Button(buttons,text='YES — APPROVE & LOCK',command=yes).pack(side='right')
++            win.protocol('WM_DELETE_WINDOW',close)
++            return False
++        accepted=messagebox.askyesno('OUT-OF-ORDER CASE NUMBER',question,parent=self.root)
++        if accepted:accept()
+         return bool(accepted)
+ 
+     def _order_review_context(self, iid):
+@@ -2770,7 +2863,9 @@ class App:
+         return order[max(0,index-2):index+3] if index is not None else []
+ 
+     def _check_order_review(self):
+-        """Pause sequence changes/sending until genuine backward steps are inspected."""
++        """Hold unsafe sending, never STOP or PAUSE the PDF scan worker."""
++        # Order review after an active scan is authoritative. Manual review
++        # dialogs opened *during* scanning remain modeless so OCR continues.
+         if self.busy:return False
+         findings=self._order_review_findings()
+         self._order_review_ids=findings
+@@ -2795,7 +2890,8 @@ class App:
+         win=getattr(self,"_order_popup",None)
+         if win is None or not win.winfo_exists():
+             win=tk.Toplevel(self.root);self._order_popup=win
+-            win.title("CASE ORDER REVIEW — SENDING PAUSED")
++            # This separate Toplevel does not pause the scan worker.
++            win.title("CASE ORDER REVIEW — SENDING PAUSED; SCANNING CONTINUES")
+             win.geometry("1120x580");win.minsize(900,460)
+             win.protocol("WM_DELETE_WINDOW",self._hide_order_popup)
+             self._order_popup_body=ttk.Frame(win,padding=10)
+@@ -2919,6 +3015,10 @@ class App:
+         if not self._save_state():
+             r["excluded_send_requested"]=False
+             self.status.config(text="APPROVAL COULD NOT BE SAVED — SEND BLOCKED.");return
++        if getattr(self,'busy',False):
++            # Manual approval is recorded, but batch before/after and SEND
++            # remain deferred until the scan completes. Do not block OCR.
++            return
+         if getattr(self,"_order_review_pending",False):
+             try:
+                 self._order_review_pending=False
+@@ -2974,7 +3074,7 @@ class App:
+             return
+         class Value:
+             def get(self): return value
+-        if self._save_completed_case_edit(iid,Value()):
++        if self._save_completed_case_edit(iid,Value(),resume_callback=lambda:self._quick_approve(iid)):
+             self._audit_event("CHECK_APPROVED",original_name=record.get("original_name") or record["path"].name,
+                               confirmed=value)
+             record.pop("case_draft",None)
+@@ -5579,6 +5679,8 @@ class App:
+                                         download_enabled=False)
+                 gpu = False
+             self.reader = reader
++            self._install_easyocr_instrumentation(reader)
++            self._report_ocr_accelerator(reader)
+             self.queue.put(("model_status", f"EasyOCR ready ({'GPU' if gpu else 'CPU'}); loading handwriting model…"))
+             self._load_trocr()
+             if self.trocr_model is None or self.trocr_processor is None:
+@@ -5699,25 +5801,28 @@ class App:
+             from PIL import Image
+             import torch
+             self._load_trocr()
+-            pil = Image.fromarray(image).convert("RGB") if isinstance(image, np.ndarray) else image.convert("RGB")
+-            pixels = self.trocr_processor(images=pil, return_tensors="pt").pixel_values.to(self.torch_device)
+-            with torch.inference_mode():
+-                output = self.trocr_model.generate(
+-                    pixels, max_new_tokens=24, num_beams=2,
+-                    early_stopping=True, return_dict_in_generate=True, output_scores=True)
+-            text = self.trocr_processor.batch_decode(
+-                output.sequences, skip_special_tokens=True)[0].strip()
+-            transitions = self.trocr_model.compute_transition_scores(
+-                output.sequences, output.scores,
+-                beam_indices=getattr(output, "beam_indices", None),
+-                normalize_logits=True)
+-            tokens = output.sequences[:, -transitions.shape[1]:]
+-            special = self.trocr_processor.tokenizer.all_special_ids
+-            valid = torch.ones_like(tokens, dtype=torch.bool)
+-            for token_id in special:
+-                valid &= tokens != token_id
+-            scores = transitions[valid]
+-            confidence = float(scores.mean().exp().item() * 100.0) if scores.numel() else 0.0
++            with self._perf_measure("trocr_preprocess"):
++                pil = Image.fromarray(image).convert("RGB") if isinstance(image, np.ndarray) else image.convert("RGB")
++                pixels = self.trocr_processor(images=pil, return_tensors="pt").pixel_values.to(self.torch_device)
++            with self._perf_measure("trocr_generate"):
++                with torch.inference_mode():
++                    output = self.trocr_model.generate(
++                        pixels, max_new_tokens=24, num_beams=2,
++                        early_stopping=True, return_dict_in_generate=True, output_scores=True)
++            with self._perf_measure("trocr_decode_confidence"):
++                text = self.trocr_processor.batch_decode(
++                    output.sequences, skip_special_tokens=True)[0].strip()
++                transitions = self.trocr_model.compute_transition_scores(
++                    output.sequences, output.scores,
++                    beam_indices=getattr(output, "beam_indices", None),
++                    normalize_logits=True)
++                tokens = output.sequences[:, -transitions.shape[1]:]
++                special = self.trocr_processor.tokenizer.all_special_ids
++                valid = torch.ones_like(tokens, dtype=torch.bool)
++                for token_id in special:
++                    valid &= tokens != token_id
++                scores = transitions[valid]
++                confidence = float(scores.mean().exp().item() * 100.0) if scores.numel() else 0.0
+             return text, confidence
+         except Exception as exc:
+             if not self.trocr_error:
+@@ -5934,6 +6039,7 @@ class App:
+ 
+     def _train_trocr_worker(self, learning_dir, examples, new_ids):
+         candidate_dir = None
++        prior_torch_threads = None
+ 
+         def report(percent, stage):
+             # Worker thread communicates with Tk only through the thread-safe queue.
+@@ -5950,9 +6056,13 @@ class App:
+                 # Auto-training runs in the worker thread with restrained CPU
+                 # parallelism; avoid saturating a patrol workstation at startup.
+                 try:
+-                    torch.set_num_threads(min(2, max(1, (os.cpu_count() or 2) // 4)))
+-                except RuntimeError:
+-                    pass
++                    prior_torch_threads = torch.get_num_threads()
++                    requested_threads = min(2, max(1, (os.cpu_count() or 2) // 4))
++                    torch.set_num_threads(requested_threads)
++                    self._log("Background learning torch CPU threads: %s -> %s (will restore)",
++                              prior_torch_threads, requested_threads)
++                except RuntimeError as exc:
++                    self._log("Unable to adjust learning CPU threads: %s", exc)
+                 if os.name == "nt":
+                     try:
+                         import ctypes
+@@ -6225,6 +6335,14 @@ class App:
+             report(100, error_message)
+             self.queue.put(("learning_status", error_message))
+         finally:
++            # torch.set_num_threads() is process-wide, not thread-local. Restore
++            # even for a STOP, OOM, failed validation, or interrupted training.
++            if prior_torch_threads is not None:
++                try:
++                    torch.set_num_threads(prior_torch_threads)
++                    self._log("Restored OCR CPU threads to %s after learning",prior_torch_threads)
++                except Exception as exc:
++                    self._log("Unable to restore CPU thread setting: %s",exc)
+             if candidate_dir and candidate_dir.exists():
+                 shutil.rmtree(candidate_dir, ignore_errors=True)
+             self._training_worker_done.set()
+@@ -6365,7 +6483,9 @@ class App:
+                     reader_gpu = False
+                     self.reader = easyocr.Reader(["en"], gpu=False, verbose=False,
+                                                   download_enabled=False)
+-            self.queue.put(("engine_status", f"EasyOCR initialized • {'GPU' if reader_gpu else 'CPU'}"))
++            self._install_easyocr_instrumentation(self.reader)
++            self._report_ocr_accelerator(self.reader)
++            self.queue.put(("engine_status", f"EasyOCR initialized • {str(getattr(self.reader,'device','cpu')).upper()}"))
+             records_snapshot = list(self.scan_items)
+             total = len(records_snapshot)
+             processed = 0
+@@ -7010,10 +7130,108 @@ class App:
+                 duration,calls=stats.get(stage,(0.,0))
+                 stats[stage]=(duration+elapsed,calls+1)
+ 
++    def _report_ocr_accelerator(self, reader):
++        """Log local PyTorch/Reader capability without external probing."""
++        try:
++            import torch
++            device=str(getattr(reader,"device","unknown"))
++            installed_cuda=str(getattr(torch.version,"cuda",None) or "cpu-only")
++            gpu=bool(torch.cuda.is_available())
++            self._log("OCR ACCELERATOR: torch=%s, CUDA build=%s, CUDA ready=%s, EasyOCR device=%s",
++                      torch.__version__,installed_cuda,gpu,device)
++            self._diag_event("ocr_accelerator",cuda_ready=gpu,
++                torch_cuda_build=installed_cuda,easyocr_device=device)
++        except Exception as exc:
++            self._log("OCR accelerator diagnostic unavailable: %s",exc)
++
++    def _install_easyocr_instrumentation(self, reader):
++        """Time original detector and recognizer without changing their arguments or results."""
++        if reader is None or getattr(reader,"_mfcase_timed_v604",False):
++            return
++        from functools import wraps
++        for name,stage in (("detect","easyocr_detect"),
++                           ("recognize","easyocr_recognize")):
++            original=getattr(reader,name,None)
++            if not callable(original):continue
++            @wraps(original)
++            def timed(*args,_original=original,_stage=stage,**kwargs):
++                with self._perf_measure(_stage):
++                    return _original(*args,**kwargs)
++            setattr(reader,name,timed)
++        reader._mfcase_timed_v604=True
++
++    @staticmethod
++    def _same_easyocr_reading(left,right):
++        """Exact box/text/score equality, including nested NumPy coordinates."""
++        if isinstance(left,np.ndarray) or isinstance(right,np.ndarray):
++            if not isinstance(left,np.ndarray) or not isinstance(right,np.ndarray):
++                return False
++            return left.shape==right.shape and left.dtype==right.dtype and np.array_equal(left,right)
++        if isinstance(left,(list,tuple)) or isinstance(right,(list,tuple)):
++            return (isinstance(left,(list,tuple)) and isinstance(right,(list,tuple))
++                and len(left)==len(right) and all(
++                App._same_easyocr_reading(a,b) for a,b in zip(left,right)))
++        try:
++            return bool(left==right)
++        except (ValueError,TypeError):
++            return False
++
++    def _run_gpu_batch_comparison(self, image, kwargs, baseline, baseline_ms):
++        """Opt-in test on a real local ROI: never changes the live OCR result.
++
++        Compare batch 1/2/4/8 with identical image, detector and parameters.
++        No remote calls. Never automatically activate a non-default batch size.
++        """
++        try:
++            gpu=str(getattr(self.reader,'device','cpu')).lower().startswith('cuda')
++            if not gpu or not self._easyocr_gpu_batch_test_requested:
++                return
++            if self._easyocr_gpu_batch_test_samples >= 2:
++                return
++            import torch
++            if not torch.cuda.is_available():return
++            results=[]
++            for batch in (1,2,4,8):
++                trial=dict(kwargs,batch_size=batch)
++                if batch==1:
++                    reference=baseline
++                    # The baseline has already been processed and returned.
++                    elapsed=baseline_ms
++                    same=True
++                else:
++                    start=perf_counter()
++                    # Original Reader method; instrumented phases remain intact.
++                    candidate=self.reader.readtext(image,**trial)
++                    torch.cuda.synchronize()
++                    elapsed=(perf_counter()-start)*1000
++                    same=self._same_easyocr_reading(reference,candidate)
++                results.append({'batch_size':batch,
++                                'elapsed_ms':round(elapsed,2),
++                                'identical':same})
++            self._easyocr_gpu_batch_test_results.append(results)
++            self._easyocr_gpu_batch_test_samples+=1
++            self._diag_event('easyocr_gpu_batch_test',sample=self._easyocr_gpu_batch_test_samples,
++                results=results,note='Always retained baseline batch_size=1 output')
++            self._log('EasyOCR GPU BATCH TEST sample %s: %s',
++                      self._easyocr_gpu_batch_test_samples,results)
++            if self._easyocr_gpu_batch_test_samples>=2:
++                self._easyocr_gpu_batch_test_requested=False
++                self.queue.put(('ocr_batch_test_done',self._easyocr_gpu_batch_test_results))
++        except Exception as exc:
++            self._easyocr_gpu_batch_test_requested=False
++            self.queue.put(('ocr_batch_test_error',type(exc).__name__))
++
+     def _timed_easyocr_readtext(self,*args,**kwargs):
+         with self._perf_measure("easyocr"):
+-            return self._budgeted_ocr("printed",args[0],
+-                lambda:self.reader.readtext(*args,**kwargs),[])
++            def read():
++                start=perf_counter()
++                baseline=self.reader.readtext(*args,**kwargs)
++                baseline_ms=(perf_counter()-start)*1000
++                # Comparison runs only after explicit user selection in SETTINGS.
++                if getattr(self,"_easyocr_gpu_batch_test_requested",False):
++                    self._run_gpu_batch_comparison(args[0],kwargs,baseline,baseline_ms)
++                return baseline
++            return self._budgeted_ocr("printed",args[0],read,[])
+ 
+     def _timed_easyocr_recognize(self,*args,**kwargs):
+         with self._perf_measure("easyocr"):
+@@ -8147,7 +8365,13 @@ class App:
+             while True:
+                 msg = self.queue.get_nowait()
+                 kind = msg[0]
+-                if kind == "review_crop_result":
++                if kind == "ocr_batch_test_done":
++                    _,results=msg
++                    self._log('GPU batch test complete: %s',results)
++                    self.status.config(text='GPU BATCH TEST COMPLETE — READINGS PRESERVED; SEE WORK LOG')
++                elif kind == "ocr_batch_test_error":
++                    self.status.config(text='GPU BATCH TEST STOPPED — NORMAL OCR UNCHANGED')
++                elif kind == "review_crop_result":
+                     _,window,iid,rect,prior,result,callback=msg
+                     rec=self.records.get(iid)
+                     if (rec and rec.get("manual_crop_origin")=="drawn" and
+@@ -8807,7 +9031,7 @@ class App:
+             self._persist_learning_data(strict_revision=True)
+             self._refresh_learning_stats()
+ 
+-    def _save_completed_case_edit(self, iid, entry, visual_verified=False):
++    def _save_completed_case_edit(self, iid, entry, visual_verified=False, resume_callback=None):
+         record = self.records.get(iid)
+         if not record or record.get("exported"):
+             self._close_completed_edit(iid)
+@@ -8824,7 +9048,10 @@ class App:
+                 parent=self.root)
+             return
+ 
+-        if not self._confirm_out_of_order_change(iid,value):
++        if not self._confirm_out_of_order_change(iid,value,resume=(
++                resume_callback or
++                (lambda i=iid,v=value,verified=visual_verified:
++                    self._save_completed_case_edit(i,type('CaseValue',(),{'get':lambda _self:v})(),visual_verified=verified)))):
+             return False
+         record['human_verified_ink']=bool(visual_verified and
+              (record.get('manual_crop_rect') or record.get('snippet')))
+@@ -9768,8 +9995,8 @@ class App:
+             if pending_rect:
+                 r["manual_crop_rect"]=tuple(pending_rect)
+                 r["manual_crop_origin"]="drawn"
+-            if not self._confirm_out_of_order_change(iid,value):
+-                err.config(text="CASE NUMBER NOT APPROVED. EDIT THE NUMBER OR CONFIRM THE ORDER WARNING.")
++            if not self._confirm_out_of_order_change(iid,value,resume=confirm):
++                err.config(text="ORDER CONFIRMATION IS OPEN. THE SCAN CONTINUES.")
+                 return
+             r['human_verified_ink']=bool(r.get('manual_crop_rect') or r.get('snippet'))
+             original_ocr=str(r.get("candidate") or "")
+diff --git a/tests/test_release_5617.py b/tests/test_release_5617.py
+index 7ef4a5e..04a3f7c 100644
+--- a/tests/test_release_5617.py
++++ b/tests/test_release_5617.py
+@@ -107,7 +107,7 @@ class UIOnlyRegressions(unittest.TestCase):
+         self.assertIn('def _sequence_consensus_plan(',code)
+         self.assertIn('def _scan_one_learned_zone(',code)
+         self.assertIn('def _run_post_scan_learning_if_idle(',code)
+-        self.assertIn('self.app_version = "6.0.3"',code)
++        self.assertIn('self.app_version = "6.0.4"',code)
+         self.assertNotIn('"GITHUB LOG UPLOAD",self._configure_github_logs',code)
+         self.assertIn('GITHUB SETTINGS',code)
+         self.assertIn("target=output_dir/suggested",code)
+diff --git a/tests/test_release_603.py b/tests/test_release_603.py
+index c1d3544..c9341ab 100644
+--- a/tests/test_release_603.py
++++ b/tests/test_release_603.py
+@@ -117,7 +117,7 @@ class Performance603(unittest.TestCase):
+ 
+     def test_no_ocr_learning_and_location_function_changes(self):
+         code=Path(m.__file__).read_text(encoding='utf8')
+-        self.assertIn('self.app_version = "6.0.3"',code)
++        self.assertIn('self.app_version = "6.0.4"',code)
+         for name in ('_train_trocr_worker','_trocr_read_scored_impl','_scan_one_learned_zone',
+                      '_automatic_handwritten_4x4','_ranked_learned_scan_zones',
+                      '_sequence_consensus_plan','_order_review_findings'):
+diff --git a/tests/test_release_604.py b/tests/test_release_604.py
+new file mode 100644
+index 0000000..d50d88e
+--- /dev/null
++++ b/tests/test_release_604.py
+@@ -0,0 +1,140 @@
++"""v6.0.4 test release: performance only + nonblocking order confirmation."""
++import inspect
++import queue
++import threading
++import tempfile
++import time
++import unittest
++import sys
++from types import SimpleNamespace
++from pathlib import Path
++from unittest.mock import Mock, patch
++import tkinter as tk
++import case_number_ocr as m
++
++
++class InferenceSpeed604(unittest.TestCase):
++    def test_unchanged_generation_settings(self):
++        source=inspect.getsource(m.App._trocr_read_scored_impl)
++        self.assertIn('max_new_tokens=24, num_beams=2',source)
++        self.assertIn('early_stopping=True, return_dict_in_generate=True',source)
++        self.assertIn('with self._perf_measure("trocr_preprocess")',source)
++        self.assertIn('with self._perf_measure("trocr_generate")',source)
++        self.assertIn('with self._perf_measure("trocr_decode_confidence")',source)
++
++    def test_readtext_is_unchanged_when_batch_not_requested(self):
++        app=m.App.__new__(m.App)
++        baseline=[([(0,0),(10,0),(10,5),(0,5)],'08-594',0.972)]
++        app.reader=Mock()
++        app.reader.readtext=Mock(return_value=baseline)
++        app._easyocr_gpu_batch_test_requested=False
++        app._budgeted_ocr=lambda engine,image,callback,empty:callback()
++        app._perf_stages={}
++        result=app._timed_easyocr_readtext('roi',detail=1,paragraph=False)
++        self.assertIs(result,baseline)
++        app.reader.readtext.assert_called_once_with('roi',detail=1,paragraph=False)
++
++    def test_batch_comparison_never_changes_primary_read(self):
++        app=m.App.__new__(m.App)
++        result=[('box','08-594',0.972)]
++        app.reader=Mock(device='cuda:0')
++        app.reader.readtext=Mock(side_effect=lambda _image,**kwargs:result if kwargs['batch_size']<8 else [('box','08-594',0.968)])
++        app._easyocr_gpu_batch_test_requested=True
++        app._easyocr_gpu_batch_test_samples=0
++        app._easyocr_gpu_batch_test_results=[]
++        app._perf_stages={}
++        app._diag_event=Mock()
++        app._log=Mock()
++        app.queue=queue.Queue()
++        fake_torch=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda:True,
++                                                        synchronize=lambda:None))
++        with patch.dict(sys.modules, {'torch':fake_torch}):
++            app._run_gpu_batch_comparison('roi',{'detail':1},result,100.0)
++        self.assertEqual(app._easyocr_gpu_batch_test_samples,1)
++        self.assertEqual([r['batch_size'] for r in app._easyocr_gpu_batch_test_results[0]],[1,2,4,8])
++        self.assertEqual([r['identical'] for r in app._easyocr_gpu_batch_test_results[0]],[True,True,True,False])
++        self.assertEqual(result,[('box','08-594',0.972)])
++        self.assertEqual(app._easyocr_gpu_batch_test_results[0][0]['elapsed_ms'],100.0)
++
++    def test_training_always_has_cpu_thread_restore(self):
++        source=inspect.getsource(m.App._train_trocr_worker)
++        self.assertIn('prior_torch_threads = torch.get_num_threads()',source)
++        self.assertIn('torch.set_num_threads(prior_torch_threads)',source)
++        self.assertIn('finally:',source)
++
++    def test_gpu_install_is_explicit_offline_safe(self):
++        setup=(Path(m.__file__).resolve().parent/'SETUP.bat').read_text(encoding='utf8')
++        self.assertIn('if /I "%~1"=="/GPU" goto gpu_setup',setup)
++        self.assertIn('where nvidia-smi',setup)
++        self.assertIn('choice /C YN',setup)
++        self.assertIn('https://download.pytorch.org/whl/cu126',setup)
++        self.assertNotIn('Invoke-WebRequest -UseBasicParsing \'http',setup.split(':gpu_setup')[-1])
++
++    def test_ocr_training_locations_are_still_available(self):
++        for n in ('_automatic_handwritten_4x4','_scan_one_learned_zone',
++                  '_find_case_candidates','_sequence_consensus_plan',
++                  '_ranked_learned_scan_zones','_check_order_review'):
++            self.assertTrue(hasattr(m.App,n),n)
++
++
++class PopupDoesNotStopScanning604(unittest.TestCase):
++    def test_livescan_confirmation_never_blocks_queue(self):
++        root=tk.Tk()
++        self.addCleanup(lambda:root.destroy() if root.winfo_exists() else None)
++        root.withdraw()
++        app=m.App.__new__(m.App)
++        app.root=root
++        app.busy=True
++        app.records={'i2':{'path':Path('/tmp/Image0002.pdf'),'original_name':'Image0002.pdf',
++                            'sequence_locked':False,'order_review_ack':''}}
++        app._manual_order_problem=Mock(return_value='3 or more cases outside the order')
++        app._audit_event=Mock()
++        app.status=tk.Label(root)
++        app.pause_event=threading.Event();app.pause_event.set()
++        app.stop_event=threading.Event()
++        results=queue.Queue(maxsize=1)
++        received=[];resumed=[]
++        def consume():
++            try:
++                while True:received.append(results.get_nowait())
++            except queue.Empty:pass
++            if len(received)<8:
++                root.after(8,consume)
++        root.after(8,consume)
++        worker=threading.Thread(target=lambda:[results.put(i,timeout=2) for i in range(8)],daemon=True)
++        worker.start()
++        self.assertFalse(app._confirm_out_of_order_change('i2','08-108',resume=lambda:resumed.append(True)))
++        dialog=app._active_order_confirmations['i2']
++        self.assertTrue(dialog.winfo_exists())
++        self.assertIsNone(dialog.grab_current())
++        deadline=time.monotonic()+2
++        while time.monotonic()<deadline and len(received)<8:
++            root.update();time.sleep(.005)
++        worker.join(timeout=.2)
++        self.assertFalse(worker.is_alive(),'bounded scan queue blocked while order dialog remained open')
++        self.assertEqual(received,list(range(8)))
++        self.assertTrue(app.pause_event.is_set())
++        self.assertFalse(app.stop_event.is_set())
++        self.assertTrue(app.busy)
++        self.assertFalse(app.records['i2']['sequence_locked'])
++        # Recursively locate the YES button in the modeless window.
++        def descendants(w):
++            for child in w.winfo_children():
++                yield child
++                yield from descendants(child)
++        yes=next(w for w in descendants(dialog) if isinstance(w,(__import__('tkinter').ttk.Button,)) and 'YES' in w.cget('text'))
++        yes.invoke()
++        root.update()
++        self.assertTrue(app.records['i2']['sequence_locked'])
++        self.assertEqual(app.records['i2']['order_review_ack'],'08-108')
++        self.assertEqual(resumed,[True])
++
++    def test_five_row_context_popup_is_modeless(self):
++        src=inspect.getsource(m.App._show_order_popup)
++        self.assertIn('tk.Toplevel(self.root)',src)
++        self.assertNotIn('grab_set(',src)
++        self.assertNotIn('wait_window(',src)
++        self.assertNotIn('pause_event.clear(',src)
++        self.assertNotIn('stop_event.set(',src)
++
++if __name__=='__main__':unittest.main()
