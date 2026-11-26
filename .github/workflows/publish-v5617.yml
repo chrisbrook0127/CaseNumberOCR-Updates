@@ -99,6 +99,23 @@ jobs:
           assert 'def _automatic_handwritten_4x4(' in source
           assert 'def _run_post_scan_learning_if_idle(' in source
           assert 'GITHUB SETTINGS' in source
+          # Original v5.6.16 test expected a circular learning spinner.
+          # Update its expectations to the user-requested moving green box.
+          test=app/'tests/test_release_5613.py'
+          expectations=test.read_text('utf8')
+          changes=[
+            ('def test_spinner_runs_stopping_then_cancels(self):',
+             'def test_learning_box_animates_then_cancels(self):'),
+            ('a.learning_spinner.create_arc.assert_called_once()',
+             'self.assertGreaterEqual(a.learning_spinner.create_rectangle.call_count,2)'),
+            ("a.learning_activity_label.config.assert_called_with(text='LEARNING STOPPING')",
+             "a.learning_activity_label.config.assert_called_with(text='LEARNING')")
+          ]
+          for before,after in changes:
+              assert expectations.count(before)==1,before
+              expectations=expectations.replace(before,after,1)
+          test.write_text(expectations,'utf8')
+          print('PASS updated only obsolete spinner assertions',flush=True)
           print('PASS v5.6.17 exact application source SHA-256',actual,flush=True)
           PY
           python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
