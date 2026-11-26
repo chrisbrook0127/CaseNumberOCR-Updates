@@ -78,7 +78,7 @@ def assemble()->None:
   assert orig.get(method)==new.get(method),f'location change: {method}'
  # Original v6 before/after & send mechanisms must remain recognizable.
  for term in ('_sequence_consensus_plan','_sequence_order_with_sent_history',
-              'MFCaseOrderPopup','_save_state','_ocr_pdf','_train_trocr_worker'):
+              '_show_order_popup','_save_state','_ocr_pdf','_train_trocr_worker'):
   assert term in after,term
  subprocess.run([sys.executable,str(app/'verify_package.py')],check=True)
  subprocess.run([sys.executable,'-m','compileall','-q',str(app)],check=True)
