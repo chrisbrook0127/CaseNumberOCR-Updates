@@ -1,4 +1,5 @@
 name: MFCase v6.0.3 performance-only verified release
+# Cross-platform rerun: normalize Git checkout CRLF before source SHA verification
 on:
   push:
     branches:
