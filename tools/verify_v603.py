@@ -43,7 +43,7 @@ def prepare():
     with ZipFile(ASSETS/asset) as z:safe(z)
     print('PASS',asset,'bytes',len(b),'sha256',sha(b))
   assert (ROOT/'versions/v6.0.2/case_number_ocr.py').exists()
-  baseline=(ROOT/'versions/v6.0.2/case_number_ocr.py').read_bytes()
+  baseline=(ROOT/'versions/v6.0.2/case_number_ocr.py').read_bytes().replace(b'\r\n',b'\n')  # Windows Git checkout may normalize line endings
   assert sha(baseline)==BASELINE_SOURCE_SHA,sha(baseline)
   with ZipFile(ASSETS/'MFCase_Number_OCR_V6.0.3_Full_Online_Install.zip') as z:
     z.extractall(STAGE)
