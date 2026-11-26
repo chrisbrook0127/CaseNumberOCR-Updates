@@ -859,7 +859,6 @@ class App:
         self.auto_threshold_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
         self.year_var.trace_add("write", lambda *_: self._refresh_auto_eligibility_status())
         self.auto_label_var.set(True)
-        self.auto_threshold_var.set("95")
         self._refresh_auto_eligibility_status()
         root.bind_all("<ButtonPress>", self._mark_user_activity, add="+")
         root.bind_all("<KeyPress>", self._mark_user_activity, add="+")
@@ -1397,7 +1396,6 @@ class App:
         self.review_tab.place(relx=0,rely=0,relwidth=1,relheight=1)
         self.year_var=tk.StringVar(value='08')
         self.auto_label_var.set(True)
-        self.auto_threshold_var.set('95')
 
         self.dashboard=tk.Frame(self.review_tab,bg='#e8e9eb',height=105,
                                 highlightthickness=1,highlightbackground='#afbfce')
@@ -1702,6 +1700,18 @@ class App:
             ("UPDATE",lambda: self.check_for_updates(automatic=False)),
             ("UPDATE LEARNING",self._finish_import_batch)):
             self._action_button(panel,'settings:'+label,label,func).pack(fill='x',pady=5)
+        ttk.Separator(panel).pack(fill='x',pady=(10,7))
+        current=self._get_auto_threshold()
+        self.threshold_display=ttk.Label(panel,
+            text=f'CURRENT OCR APPROVAL THRESHOLD: {current:g}%',
+            font=('Segoe UI',11,'bold'))
+        self.threshold_display.pack(anchor='w')
+        self.threshold_scale=tk.Scale(panel,from_=90,to=99,resolution=1,
+            length=410,orient='horizontal',showvalue=True,tickinterval=3,
+            font=('Segoe UI',10),label='AUTO-APPROVE OCR CONFIDENCE (%)',
+            command=self._set_auto_threshold)
+        self.threshold_scale.pack(fill='x',pady=(0,5))
+        self.threshold_scale.set(int(current))
         ttk.Separator(panel).pack(fill="x",pady=(12,6))
         ttk.Checkbutton(panel,text="AUTO SEND COMPLETED — AFTER SCAN FINISHES",
             variable=self.auto_send_var,command=self._save_user_settings).pack(anchor="w",pady=5)
@@ -3445,9 +3455,14 @@ class App:
             self._last_folder=str(cfg.get("last_folder") or "")
             self.auto_send_var.set(cfg.get("auto_send_completed") is True)
             self.show_all_files_var.set(False)  # Always start in the filtered view.
+            stored=cfg.get('ocr_approval_threshold',95)
+            try: stored=int(stored)
+            except (ValueError,TypeError):stored=95
+            self.auto_threshold_var.set(str(max(90,min(99,stored))))
         except (OSError,ValueError,TypeError):
             self.auto_send_var.set(False)
             self.show_all_files_var.set(False)
+            self.auto_threshold_var.set('95')
 
     def _save_user_settings(self):
         path=self._user_settings_file
@@ -3457,6 +3472,7 @@ class App:
             tmp.write_text(json.dumps({"version":1,
                       "auto_send_completed":bool(self.auto_send_var.get()),
                       "full_list":False,
+                       "ocr_approval_threshold":self._get_auto_threshold(),
                       "last_folder":str(self.folder or getattr(self,"_last_folder",""))},indent=2),encoding="utf-8")
             os.replace(tmp,path)
             self._audit_event("AUTO_SEND_SETTING",enabled=bool(self.auto_send_var.get()))
@@ -4041,8 +4057,24 @@ class App:
                      f" • {trained} training samples{detail}")
 
     def _get_auto_threshold(self):
-        """Fixed policy threshold, no user-adjustable confidence slider."""
-        return 95.0
+        """Read the saved 90–99% approval threshold, independent of OCR engine."""
+        try:
+            score=float(self.auto_threshold_var.get())
+            if not math.isfinite(score):return 95.0
+            return float(max(90,min(99,round(score))))
+        except (TypeError,ValueError,AttributeError,tk.TclError):
+            return 95.0
+
+    def _set_auto_threshold(self,value):
+        """Apply a slider adjustment to future decisions and persist locally."""
+        try: score=max(90,min(99,int(round(float(value)))))
+        except (ValueError,TypeError):return
+        if self._get_auto_threshold()!=score:
+            self.auto_threshold_var.set(str(score))
+            self._save_user_settings()
+        label=getattr(self,'threshold_display',None)
+        if label is not None and label.winfo_exists():
+            label.config(text=f'CURRENT OCR APPROVAL THRESHOLD: {score}%')
 
     def _save_learning_example(self, record, confirmed_number):
         confirmed_number=normalize_case_number(confirmed_number)
