@@ -121,6 +121,18 @@ jobs:
       - name: Run inherited OCR regressions and new handwriting safeguards
         run: |
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          # 5.6.17 UI-only test intentionally asserted its former app version.
+          # Version has changed to 5.6.18; retain all remaining UI assertions.
+          python - <<'PY'
+          from pathlib import Path
+          p=next(Path('stage').rglob('test_release_5617.py'))
+          source=p.read_text('utf8')
+          old='self.app_version = "5.6.17"'
+          assert source.count(old)==1,source.count(old)
+          source=source.replace(old,'self.app_version = "5.6.18"',1)
+          p.write_text(source,encoding='utf8')
+          print('PASS: updated obsolete v5.6.17 version-only test assertion')
+          PY
           PYTHONPATH="$APP:$APP/tests" python -m unittest discover -s "$APP/tests" -p 'test_release_5*.py' -q
           MFCASE_SKIP_STARTUP_MAINTENANCE=1 PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
           import tkinter as tk
