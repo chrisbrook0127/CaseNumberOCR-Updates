@@ -99,18 +99,18 @@ jobs:
           start=t.index('    def test_learning_never_starts_automatically(self):')
           end=t.index('    def test_budget_retains_fast_path(self):',start)
           replacement=(
-            '    def test_automatic_training_starts_only_when_idle(self):\\n'
-            '        a=m.App.__new__(m.App);a._stop_all_requested=False;a._startup_ready=True\\n'
-            '        a.busy=False;a.export_busy=False;a.trocr_training=False\\n'
-            '        a._pending_learning_examples=Mock(return_value=[{"id":1}])\\n'
-            '        a._maybe_train_trocr=Mock(return_value=True)\\n'
-            '        self.assertTrue(a._start_automatic_learning_if_ready())\\n'
-            '        a._maybe_train_trocr.assert_called_once_with(automatic=True)\\n'
-            '    def test_schedule_installs_90_second_idle_timer(self):\\n'
-            '        a=m.App.__new__(m.App);a.root=Mock();a._post_scan_learning_after=None\\n'
-            '        a._stop_all_requested=False\\n'
-            '        a._schedule_post_scan_learning()\\n'
-            '        self.assertEqual(a.root.after.call_args.args[0],90000)\\n'
+            '    def test_automatic_training_starts_only_when_idle(self):\n'
+            '        a=m.App.__new__(m.App);a._stop_all_requested=False;a._startup_ready=True\n'
+            '        a.busy=False;a.export_busy=False;a.trocr_training=False\n'
+            '        a._pending_learning_examples=Mock(return_value=[{"id":1}])\n'
+            '        a._maybe_train_trocr=Mock(return_value=True)\n'
+            '        self.assertTrue(a._start_automatic_learning_if_ready())\n'
+            '        a._maybe_train_trocr.assert_called_once_with(automatic=True)\n'
+            '    def test_schedule_installs_90_second_idle_timer(self):\n'
+            '        a=m.App.__new__(m.App);a.root=Mock();a._post_scan_learning_after=None\n'
+            '        a._stop_all_requested=False\n'
+            '        a._schedule_post_scan_learning()\n'
+            '        self.assertEqual(a.root.after.call_args.args[0],90000)\n'
           )
           test.write_text(t[:start]+replacement+t[end:],encoding='utf8')
           print('PASS v5.6.19 local-source checks and retained crop-location logic')
