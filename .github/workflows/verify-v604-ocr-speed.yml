@@ -1,0 +1,151 @@
+name: MFCase v6.0.4 TEST - OCR speed and nonblocking order review
+on:
+  push:
+    branches:
+      - test/v6.0.4-ocr-speed
+    paths:
+      - .github/workflows/verify-v604-ocr-speed.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-v604-test-rc1
+  cancel-in-progress: false
+jobs:
+  linux_validation:
+    runs-on: ubuntu-latest
+    name: Linux regression GUI and updater validation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install OCR testing libraries and virtual display
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install 'pymupdf<2.0' numpy pillow opencv-python-headless
+      - name: Retrieve published v6.0.3 ZIP (SHA verified by builder)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p baseline
+          gh release download v6.0.3 --repo "$GITHUB_REPOSITORY" \
+            --pattern MFCase_Number_OCR_V6.0.3_Full_Online_Install.zip --dir baseline
+      - name: Assemble tested v6.0.4 source, verify OCR and location invariants
+        run: python tools/build_v604_test.py assemble
+      - name: Run complete 252-test suite under a virtual display
+        run: |
+          APP="$(cat stage_path.txt)"
+          MFCASE_SKIP_STARTUP_MAINTENANCE=1 PYTHONPATH="$APP:$APP/tests" \
+            xvfb-run -a python -m unittest discover -s "$APP/tests" -p 'test_release_*.py' -q
+      - name: Exercise complete Tk startup and verify unchanged controls
+        run: |
+          export MFCASE_SKIP_STARTUP_MAINTENANCE=1
+          APP="$(cat stage_path.txt)"
+          PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import tkinter as tk
+          from case_number_ocr import App
+          root=tk.Tk()
+          app=App(root)
+          root.update()
+          assert app.app_version=='6.0.4'
+          assert app.tree.winfo_exists()
+          assert app.show_all_files_var.get() is True
+          assert len(app.pie_transport._hitboxes)==4
+          app._open_settings_window()
+          root.update()
+          assert app.threshold_scale.winfo_exists()
+          assert callable(app._offer_gpu_setup)
+          assert callable(app._request_easyocr_batch_test)
+          root.destroy()
+          print('PASS actual Tk GUI, confidence slider and optional GPU tools')
+          PY
+      - name: Package both archives, validate actual updater and confidential file preservation
+        run: python tools/build_v604_test.py package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MFCase-v604-test-verified-packages
+          path: |
+            dist/CaseNumberOCR_Update.zip
+            dist/MFCase_Number_OCR_V6.0.4_TEST_Full_Online_Install.zip
+            dist/SHA256SUMS.json
+          if-no-files-found: error
+          retention-days: 14
+
+  windows_validation:
+    runs-on: windows-latest
+    name: Windows regression popup and updater validation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install regression-only OCR dependencies
+        run: python -m pip install 'pymupdf<2.0' numpy pillow opencv-python-headless
+      - name: Retrieve published v6.0.3 ZIP (SHA verified by builder)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path baseline -Force | Out-Null
+          gh release download v6.0.3 --repo "$env:GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V6.0.3_Full_Online_Install.zip --dir baseline
+      - name: Assemble v6.0.4 source from official stable release
+        run: python tools/build_v604_test.py assemble
+      - name: Run Windows regression suite and live modeless popup test
+        shell: pwsh
+        run: |
+          $app=Get-Content -Path stage_path.txt -Raw
+          $app=$app.Trim()
+          $env:PYTHONPATH="$app;$app\tests"
+          $env:MFCASE_SKIP_STARTUP_MAINTENANCE="1"
+          python -m unittest discover -s "$app\tests" -p 'test_release_*.py' -q
+      - name: Verify Windows installer and in-place updater on a protected fixture
+        run: python tools/build_v604_test.py package
+
+  publish_test:
+    runs-on: ubuntu-latest
+    name: Publish v6.0.4 test prerelease only after both operating systems pass
+    needs: [linux_validation, windows_validation]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: MFCase-v604-test-verified-packages
+          path: dist
+      - name: Verify exact SHA256 of validated archives
+        run: |
+          python - <<'PY'
+          import json,hashlib
+          from pathlib import Path
+          p=Path('dist')
+          expected=json.loads((p/'SHA256SUMS.json').read_text('utf8'))
+          assert set(expected)=={'CaseNumberOCR_Update.zip',
+            'MFCase_Number_OCR_V6.0.4_TEST_Full_Online_Install.zip'}
+          for name,h in expected.items():
+              data=(p/name).read_bytes()
+              assert len(data)>100_000
+              assert hashlib.sha256(data).hexdigest()==h,name
+              print('PASS',name,hashlib.sha256(data).hexdigest())
+          PY
+      - name: Publish TEST prerelease (do not replace v6.0.3 latest stable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v6.0.4-rc1
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Existing test tag detected; release must be reviewed manually to avoid overwriting.'
+            exit 1
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --target "$GITHUB_SHA" --title "MFCase v6.0.4 TEST (OCR speed)" \
+            --notes "Optional CUDA setup, exact-output EasyOCR batch benchmarking, detailed OCR timing, restoration of CPU threads after training, and non-modal out-of-order confirmations that never stop an active scan. Built from the verified v6.0.3 baseline. Stable v6.0.3 stays unchanged. Passed cross-platform regression and updater-preservation tests. This is a test release, not the stable updater channel." \
+            dist/CaseNumberOCR_Update.zip \
+            dist/MFCase_Number_OCR_V6.0.4_TEST_Full_Online_Install.zip \
+            dist/SHA256SUMS.json
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp verify/CaseNumberOCR_Update.zip dist/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets,isPrerelease
