@@ -1,0 +1,196 @@
+name: Publish MFCase v5.6.17 UI and previous-case prefill safety
+on:
+  push:
+    branches:
+      - publish/v5.6.17
+    paths:
+      - .github/workflows/publish-v5617.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: mfcase-release-5617
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install GUI and OCR regression prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb
+          python -m pip install numpy pillow 'pymupdf<2.0' opencv-python-headless
+      - name: Download and verify unchanged official v5.6.16 baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p baseline stage transfer dist verify
+          gh release download v5.6.16 --repo "$GITHUB_REPOSITORY" --pattern MFCase_Number_OCR_V5.6.16_Full_Online_Install.zip --dir baseline
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          from hashlib import sha256
+          path=Path('baseline/MFCase_Number_OCR_V5.6.16_Full_Online_Install.zip')
+          digest=sha256(path.read_bytes()).hexdigest()
+          assert digest=='1e517fdc1f84c62a348c02b448d29135e90b31ce517f6e484ba6a29b478759ba',digest
+          with ZipFile(path) as z:
+              assert z.testzip() is None
+              assert all(not n.startswith('/') and '..' not in Path(n).parts for n in z.namelist())
+              z.extractall('stage')
+          sources=list(Path('stage').rglob('case_number_ocr.py'))
+          assert len(sources)==1,sources
+          digest=sha256(sources[0].read_bytes()).hexdigest()
+          assert digest=='1e284f05351516aaa5aabd8e516267c7f2046a8bba68ad9b6e7a8ef774979aa1',digest
+          print('PASS uploaded-source-equivalent official v5.6.16 baseline',flush=True)
+          PY
+      - name: Verify and extract exact v5.6.17 source delta
+        run: |
+          python - <<'PY'
+          import base64
+          from hashlib import sha256
+          from pathlib import Path
+          from zipfile import ZipFile
+          from io import BytesIO
+          text=Path('tools/release_5617_payload.b64').read_text('ascii').strip()
+          assert len(text)==47600,len(text)
+          data=base64.b64decode(text,validate=True)
+          digest=sha256(data).hexdigest()
+          assert digest=='56865db330b3f207f451c53d8e38bb7f7e70c544052dc890447cfd61af77cd26',digest
+          required={'app.diff','README_FIRST.txt','SETUP.bat','verify_package.py',
+              'CHANGELOG_V5_6_17.txt','tests/test_release_5615.py',
+              'tests/test_release_5617.py','tests/test_release_5617_prefill.py'}
+          with ZipFile(BytesIO(data)) as z:
+              assert z.testzip() is None
+              assert set(z.namelist())==required,set(z.namelist())
+              assert all('..' not in Path(n).parts and not n.startswith('/') for n in z.namelist())
+              z.extractall('transfer')
+          print('PASS v5.6.17 patch transfer integrity',flush=True)
+          PY
+      - name: Apply UI and previous-case prefill changes, preserve OCR code
+        run: |
+          set -eu
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          (cd "$APP" && patch --batch --fuzz=0 -p0 -i "$GITHUB_WORKSPACE/transfer/app.diff")
+          python - <<'PY'
+          import shutil,hashlib
+          from pathlib import Path
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          transfer=Path('transfer')
+          for item in transfer.rglob('*'):
+              if item.is_file() and item.name!='app.diff':
+                  relative=item.relative_to(transfer)
+                  target=app/relative
+                  target.parent.mkdir(exist_ok=True,parents=True)
+                  shutil.copy2(item,target)
+          expected='31111c4fab428decf77d7c29a462584d01a2df68d5f3116fc0f2d9067e19d41c'
+          actual=hashlib.sha256((app/'case_number_ocr.py').read_bytes()).hexdigest()
+          assert actual==expected,(actual,expected)
+          source=(app/'case_number_ocr.py').read_text()
+          assert 'self.app_version = "5.6.17"' in source
+          assert 'sequence_previous_prefill' in source
+          assert 'class MFCasePieTransport' in source
+          assert 'def _sequence_consensus_plan(' in source
+          assert 'def _scan_one_learned_zone(' in source
+          assert 'def _automatic_handwritten_4x4(' in source
+          assert 'def _run_post_scan_learning_if_idle(' in source
+          assert 'GITHUB SETTINGS' in source
+          print('PASS v5.6.17 exact application source SHA-256',actual,flush=True)
+          PY
+          python -m py_compile "$APP/case_number_ocr.py" "$APP/updater_apply.py"
+          python "$APP/verify_package.py"
+      - name: Run all 147 regressions and GUI startup
+        run: |
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          PYTHONPATH="$APP:$APP/tests" python -m unittest discover -s "$APP/tests" -p 'test_release_5*.py' -q
+          MFCASE_SKIP_STARTUP_MAINTENANCE=1 PYTHONPATH="$APP" xvfb-run -a python - <<'PY'
+          import tkinter as tk
+          from case_number_ocr import App
+          root=tk.Tk()
+          app=App(root)
+          root.update()
+          assert app.app_version=='5.6.17'
+          assert not app.show_all_files_var.get()
+          assert app.tree.winfo_exists()
+          assert app.pie_transport.winfo_exists()
+          assert set(app.pie_transport.actions)=={'folder','scan','pause','stop'}
+          assert app.scan_run_time_label.winfo_exists()
+          assert app.learning_spinner.winfo_exists()
+          root.destroy()
+          print('PASS dashboard GUI and controls',flush=True)
+          PY
+      - name: Build and verify full installer and in-place updater
+        run: |
+          python - <<'PY'
+          import hashlib,importlib.util,shutil,subprocess,sys,tempfile
+          from pathlib import Path
+          from zipfile import ZipFile,ZIP_DEFLATED
+          app=next(Path('stage').rglob('case_number_ocr.py')).parent
+          out=Path('dist');out.mkdir(exist_ok=True)
+          updater_files=['case_number_ocr.py','updater_apply.py','SETUP.bat',
+              'RUN_CASE_OCR.bat','RUN_CASE_OCR_DEBUG.bat','Launch_Case_OCR.vbs','MF.ico',
+              'CREATE_DESKTOP_SHORTCUT.bat','Create_Desktop_Shortcut.vbs',
+              'README_FIRST.txt','verify_package.py','update_config.json','CHANGELOG_V5_6_17.txt']
+          full_files=updater_files[:]
+          full_files += [x.name for x in app.glob('CHANGELOG_V5_*.txt') if x.name not in full_files]
+          full_files += [str(x.relative_to(app)) for x in (app/'tests').glob('test_*.py')]
+          full_files += ['MFCase_Combine_And_Trace.py']
+          assert all((app/x).is_file() for x in set(updater_files+full_files))
+          outputs=[]
+          for name,files,prefix in [
+              ('CaseNumberOCR_Update.zip',updater_files,''),
+              ('MFCase_Number_OCR_V5.6.17_Full_Online_Install.zip',
+               full_files,'MFCase_Number_OCR_V5.6.17_Full_Online_Install/')]:
+              path=out/name
+              with ZipFile(path,'w',ZIP_DEFLATED,compresslevel=9) as z:
+                  for n in sorted(set(files)): z.write(app/n,prefix+n)
+              with ZipFile(path) as z:
+                  assert z.testzip() is None
+                  assert all('..' not in Path(n).parts and not n.startswith('/')
+                             and not n.lower().endswith(('.pdf','.pt','.pth','.log','.jsonl','.sqlite'))
+                             for n in z.namelist())
+              print('PASS package',name,path.stat().st_size,hashlib.sha256(path.read_bytes()).hexdigest(),flush=True)
+              outputs.append(path)
+          spec=importlib.util.spec_from_file_location('updater',app/'updater_apply.py')
+          updater=importlib.util.module_from_spec(spec);spec.loader.exec_module(updater)
+          with tempfile.TemporaryDirectory() as tmp:
+              d=Path(tmp)
+              for n in ('case_number_ocr.py','SETUP.bat','README_FIRST.txt'):
+                  (d/n).write_text('original')
+              (d/'private.pdf').write_bytes(b'private PDF')
+              (d/'.case_ocr_state.json').write_text('private state')
+              (d/'learning_examples_v3.json').write_text('private learning')
+              (d/'logs').mkdir();(d/'logs/worklog.txt').write_text('private log')
+              (d/'models').mkdir();(d/'models/checkpoint.pt').write_text('private model')
+              archive=d/'update.zip';shutil.copy2(outputs[0],archive)
+              updater.apply_update(d,archive)
+              assert 'self.app_version = "5.6.17"' in (d/'case_number_ocr.py').read_text()
+              assert (d/'private.pdf').read_bytes()==b'private PDF'
+              assert (d/'.case_ocr_state.json').read_text()=='private state'
+              assert (d/'learning_examples_v3.json').read_text()=='private learning'
+              assert (d/'logs/worklog.txt').read_text()=='private log'
+              assert (d/'models/checkpoint.pt').read_text()=='private model'
+              subprocess.run([sys.executable,str(d/'verify_package.py')],check=True)
+          print('PASS in-place update preserves sensitive case data',flush=True)
+          PY
+      - name: Publish v5.6.17, mark latest, verify downloaded asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG=v5.6.17
+          APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
+          test -s dist/CaseNumberOCR_Update.zip
+          test -s dist/MFCase_Number_OCR_V5.6.17_Full_Online_Install.zip
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "MFCase v5.6.17" --notes-file "$APP/CHANGELOG_V5_6_17.txt"
+          fi
+          gh release upload "$TAG" "$PWD/dist/CaseNumberOCR_Update.zip" "$PWD/dist/MFCase_Number_OCR_V5.6.17_Full_Online_Install.zip" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern CaseNumberOCR_Update.zip --dir verify
+          cmp dist/CaseNumberOCR_Update.zip verify/CaseNumberOCR_Update.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,assets
