@@ -76,7 +76,25 @@ jobs:
           import ast,hashlib
           from pathlib import Path
           source=next(Path('stage').rglob('case_number_ocr.py'))
+          # The installed v5.6.17 updater permits existing files only.
+          # Embed the handwriting helper inside the existing app file.
+          helper=source.parent/'handwriting_safety.py'
+          helpers=helper.read_text('utf8').replace('from __future__ import annotations\n','')
+          exports=('identity','number_only','image_variants','missing_end_conflict',
+             'suspect_training_label','audit_examples','write_quarantine_report',
+             'backup_learning_once','following_ink')
+          namespace=("\nfrom types import SimpleNamespace as _MFCaseSafetyNamespace\n"+
+             "hw5618=_MFCaseSafetyNamespace("+",".join(k+"="+k for k in exports)+")\n")
           code=source.read_text('utf8')
+          assert code.count('import handwriting_safety as hw5618')==1
+          code=code.replace('import handwriting_safety as hw5618',helpers+namespace)
+          source.write_text(code,encoding='utf8')
+          helper.unlink()
+          test=source.parent/'tests/test_release_5618.py'
+          test_txt=test.read_text('utf8')
+          assert test_txt.count('import handwriting_safety as safety')==1
+          test.write_text(test_txt.replace('import handwriting_safety as safety',
+                 'from case_number_ocr import hw5618 as safety'),encoding='utf8')
           assert 'self.app_version = "5.6.18"' in code
           assert 'class MFCasePieTransport' in code
           assert 'sequence_previous_prefill' in code
@@ -87,7 +105,7 @@ jobs:
           assert 'self._maybe_train_trocr(automatic=True)' not in code
           compile(code,str(source),'exec')
           app=source.parent
-          for name in ('case_number_ocr.py','updater_apply.py','handwriting_safety.py'):
+          for name in ('case_number_ocr.py','updater_apply.py'):
               compile((app/name).read_text('utf8'),name,'exec')
           # Offline setup must explicitly verify the now-required OpenCV.
           setup=app/'SETUP.bat'
@@ -110,7 +128,7 @@ jobs:
           """.replace('          ','').lstrip(),encoding='utf8')
           # Regenerate integrity manifest after intentional source modifications.
           expected={n:hashlib.sha256((app/n).read_bytes()).hexdigest()
-                    for n in ('case_number_ocr.py','updater_apply.py','handwriting_safety.py')}
+                    for n in ('case_number_ocr.py','updater_apply.py')}
           verify=app/'verify_package.py'
           verify.write_text("from pathlib import Path\nimport hashlib\nROOT=Path(__file__).resolve().parent\nEXPECTED="+repr(expected)+
               "\nfor n,h in EXPECTED.items():\n    assert hashlib.sha256((ROOT/n).read_bytes()).hexdigest()==h,n\nprint('PASS: MFCase v5.6.18 application integrity')\n",encoding='utf8')
@@ -158,7 +176,7 @@ jobs:
           app=next(Path('stage').rglob('case_number_ocr.py')).parent
           out=Path('dist')
           out.mkdir(exist_ok=True)
-          updater_files=['case_number_ocr.py','handwriting_safety.py','updater_apply.py',
+          updater_files=['case_number_ocr.py','updater_apply.py',
             'SETUP.bat','RUN_CASE_OCR.bat','RUN_CASE_OCR_DEBUG.bat',
             'Launch_Case_OCR.vbs','MF.ico','CREATE_DESKTOP_SHORTCUT.bat',
             'Create_Desktop_Shortcut.vbs','README_FIRST.txt',
@@ -211,7 +229,7 @@ jobs:
           set -eu
           APP="$(dirname "$(find stage -name case_number_ocr.py -print -quit)")"
           mkdir -p "versions/v5.6.18"
-          cp "$APP/case_number_ocr.py" "$APP/handwriting_safety.py" "$APP/verify_package.py" "$APP/CHANGELOG_V5_6_18.txt" "versions/v5.6.18/"
+          cp "$APP/case_number_ocr.py" "$APP/verify_package.py" "$APP/CHANGELOG_V5_6_18.txt" "versions/v5.6.18/"
           cp "$APP/tests/test_release_5618.py" "versions/v5.6.18/test_release_5618.py"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
