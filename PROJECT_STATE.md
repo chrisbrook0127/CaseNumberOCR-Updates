@@ -1,0 +1,7 @@
+# Project state — MFCase (public, sanitized)
+Task: development standards v1.2.0 infrastructure adoption.
+State: ACTIVE until CI and review are reconciled. Infrastructure only; no app changes or new release.
+Branch: development/standards-v1.2.0; base: a7deaa9fd60916ab324105719292e651eb85b709; stable and test references in APP_BASELINE.md. Current commit: read actual branch head; never rely on a stale checkpoint.
+Completed in this milestone: inspected public repo and existing release/test scripts; verified stable/test tags; added repository instructions, ledger, state, changelog, work log and isolated validation CI adapter/workflow. Source and release workflows are intentionally preserved. CI execution status must be read from actual run; not assumed. Private checkpoints belong in authorized private storage, not this public repository.
+Next: verify commit diff, PR, Windows jobs and actual test counts; reconcile and record results. Review before any merge. No application installer, updater or release change authorized for this task. Project Sources attachment is separate and requires a verified project destination and supported write/read-back. Never place private inputs or detailed private task context here.
+Recovery: use the named branch and commit history; preserve uncommitted work; no force-push or merge without authorization. Resume first incomplete operation only; reconcile uncertain writes. User cancellation or material approval gate stops continuation.
