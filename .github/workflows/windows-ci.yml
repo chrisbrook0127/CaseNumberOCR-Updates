@@ -1,0 +1,85 @@
+name: MFCase Windows development validation (no publication)
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'tools/**'
+      - 'scripts/ci*'
+      - '.github/workflows/windows-ci.yml'
+      - 'AGENTS.md'
+      - 'APP_BASELINE.md'
+  push:
+    branches: ['development/standards-v1.2.0']
+    paths:
+      - 'scripts/ci*'
+      - '.github/workflows/windows-ci.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mfcase-dev-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  historical_checkout:
+    name: Windows historical checkout regression (not current release)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Setup and run actual checkout tests
+        shell: pwsh
+        run: |
+          ./scripts/ci.ps1 -Phase Setup -Target Legacy -Root .
+          ./scripts/ci.ps1 -Phase Test -Target Legacy -Root .
+  pinned_release_validation:
+    name: Windows ${{ matrix.target }} published baseline regression
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: Stable
+            ref: '08a640b3a1bffba03f1e4f3b1d3014734bc3d3e5'
+          - target: Candidate
+            ref: 'ba227250386578547b94ff3b2693d41402af72e0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: infra
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify immutable release source checkout
+        shell: pwsh
+        env:
+          EXPECTED_REF: ${{ matrix.ref }}
+        run: |
+          $actual = git -C source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual.Trim() -cne $env:EXPECTED_REF) { throw 'Wrong release source' }
+      - name: Stage verified source and dependencies
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./infra/scripts/ci.ps1 -Phase Setup -Target ${{ matrix.target }} -Root source
+      - name: Execute real regression tests
+        shell: pwsh
+        run: ./infra/scripts/ci.ps1 -Phase Test -Target ${{ matrix.target }} -Root source
+      - name: Exercise existing package and updater checks
+        shell: pwsh
+        run: ./infra/scripts/ci.ps1 -Phase Package -Target ${{ matrix.target }} -Root source
+      - name: Independently verify installer and updater ZIPs
+        shell: pwsh
+        run: ./infra/scripts/ci.ps1 -Phase VerifyPackage -Target ${{ matrix.target }} -Root source
